@@ -27,6 +27,7 @@ OpenClaw openclaw.json:
 
 import asyncio
 import json
+import re
 import time
 import uuid
 import logging
@@ -78,6 +79,13 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+
+class ImageGenRequest(BaseModel):
+    prompt: str
+    model: str = "gemini-browser"
+    n: Optional[int] = 1
+    size: Optional[str] = None
+    response_format: Optional[str] = "b64_json"  # "b64_json" | "url" (data: URL)
 
 # ---------------------------------------------------------------------------
 # Browser state — one persistent instance, one request at a time
@@ -137,7 +145,8 @@ async def get_response_text(page) -> str:
                 const SKIP = new Set([
                     'script','style','button','svg','path','img','picture',
                     'source','nav','header','footer','aside','dialog',
-                    'mat-icon','iron-icon','tp-yt-paper-tooltip'
+                    'mat-icon','iron-icon','tp-yt-paper-tooltip',
+                    'thinking-overlay','model-thoughts'  // Gemini's "thinking" summary
                 ]);
                 function collectText(root) {
                     if (!root) return '';
@@ -150,6 +159,9 @@ async def get_response_text(page) -> str:
                             if (SKIP.has(tag)) continue;
                             // skip aria-hidden UI chrome
                             if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') continue;
+                            // skip screen-reader-only nodes (e.g. the "Gemini said" h2)
+                            const cls = (node.getAttribute && node.getAttribute('class')) || '';
+                            if (/cdk-visually-hidden|screen-reader/.test(cls)) continue;
                             if (node.shadowRoot) {
                                 out += collectText(node.shadowRoot);
                             } else {
@@ -185,6 +197,96 @@ async def is_generating(page) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Generated-image helpers
+# ---------------------------------------------------------------------------
+# Status of AI-generated images in the last response: how many have rendered
+# (loaded), how many are still blank (pending), and whether the "Creating your
+# image…" placeholder text is showing.
+_IMG_STATUS_JS = """
+(function(){
+  function deep(root,sel,out){if(!root)return;root.querySelectorAll(sel).forEach(e=>out.push(e));root.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)deep(e.shadowRoot,sel,out);});}
+  const rs=[];deep(document,'model-response',rs);
+  const last=rs[rs.length-1];
+  if(!last) return JSON.stringify({loaded:0,pending:0,creating:false});
+  const root=last.shadowRoot||last;
+  const imgs=[];deep(root,'img',imgs);
+  let loaded=0,pending=0;
+  imgs.forEach(im=>{const ai=(im.alt||'').toLowerCase().includes('generated');if(!ai)return;if(im.naturalWidth>64)loaded++;else pending++;});
+  const txt=(last.innerText||last.textContent||'');
+  const creating=/creating your image|generating image|creating image/i.test(txt);
+  return JSON.stringify({loaded:loaded,pending:pending,creating:creating});
+})()
+"""
+
+# Read each rendered AI image (a blob: URL) into base64 from inside the page —
+# blob: URLs can't be fetched over HTTP from outside the browser.
+_GET_IMAGES_JS = """
+(async function(){
+  function deep(root,sel,out){if(!root)return;root.querySelectorAll(sel).forEach(e=>out.push(e));root.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)deep(e.shadowRoot,sel,out);});}
+  const rs=[];deep(document,'model-response',rs);
+  const last=rs[rs.length-1]; if(!last) return '[]';
+  const root=last.shadowRoot||last;
+  const imgs=[];deep(root,'img',imgs);
+  const seen=new Set(); const out=[];
+  for(const im of imgs){
+    const ai=(im.alt||'').toLowerCase().includes('generated');
+    if(!ai||im.naturalWidth<=64) continue;
+    const src=im.currentSrc||im.src; if(!src||seen.has(src)) continue; seen.add(src);
+    try{
+      const r=await fetch(src); const b=await r.blob(); const buf=await b.arrayBuffer();
+      const by=new Uint8Array(buf); let s=''; const CH=0x8000;
+      for(let i=0;i<by.length;i+=CH){ s+=String.fromCharCode.apply(null, by.subarray(i,i+CH)); }
+      out.push({mime:b.type||'image/jpeg', b64:btoa(s), alt:(im.alt||'').replace(/^[,\\s]+/,'').trim()});
+    }catch(e){ /* skip unreadable image */ }
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+_PLACEHOLDER_RE = re.compile(r'^(creating|generating)\b', re.I)
+
+
+def _is_placeholder(text: str) -> bool:
+    """True for the transient 'Creating your image…' loading text."""
+    return bool(text) and bool(_PLACEHOLDER_RE.match(text.strip()))
+
+
+async def _image_status(page) -> dict:
+    try:
+        raw = await page.evaluate(_IMG_STATUS_JS)
+        if isinstance(raw, str):
+            return json.loads(raw)
+    except Exception:
+        pass
+    return {"loaded": 0, "pending": 0, "creating": False}
+
+
+async def _get_images(page) -> list[dict]:
+    """Return [{mime, b64, alt}] for AI-generated images in the last response."""
+    try:
+        raw = await page.evaluate(_GET_IMAGES_JS, await_promise=True, return_by_value=True)
+        if isinstance(raw, str):
+            return [d for d in json.loads(raw) if d.get("b64")]
+    except Exception as e:
+        logger.warning(f"image extraction failed: {e}")
+    return []
+
+
+def _img_markdown(im: dict) -> str:
+    alt = im.get("alt") or "generated image"
+    return f"\n\n![{alt}](data:{im['mime']};base64,{im['b64']})"
+
+
+def _compose(text: str, imgs: list[dict]) -> str:
+    """Build chat message content. When images were generated we return just the
+    image markdown — Gemini's accompanying text for image prompts is internal
+    'thinking' chrome, not a caption. Plain text otherwise."""
+    if imgs:
+        return "".join(_img_markdown(im) for im in imgs).strip()
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Core: send prompt → return full response text
 # ---------------------------------------------------------------------------
 def _build_prompt(messages: list[Message]) -> str:
@@ -210,14 +312,8 @@ def _build_prompt(messages: list[Message]) -> str:
     return "\n\n".join(parts)
 
 
-async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
-    """
-    Open a fresh Gemini chat, send the prompt, and yield text chunks
-    as they arrive. Yields the full delta on each poll tick.
-    """
-    prompt = _build_prompt(messages)
-    browser = await get_browser()
-
+async def _open_and_send(browser, prompt: str):
+    """Open a fresh Gemini chat, type the prompt, and submit. Returns (page, monitor)."""
     page = await browser.get("https://gemini.google.com/app")
     monitor = StreamMonitor()
     monitor.attach(page)
@@ -225,13 +321,11 @@ async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
     logger.info("Waiting for Gemini to load...")
     await asyncio.sleep(6)
 
-    # Find input
     input_selector = 'div[contenteditable="true"]'
     input_box = await page.select(input_selector, timeout=20)
     if not input_box:
         raise RuntimeError("Gemini input box not found.")
 
-    # Type prompt
     logger.info(f"Sending prompt ({len(prompt)} chars)...")
     await input_box.send_keys(prompt)
     await page.evaluate(f"""
@@ -240,23 +334,38 @@ async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
     """)
     await asyncio.sleep(1.2)
 
-    # Submit
     try:
         btn = await page.select('button[aria-label="Send message"]', timeout=5)
         await btn.click()
     except Exception:
         await input_box.send_keys("\n")
 
-    # Stream chunks
+    return page, monitor
+
+
+async def _stream_completion(page, monitor) -> AsyncGenerator[str, None]:
+    """
+    Poll the response, yielding text deltas as they grow; return when complete.
+
+    Image-aware: while Gemini is generating an image it shows a "Creating your
+    image…" placeholder and the text stream closes early. We suppress that
+    placeholder and keep waiting until the <img> actually renders, instead of
+    returning the loading text as the answer.
+    """
     last_len = 0
     last_change = time.monotonic()
     cdp_fired_at: float | None = None
-    deadline = time.monotonic() + 240
+    deadline = time.monotonic() + 300  # image generation can be slow
 
     while time.monotonic() < deadline:
         await asyncio.sleep(0.8)
 
-        text = await get_response_text(page)
+        raw = await get_response_text(page)
+        img = await _image_status(page)
+        img_pending = img["creating"] or img["pending"] > 0
+        # Never stream the "Creating your image…" placeholder or the thinking
+        # text shown while an image is rendering.
+        text = "" if (_is_placeholder(raw) or img_pending) else raw
         now = time.monotonic()
 
         if len(text) > last_len:
@@ -272,16 +381,57 @@ async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
         still_gen = await is_generating(page)
         silent = now - last_change
 
-        logger.debug(f"poll: text={last_len} silent={silent:.1f}s cdp={'yes' if cdp_fired_at else 'no'} gen={still_gen}")
+        logger.debug(
+            f"poll: text={last_len} silent={silent:.1f}s "
+            f"cdp={'y' if cdp_fired_at else 'n'} gen={still_gen} img={img}"
+        )
 
-        if cdp_fired_at and silent >= 5.0 and not still_gen and last_len > 0:
-            logger.info(f"Done (CDP). {last_len} chars")
-            break
-        if not still_gen and last_len > 50 and silent >= 10.0:
-            logger.info(f"Done (DOM fallback). {last_len} chars")
-            break
+        if still_gen:
+            continue
+
+        # An image finished rendering.
+        if img["loaded"] > 0 and not img_pending and silent >= 2.5:
+            logger.info(f"Done (image). {img['loaded']} image(s), {last_len} text chars")
+            return
+
+        # Text-only completion — only when no image is in flight.
+        if not img_pending and img["loaded"] == 0:
+            if cdp_fired_at and silent >= 5.0 and last_len > 0:
+                logger.info(f"Done (CDP). {last_len} chars")
+                return
+            if last_len > 50 and silent >= 10.0:
+                logger.info(f"Done (DOM fallback). {last_len} chars")
+                return
+        # else: an image is still on its way — keep waiting until it renders.
+
+    logger.warning("completion deadline reached")
+
+
+async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
+    """Open Gemini, send the prompt, stream text deltas, then append any
+    generated images as markdown data-URLs."""
+    prompt = _build_prompt(messages)
+    browser = await get_browser()
+    page, monitor = await _open_and_send(browser, prompt)
+
+    async for delta in _stream_completion(page, monitor):
+        yield delta
+
+    for im in await _get_images(page):
+        logger.info(f"attaching image ({im['mime']}, {len(im['b64'])} b64 chars)")
+        yield _img_markdown(im)
 
     # Leave the tab open — closing or navigating away disrupts the browser
+
+
+async def drive_once(prompt: str) -> tuple[str, list[dict]]:
+    """Non-streaming drive used by the images endpoint: returns (text, images)."""
+    browser = await get_browser()
+    page, monitor = await _open_and_send(browser, prompt)
+    text = ""
+    async for delta in _stream_completion(page, monitor):
+        text += delta
+    return text, await _get_images(page)
 
 
 # ---------------------------------------------------------------------------
@@ -360,13 +510,12 @@ async def chat_completions(req: ChatCompletionRequest):
 
         else:
             # --- Non-streaming ---
-            full_text = ""
             try:
-                async for chunk in run_gemini(req.messages):
-                    full_text += chunk
+                text, imgs = await drive_once(_build_prompt(req.messages))
             except Exception as e:
                 logger.error(f"run_gemini failed: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=str(e))
+            full_text = _compose(text, imgs)
 
             return {
                 "id": completion_id,
@@ -387,6 +536,35 @@ async def chat_completions(req: ChatCompletionRequest):
                                    + len(full_text.split()),
                 },
             }
+
+
+@app.post("/v1/images/generations")
+async def images_generations(req: ImageGenRequest):
+    """OpenAI-compatible image generation, backed by Gemini's in-chat image tool."""
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is empty")
+
+    async with _request_lock:
+        try:
+            _text, imgs = await drive_once(req.prompt)
+        except Exception as e:
+            logger.error(f"image generation failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    if not imgs:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini did not return an image for this prompt",
+        )
+
+    data = []
+    for im in imgs:
+        if req.response_format == "url":
+            data.append({"url": f"data:{im['mime']};base64,{im['b64']}"})
+        else:
+            data.append({"b64_json": im["b64"]})
+
+    return {"created": int(time.time()), "data": data}
 
 
 # ---------------------------------------------------------------------------

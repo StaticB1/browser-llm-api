@@ -2,7 +2,7 @@
 
 Drives the **Gemini web UI** through an automated Chrome browser ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and exposes it as an **OpenAI-compatible API**. No official Google API key — it uses a logged-in Gemini web session.
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/models`).
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`).
 - **`gemini_bot.py`** — standalone single-prompt prototype (hardcoded prompt → saves the answer).
 - **`login_gemini.py`** — interactive re-auth helper (see below).
 - **`gemini-api.service`** — systemd `--user` unit to run the server in the background.
@@ -57,6 +57,22 @@ systemctl --user stop gemini-api
 DISPLAY=:1 python3 login_gemini.py   # a Chrome window opens — sign in; it auto-detects and closes
 systemctl --user start gemini-api
 ```
+
+## Image generation
+
+Gemini generates images from a natural prompt. Two ways to get them out:
+
+- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as a markdown data URL: `![AI generated](data:image/jpeg;base64,…)`. Any chat UI that renders markdown will show it. (For image prompts the reply is image-only — Gemini's accompanying text is internal "thinking", not a caption.)
+- **Images endpoint** — OpenAI-style `POST /v1/images/generations`:
+
+```bash
+curl http://localhost:8081/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a red bicycle on a beach at sunset"}'
+# -> {"created": ..., "data": [{"b64_json": "<jpeg base64>"}]}
+```
+
+`response_format` may be `b64_json` (default) or `url` (returns a `data:` URL). `n` and `size` are accepted but ignored — Gemini decides the count and dimensions. Internally the server waits for the `<img>` to finish rendering, then reads its `blob:` URL out of the page as base64 (blob URLs can't be fetched over HTTP from outside the browser).
 
 ## Caveats
 

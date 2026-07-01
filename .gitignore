@@ -6,3 +6,6 @@ gemini_profile/
 
 # Research data
 gemini_research_data.txt
+
+# Python
+__pycache__/
