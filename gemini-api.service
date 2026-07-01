@@ -1,0 +1,23 @@
+[Unit]
+Description=Gemini Browser OpenAI-compatible API server
+# Chrome needs the graphical session's display; try to start after it is up.
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/b/google_api
+# Chrome (non-headless) renders to the user's X display.
+Environment=DISPLAY=:1
+# Clear a stale profile lock left by a previous hard crash (ignore if absent).
+ExecStartPre=-/bin/rm -f /home/b/google_api/gemini_profile/SingletonLock /home/b/google_api/gemini_profile/SingletonSocket /home/b/google_api/gemini_profile/SingletonCookie
+ExecStart=/home/b/.pyenv/versions/3.12.1/bin/python3 /home/b/google_api/server.py
+# Restart on crash and if the display was not ready yet.
+Restart=always
+RestartSec=5
+# Kill the whole cgroup (server + Chrome children) on stop/restart for a clean slate.
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
