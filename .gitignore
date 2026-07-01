@@ -1,0 +1,8 @@
+# Browser profile (contains cookies, session data, etc.)
+gemini_profile/
+
+# Logs
+*.log
+
+# Research data
+gemini_research_data.txt
