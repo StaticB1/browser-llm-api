@@ -10,7 +10,7 @@ Endpoints:
   GET  /v1/models
   POST /v1/chat/completions   (streaming + non-streaming; images inline)
   POST /v1/images/generations (OpenAI-style image generation)
-  GET  /images/<file>         (saved images, see GEMINI_IMAGE_DIR)
+  GET  /images/<provider>/<file>  (saved images, per-provider subfolder of GEMINI_IMAGE_DIR)
 
 Usage:
   python server.py            # listens on 0.0.0.0:8081
@@ -69,11 +69,15 @@ logger.addHandler(_fh)
 logger.addHandler(_sh)
 
 # ---------------------------------------------------------------------------
-# Generated-image storage (shared across providers)
-#   GEMINI_IMAGE_DIR  — folder to save generated images into (created if needed)
+# Generated-image storage. Each provider's images go in its own subfolder with
+# its own filename prefix (see _persist), so e.g. ChatGPT images are no longer
+# mislabeled/saved as "gemini". IMAGE_DIR is the shared base.
+#   GEMINI_IMAGE_DIR  — base folder for saved images (created if needed).
+#                       (env name kept for back-compat; IMAGE_DIR also accepted)
 #   GEMINI_PUBLIC_URL — base URL images are served under (for the returned links)
 # ---------------------------------------------------------------------------
-IMAGE_DIR = os.environ.get("GEMINI_IMAGE_DIR", os.path.expanduser("~/Pictures/gemini"))
+IMAGE_DIR = (os.environ.get("GEMINI_IMAGE_DIR") or os.environ.get("IMAGE_DIR")
+             or os.path.expanduser("~/Pictures/browser-llm"))
 PUBLIC_URL = os.environ.get("GEMINI_PUBLIC_URL", "http://localhost:8081").rstrip("/")
 _image_dir = Path(IMAGE_DIR)
 try:
@@ -163,19 +167,31 @@ async def get_browser(provider) -> uc.Browser:
 # ---------------------------------------------------------------------------
 # Generated-image helpers (generic)
 # ---------------------------------------------------------------------------
-def _persist(im: dict) -> dict:
-    """Write an extracted image (if it has inline base64) to GEMINI_IMAGE_DIR,
-    adding 'path' and 'url'. Images that are remote-only (e.g. CORS-blocked)
-    keep their 'src' and are left untouched."""
+def _provider_slug(provider) -> str:
+    """Short filesystem-safe label for a provider ('chatgpt' / 'gemini'), used to
+    name and folder saved images so one provider's images aren't mislabeled under
+    another's (the bug: everything was foldered + prefixed 'gemini')."""
+    name = (getattr(provider, "name", "") or "provider").replace("-browser", "")
+    slug = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name).strip("_-")
+    return slug or "provider"
+
+
+def _persist(im: dict, provider) -> dict:
+    """Write an extracted image (if it has inline base64) into a per-provider
+    subfolder of IMAGE_DIR, adding 'path' and 'url'. Images that are remote-only
+    (e.g. CORS-blocked) keep their 'src' and are left untouched."""
     if not im.get("b64") or not _SAVE_ENABLED:
         return im
     try:
+        slug = _provider_slug(provider)
         ext = _EXT.get(im.get("mime", "image/jpeg"), "jpg")
-        fname = f"gemini_{int(time.time())}_{uuid.uuid4().hex[:8]}.{ext}"
-        fpath = _image_dir / fname
+        subdir = _image_dir / slug
+        subdir.mkdir(parents=True, exist_ok=True)
+        fname = f"{slug}_{int(time.time())}_{uuid.uuid4().hex[:8]}.{ext}"
+        fpath = subdir / fname
         fpath.write_bytes(base64.b64decode(im["b64"]))
         im["path"] = str(fpath)
-        im["url"] = f"{PUBLIC_URL}/images/{fname}"
+        im["url"] = f"{PUBLIC_URL}/images/{slug}/{fname}"
         logger.info(f"saved image -> {fpath}")
     except Exception as e:
         logger.warning(f"failed to save image: {e}")
@@ -301,7 +317,7 @@ async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, Non
 
     n = 0
     for im in await provider.get_images(page):
-        _persist(im)
+        _persist(im, provider)
         n += 1
         logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
         yield _img_markdown(im)
@@ -319,7 +335,7 @@ async def drive_once(provider, prompt: str) -> tuple[str, list[dict]]:
     text = ""
     async for delta in _stream_completion(provider, page, monitor):
         text += delta
-    imgs = [_persist(im) for im in await provider.get_images(page)]
+    imgs = [_persist(im, provider) for im in await provider.get_images(page)]
     if imgs:
         _note_image_gen(provider)  # count toward browser recycle
     return text, imgs

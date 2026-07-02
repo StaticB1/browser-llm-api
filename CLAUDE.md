@@ -86,7 +86,7 @@ and provider-parameterized** in `server.py`/`base.py`.
 ## Image generation
 
 - **Extraction** is per-provider (`image_status` + `get_images`). Gemini reads `blob:` URLs to base64 by shadow-piercing; ChatGPT reads `oaiusercontent`/`blob:` `<img>`s in the last assistant turn, falling back to the remote `src` URL if CORS blocks the in-page fetch.
-- **Storage** (`_persist`, generic): images with inline `b64` are written to `GEMINI_IMAGE_DIR` and served at `/images/<file>` (mounted `StaticFiles`); the returned link uses `GEMINI_PUBLIC_URL`. Remote-only images keep their `src`. If the dir isn't writable, saving is skipped (`_SAVE_ENABLED=False`).
+- **Storage** (`_persist`): images with inline `b64` are written to a **per-provider subfolder** of the base dir (`<IMAGE_DIR>/<provider>/<provider>_<ts>_<hash>.ext`, e.g. `chatgpt/…` vs `gemini/…`) and served at `/images/<provider>/<file>` (mounted `StaticFiles` serves nested dirs); the returned link uses `GEMINI_PUBLIC_URL`. The per-provider slug (`_provider_slug`) stops one provider's images from being mislabeled as another's. Remote-only images keep their `src`. If the dir isn't writable, saving is skipped (`_SAVE_ENABLED=False`).
 - **In chat**: `_compose()` returns image-only markdown when `image_text_is_caption` is False (Gemini — its image-prompt prose is internal thinking), or text + images when True (ChatGPT — real caption).
 - **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?}]}`. `n`/`size` accepted but ignored. **501** if the provider doesn't support images, **502** if it returned none.
 
@@ -95,7 +95,7 @@ and provider-parameterized** in `server.py`/`base.py`.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `DEFAULT_PROVIDER` | `gemini-browser` | Provider used when `model` is unknown/absent. |
-| `GEMINI_IMAGE_DIR` | `~/Pictures/gemini` | Where generated images are saved (shared across providers). |
+| `GEMINI_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images; each provider gets a subfolder (`chatgpt/`, `gemini/`). `IMAGE_DIR` also accepted. |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | Recycle a provider's browser after this many image gens (renderer bloats and times out otherwise). |
 

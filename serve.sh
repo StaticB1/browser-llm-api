@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
-export GEMINI_IMAGE_DIR="${GEMINI_IMAGE_DIR:-$HOME/Pictures/gemini}"
+export GEMINI_IMAGE_DIR="${GEMINI_IMAGE_DIR:-$HOME/Pictures/browser-llm}"
 export GEMINI_PUBLIC_URL="${GEMINI_PUBLIC_URL:-http://localhost:8081}"
 export DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-gemini-browser}"
 
