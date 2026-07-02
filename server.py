@@ -37,7 +37,6 @@ import asyncio
 import base64
 import json
 import os
-import re
 import time
 import uuid
 import logging
@@ -51,7 +50,10 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from providers import PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS
+from providers import (
+    PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS,
+    CompletionTracker,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -129,14 +131,6 @@ async def get_browser(provider) -> uc.Browser:
 # ---------------------------------------------------------------------------
 # Generated-image helpers (generic)
 # ---------------------------------------------------------------------------
-_PLACEHOLDER_RE = re.compile(r'^(creating|generating)\b', re.I)
-
-
-def _is_placeholder(text: str) -> bool:
-    """True for transient 'Creating your image…' loading text."""
-    return bool(text) and bool(_PLACEHOLDER_RE.match(text.strip()))
-
-
 def _persist(im: dict) -> dict:
     """Write an extracted image (if it has inline base64) to GEMINI_IMAGE_DIR,
     adding 'path' and 'url'. Images that are remote-only (e.g. CORS-blocked)
@@ -202,94 +196,65 @@ def _build_prompt(messages: list[Message]) -> str:
     return "\n\n".join(parts)
 
 
+_BASE_DEADLINE = 420.0   # base ceiling; long image gen on the free tier is slow
+_MAX_DEADLINE = 900.0    # hard cap even for an answer that keeps actively streaming
+
+
 async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, None]:
     """
     Poll the response, yielding text deltas as they grow; return when complete.
 
-    Image-aware: while a provider is generating an image it shows a loading
-    placeholder and the text stream closes early. We suppress that placeholder
-    and keep waiting until the <img> actually renders, instead of returning the
-    loading text as the answer.
+    The completion decision lives in ``CompletionTracker`` (unit-tested). This
+    loop only polls the page, feeds samples in, and yields chunks. Long answers
+    (e.g. a whole HTML page) that are *still actively streaming* extend the
+    deadline up to ``_MAX_DEADLINE`` so they aren't truncated mid-generation,
+    while a stalled request still gives up near ``_BASE_DEADLINE``.
     """
-    last_len = 0
-    last_change = time.monotonic()
-    cdp_fired_at: float | None = None
-    saw_generation = False  # True once we've seen the model actively generating
-    saw_creating = False    # True once an image was rendering / rendered
-    last_loaded = 0
-    loaded_since: float | None = None  # when the rendered-image count last changed
-    deadline = time.monotonic() + 420  # image generation can be very slow (esp. free tier)
+    tracker = CompletionTracker()
+    start = time.monotonic()
+    deadline = start + _BASE_DEADLINE
 
-    while time.monotonic() < deadline:
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            # Extend only while the answer is plainly still in flight — text
+            # still growing, or WebSocket frames still arriving (ChatGPT).
+            ws_idle = monitor.seconds_since_ws_frame(now)
+            active = (tracker.silent_for(now) < 5.0
+                      or (ws_idle is not None and ws_idle < CompletionTracker.WS_ACTIVE_WINDOW))
+            if active and deadline < start + _MAX_DEADLINE:
+                deadline = min(start + _MAX_DEADLINE, deadline + 120.0)
+            else:
+                logger.warning(
+                    f"[{provider.name}] completion deadline reached "
+                    f"({now - start:.0f}s, {tracker.text_len} chars)"
+                )
+                return
+
         await asyncio.sleep(0.8)
+        now = time.monotonic()
 
         raw = await provider.get_response_text(page)
         img = await provider.image_status(page)
-        img_pending = img["creating"] or img["pending"] > 0
-        # Never stream the loading placeholder / thinking text shown while an
-        # image is rendering.
-        text = "" if (_is_placeholder(raw) or img_pending) else raw
-        now = time.monotonic()
+        is_gen = await provider.is_generating(page)
+        cdp_done = monitor.stream_done.is_set()
 
-        if len(text) > last_len:
-            chunk = text[last_len:]
-            last_len = len(text)
-            last_change = now
+        chunk, done = tracker.feed(now, raw, is_gen, img, cdp_done=cdp_done)
+        if chunk:
             yield chunk
 
-        if monitor.stream_done.is_set() and cdp_fired_at is None:
-            cdp_fired_at = now
-            logger.info(f"[{provider.name}] CDP: stream closed. text so far={last_len}")
-
-        still_gen = await provider.is_generating(page)
-        silent = now - last_change
-
-        # Track how long the rendered-image count has been stable.
-        if img["loaded"] != last_loaded:
-            last_loaded = img["loaded"]
-            loaded_since = now
-        if img["creating"] or img["loaded"] > 0:
-            saw_creating = True  # an image was requested/is rendering
-
         logger.debug(
-            f"[{provider.name}] poll: text={last_len} silent={silent:.1f}s "
-            f"cdp={'y' if cdp_fired_at else 'n'} gen={still_gen} img={img}"
+            f"[{provider.name}] poll: text={tracker.text_len} "
+            f"silent={tracker.silent_for(now):.1f}s cdp={'y' if tracker.cdp_fired else 'n'} "
+            f"gen={is_gen} img={img}"
         )
 
-        # Image completion: an image has rendered, it's no longer "creating"
-        # (canvas/placeholder gone), and the image set has been stable a few
-        # seconds. This fires even while the stop button lingers, because
-        # ChatGPT keeps it visible while finalizing image variants.
-        if (img["loaded"] > 0 and not img["creating"]
-                and loaded_since is not None and (now - loaded_since) >= 4.0):
-            logger.info(f"[{provider.name}] Done (image). {img['loaded']} image(s), {last_len} text chars")
+        if done:
+            logger.info(
+                f"[{provider.name}] Done ({done}). {tracker.text_len} chars"
+                f"{' (CDP)' if tracker.cdp_fired else ''}"
+            )
             return
-
-        if still_gen:
-            saw_generation = True
-            continue
-
-        # Generation stopped. If an image is still rendering, keep waiting.
-        if img_pending:
-            continue
-
-        # Text completion: not generating + text settled. The "not generating"
-        # signal (stop button gone) is the reliable one — don't require a CDP
-        # network signal or a length threshold, since short replies and
-        # WebSocket-streamed providers (ChatGPT) would otherwise never complete.
-        if last_len > 0 and silent >= 2.5:
-            logger.info(f"[{provider.name}] Done. {last_len} chars{' (CDP)' if cdp_fired_at else ''}")
-            return
-        # Guard: a plain text generation happened but produced no extractable
-        # text — return rather than hang. Suppressed once an image is/was in
-        # flight, so we never bail during the canvas→<img> commit gap (the image
-        # is captured by the stability check above, or by get_images after the
-        # deadline as a backstop).
-        if last_len == 0 and saw_generation and not saw_creating and silent >= 10.0:
-            logger.warning(f"[{provider.name}] Done but no text extracted")
-            return
-
-    logger.warning(f"[{provider.name}] completion deadline reached")
 
 
 async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, None]:

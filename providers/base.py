@@ -14,6 +14,8 @@ and implement the site-specific reads (``get_response_text``, ``is_generating``,
 """
 import asyncio
 import logging
+import re
+import time
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger("gemini_server")
@@ -52,12 +54,23 @@ class StreamMonitor:
     ``stream_done`` when it finishes. ``url_fragments`` are substrings that
     identify that request (provider-specific, e.g. ``BardFrontendService`` for
     Gemini or ``backend-api/conversation`` for ChatGPT).
+
+    ``ws_fragments`` (optional) identify a *WebSocket* the provider streams over
+    (ChatGPT uses ``ws.chatgpt.com``). We can't reliably read the completion
+    marker out of multiplexed WS frames, so we don't use them as a done-signal;
+    instead we record the time of the last frame as a coarse "still streaming"
+    heartbeat, so the polling loop won't truncate a long answer that is plainly
+    still in flight.
     """
 
-    def __init__(self, url_fragments):
+    def __init__(self, url_fragments, ws_fragments=None):
         self._fragments = list(url_fragments)
+        self._ws_fragments = list(ws_fragments or [])
         self._tracked: set[str] = set()
+        self._ws_tracked: set[str] = set()
         self.stream_done = asyncio.Event()
+        self.ws_seen = False
+        self._last_ws_frame: float | None = None
 
     def attach(self, tab):
         try:
@@ -65,6 +78,9 @@ class StreamMonitor:
             tab.add_handler(cdp.network.RequestWillBeSent, self._on_request)
             tab.add_handler(cdp.network.LoadingFinished, self._on_finished)
             tab.add_handler(cdp.network.LoadingFailed, self._on_finished_err)
+            if self._ws_fragments:
+                tab.add_handler(cdp.network.WebSocketCreated, self._on_ws_created)
+                tab.add_handler(cdp.network.WebSocketFrameReceived, self._on_ws_frame)
         except Exception as e:
             logger.warning(f"CDP network monitor unavailable: {e}")
 
@@ -81,6 +97,138 @@ class StreamMonitor:
         if event.request_id in self._tracked:
             self.stream_done.set()
 
+    def _on_ws_created(self, event):
+        try:
+            if any(k in (event.url or "") for k in self._ws_fragments):
+                self._ws_tracked.add(event.request_id)
+        except Exception:
+            pass
+
+    def _on_ws_frame(self, event):
+        try:
+            if event.request_id in self._ws_tracked:
+                self.ws_seen = True
+                self._last_ws_frame = time.monotonic()
+        except Exception:
+            pass
+
+    def seconds_since_ws_frame(self, now: float | None = None) -> float | None:
+        """Seconds since the last tracked WebSocket frame, or None if none seen."""
+        if self._last_ws_frame is None:
+            return None
+        return (now if now is not None else time.monotonic()) - self._last_ws_frame
+
+
+class CompletionTracker:
+    """
+    Provider-agnostic decision logic for *when a streamed answer is complete* —
+    text and/or generated image. Extracted from the polling loop so it can be
+    unit-tested with synthetic event sequences (no browser required).
+
+    Feed it one ``(now, raw_text, is_generating, img_status)`` sample per poll;
+    it returns ``(chunk, done_reason)`` where ``chunk`` is any new text to emit
+    and ``done_reason`` is a short string (``"text"`` / ``"image"`` / ``"empty"``)
+    once the answer has settled, else ``None``.
+    """
+
+    # tuning (seconds)
+    SILENT_TEXT_DONE = 2.5          # not generating + text unchanged this long -> done
+    SILENT_EMPTY_DONE = 10.0        # generated but nothing extractable -> give up
+    IMAGE_STABLE = 4.0              # rendered-image count stable this long -> done
+    WS_ACTIVE_WINDOW = 2.0          # a WS frame within this window == still streaming
+    FALSE_CREATING_TIMEOUT = 45.0   # "creating" stuck with no image after gen ended -> ignore it
+
+    _PLACEHOLDER_RE = re.compile(r'^(creating|generating)\b', re.I)
+
+    def __init__(self):
+        self.text_len = 0
+        self.cdp_fired = False
+        self._last_change: float | None = None
+        self._saw_generation = False
+        self._saw_creating = False
+        self._last_loaded = 0
+        self._loaded_since: float | None = None
+        self._creating_since: float | None = None
+
+    def _is_placeholder(self, text: str) -> bool:
+        """True for transient 'Creating your image…' loading text."""
+        return bool(text) and bool(self._PLACEHOLDER_RE.match(text.strip()))
+
+    def silent_for(self, now: float) -> float:
+        return 0.0 if self._last_change is None else now - self._last_change
+
+    def feed(self, now, raw_text, is_generating, img, *, cdp_done=False):
+        if self._last_change is None:
+            self._last_change = now
+
+        loaded = img.get("loaded", 0)
+        creating = bool(img.get("creating"))
+        pending = img.get("pending", 0) > 0
+
+        # Track how long "creating" has been asserted with nothing rendered.
+        if creating and loaded == 0:
+            if self._creating_since is None:
+                self._creating_since = now
+        else:
+            self._creating_since = None
+
+        img_pending = creating or pending
+        # False-positive guard: if "creating" has been stuck on with no image
+        # rendered AND generation has already ended, it isn't a real image (e.g.
+        # a code/canvas editor's <canvas>). Stop suppressing text and let the
+        # normal text/empty completion fire instead of hanging to the deadline.
+        if (img_pending and not is_generating and loaded == 0
+                and self._creating_since is not None
+                and (now - self._creating_since) >= self.FALSE_CREATING_TIMEOUT):
+            img_pending = False
+            self._saw_creating = False  # so a genuinely empty answer can complete
+
+        # Never surface the loading placeholder / thinking text shown while an
+        # image is (really) rendering.
+        text = "" if (self._is_placeholder(raw_text) or img_pending) else raw_text
+
+        chunk = ""
+        if len(text) > self.text_len:
+            chunk = text[self.text_len:]
+            self.text_len = len(text)
+            self._last_change = now
+
+        if cdp_done:
+            self.cdp_fired = True
+
+        if loaded != self._last_loaded:
+            self._last_loaded = loaded
+            self._loaded_since = now
+        if creating or loaded > 0:
+            self._saw_creating = True
+
+        # Image completion: an image rendered, it's no longer "creating", and the
+        # set has been stable a few seconds (fires even if a stop button lingers).
+        if (loaded > 0 and not creating and self._loaded_since is not None
+                and (now - self._loaded_since) >= self.IMAGE_STABLE):
+            return chunk, "image"
+
+        if is_generating:
+            self._saw_generation = True
+            return chunk, None
+
+        # Generation stopped. If an image is still rendering, keep waiting.
+        if img_pending:
+            return chunk, None
+
+        silent = now - self._last_change
+        # Text completion: settled + not generating. Don't require a CDP signal
+        # or a length floor — short replies and WebSocket-streamed providers
+        # (ChatGPT) never fire the HTTP stream signal.
+        if self.text_len > 0 and silent >= self.SILENT_TEXT_DONE:
+            return chunk, "text"
+        # Guard: generation happened but produced no extractable text — return
+        # rather than hang. Suppressed once an image was in flight.
+        if (self.text_len == 0 and self._saw_generation and not self._saw_creating
+                and silent >= self.SILENT_EMPTY_DONE):
+            return chunk, "empty"
+        return chunk, None
+
 
 class Provider(ABC):
     # --- declarative config (override per provider) ---
@@ -88,6 +236,9 @@ class Provider(ABC):
     chat_url: str = ""
     profile_dir: str = ""
     stream_url_fragments: list = []
+    # WebSocket URL substrings the provider streams over (used only as a
+    # "still streaming" heartbeat, not a completion signal). Empty = none.
+    ws_url_fragments: list = []
     supports_images: bool = False
     # (cookie_name, domain_substring) that definitively proves a signed-in
     # session, if the site has one. login.py waits for this cookie to be
@@ -104,7 +255,7 @@ class Provider(ABC):
     load_wait: float = 6.0  # seconds to let the page settle before typing
 
     def new_monitor(self) -> StreamMonitor:
-        return StreamMonitor(self.stream_url_fragments)
+        return StreamMonitor(self.stream_url_fragments, self.ws_url_fragments)
 
     async def open_and_send(self, browser, prompt: str):
         """Open a fresh chat, type the prompt, submit. Returns (page, monitor).

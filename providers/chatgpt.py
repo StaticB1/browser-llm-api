@@ -39,12 +39,19 @@ _IMG_STATUS_JS = """
     if(im.naturalWidth>256) loaded++; else pending++;
   });
   // Detect the image-generation progress state. GPT-image renders on a <canvas>
-  // (a dotted-grid "One last tweak…" tile) before committing the final <img>;
-  // the canvas disappears once done, so treating it as "creating" is safe.
+  // (a dotted-grid "One last tweak…" tile) before committing the final <img>.
+  // Only a LARGE, image-shaped canvas counts: ChatGPT's code/Canvas editors
+  // (Monaco/CodeMirror) also use <canvas> for their minimap/gutter, but those
+  // are narrow — treating them as "generating" suppressed text and hung the
+  // request for big code answers. The image-render canvas is >=256px both ways.
   const main=(document.querySelector('main')||document.body);
   const txt=(main && main.innerText || '').toLowerCase();
-  const canvas=!!(main && main.querySelector('canvas'));
-  const creating=canvas || /creating image|generating image|making the image|creating the image|creating your image|one last tweak/i.test(txt);
+  let bigCanvas=false;
+  if(main){ for(const c of main.querySelectorAll('canvas')){
+    const w=c.clientWidth||c.width||0, h=c.clientHeight||c.height||0;
+    if(Math.min(w,h)>=256){ bigCanvas=true; break; }
+  }}
+  const creating=bigCanvas || /creating image|generating image|making the image|creating the image|creating your image|one last tweak/i.test(txt);
   return JSON.stringify({loaded:loaded,pending:pending,creating:creating});
 })()
 """
@@ -84,6 +91,11 @@ class ChatGPTProvider(Provider):
     chat_url = "https://chatgpt.com/"
     profile_dir = "./chatgpt_profile"
     stream_url_fragments = ["backend-api/conversation", "/f/conversation"]
+    # ChatGPT streams tokens over a WebSocket (ws.chatgpt.com), so the HTTP
+    # stream-done signal never fires. We can't read completion out of the
+    # multiplexed frames, but their arrival is a "still streaming" heartbeat that
+    # keeps the deadline from truncating a long answer mid-generation.
+    ws_url_fragments = ["chatgpt.com"]
     supports_images = True
     # The chatgpt.com app session cookie — its presence is the definitive
     # signed-in signal (set only after the OAuth callback fully completes).
@@ -104,10 +116,33 @@ class ChatGPTProvider(Provider):
             result = await page.evaluate("""
                 (function(){
                     const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-                    if(!msgs.length) return '';
-                    const last = msgs[msgs.length-1];
-                    const md = last.querySelector('.markdown') || last.querySelector('.prose') || last;
-                    return (md.innerText || md.textContent || '').trim();
+                    let msg = '';
+                    if(msgs.length){
+                        const last = msgs[msgs.length-1];
+                        const md = last.querySelector('.markdown') || last.querySelector('.prose') || last;
+                        msg = (md.innerText || md.textContent || '').trim();
+                    }
+                    // When ChatGPT routes a big code/doc answer into its Canvas
+                    // side-panel, the message body stays near-empty. Only then do
+                    // we best-effort read the canvas editor (CodeMirror / Monaco /
+                    // a ProseMirror doc that isn't the composer). Virtualized
+                    // editors keep only visible lines in the DOM, so this can be
+                    // partial for very long docs. Best-guess selectors — verify
+                    // against a live session if canvas answers look wrong.
+                    if(msg.length >= 40) return msg;
+                    const composer = document.querySelector('#prompt-textarea');
+                    const isComposer = el => composer && (el === composer || el.contains(composer)
+                        || composer.contains(el) || el.id === 'prompt-textarea');
+                    let canvasTxt = '';
+                    const consider = el => {
+                        if(!el || isComposer(el)) return;
+                        const t = (el.innerText || el.textContent || '').trim();
+                        if(t.length > canvasTxt.length) canvasTxt = t;
+                    };
+                    document.querySelectorAll('.cm-content').forEach(consider);
+                    document.querySelectorAll('.monaco-editor .view-lines').forEach(consider);
+                    document.querySelectorAll('.ProseMirror').forEach(consider);
+                    return canvasTxt.length > msg.length ? canvasTxt : msg;
                 })()
             """)
             return result if isinstance(result, str) else ""

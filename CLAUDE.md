@@ -30,7 +30,8 @@ server.py            # FastAPI app, port 8081. Model→provider router, the gene
                      #   completion loop, generic image persistence, CDP patch.
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
-  base.py            # Provider ABC, generic StreamMonitor, generic open_and_send(), patch_cdp()
+  base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
+                     #   generic open_and_send(), patch_cdp()
   gemini.py          # GeminiProvider — shadow-DOM extraction, blob→b64 images
   chatgpt.py         # ChatGPTProvider — plain-DOM extraction, oaiusercontent/blob images
 login.py             # generic re-auth helper:  python login.py gemini|chatgpt
@@ -66,7 +67,8 @@ completion signal), `supports_images`, `image_text_is_caption`, `input_selector`
 - `logged_in(page) -> bool` — used by `login.py`.
 
 Everything downstream (`_stream_completion`, `run_chat`, `drive_once`, image persistence, the
-`StreamMonitor`) is **generic and provider-parameterized** in `server.py`/`base.py`.
+`StreamMonitor`, and the `CompletionTracker` that decides *when an answer is done*) is **generic
+and provider-parameterized** in `server.py`/`base.py`.
 
 ## How a request flows (`server.py`)
 
@@ -76,7 +78,7 @@ Everything downstream (`_stream_completion`, `run_chat`, `drive_once`, image per
 4. `_build_prompt()` flattens the OpenAI `messages` array (system → `[Context/Instructions: …]` preamble; multi-turn → `User:`/`Assistant:` labels).
 5. `provider.open_and_send()` opens the chat, types, submits.
 6. `_stream_completion()` polls, yielding text deltas from `provider.get_response_text()`. It **suppresses** the "Creating your image…" placeholder / thinking text while `image_status` reports an image pending, and keeps waiting until the `<img>` renders.
-7. **Completion**: dual-signal — the `StreamMonitor` sees the provider's stream request finish (`stream_url_fragments`), with a DOM-stability fallback (text unchanged + no "stop" button). Hard ceiling 300s. Then `provider.get_images()` runs and images are `_persist()`ed + appended.
+7. **Completion**: the `CompletionTracker` (in `base.py`, unit-testable without a browser) is fed one poll sample at a time and decides done via: image-stability (an `<img>` rendered and stable ≥4s), or text settled (text unchanged ≥2.5s while not generating), or a give-up guard (generation happened but no text). The `StreamMonitor`'s HTTP `stream_url_fragments` signal (`cdp_fired_at`) is informational only. Deadline is progress-aware: base 420s, **extended up to 900s while the answer is still actively streaming** (text still growing or WebSocket frames still arriving), so long code/HTML answers aren't truncated. Then `provider.get_images()` runs and images are `_persist()`ed + appended.
 8. The tab is **left open on purpose** — closing/navigating away destabilizes the browser.
 
 ## Image generation
@@ -144,7 +146,18 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   (only appears after typing — the composer shows a Voice button at rest); response text in the last
   `[data-message-author-role="assistant"] .markdown`; generation state = `[data-testid="stop-button"]`.
   ChatGPT **streams over WebSocket** (`ws.chatgpt.com`), so the HTTP CDP stream signal never fires —
-  completion relies on `is_generating` going false + image-stability, NOT on `cdp_fired_at`.
+  completion relies on `is_generating` going false + image-stability, NOT on `cdp_fired_at`. WS frames
+  are tracked (`ws_url_fragments`) only as a "still streaming" heartbeat that extends the deadline for
+  long answers; they are **not** parsed for a done-signal.
+- **ChatGPT big-text / "canvas" hang (fixed):** `image_status`'s "creating" flag counted *any* `<canvas>`
+  on the page as image generation. ChatGPT's code/Canvas editors (Monaco/CodeMirror) draw on `<canvas>`,
+  so long code/HTML answers were mis-read as "image pending" → text suppressed + loop rode the full
+  deadline → 7-min hang returning nothing. Fix: only a **large, image-shaped** canvas (min side ≥256px)
+  counts (image-render canvas is 512–1024px; editor minimap/gutter canvases are narrow). Belt-and-suspenders
+  in `CompletionTracker`: if "creating" stays set with no image after generation ends, it's treated as a
+  false positive after 45s. `get_response_text` also falls back to reading the Canvas side-panel editor
+  (`.cm-content` / Monaco `.view-lines` / a non-composer `.ProseMirror`) when the message body is near-empty
+  — best-guess selectors, verify live if canvas answers look wrong.
   A generated image is an `<img src="…/backend-api/estuary/content?id=file_…" alt="Generated image: …">`
   (same-origin → fetchable to base64), NOT `oaiusercontent`/`blob:`. The finished image is *not* inside
   a `data-message-author-role` element, so `image_status`/`get_images` scan the whole page.
