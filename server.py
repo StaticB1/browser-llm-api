@@ -26,18 +26,22 @@ OpenClaw openclaw.json:
 """
 
 import asyncio
+import base64
 import json
+import os
 import re
 import time
 import uuid
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import nodriver as uc
 import nodriver.cdp.util as _cdp_util
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -52,6 +56,25 @@ _sh = logging.StreamHandler()
 _sh.setFormatter(_fmt)
 logger.addHandler(_fh)
 logger.addHandler(_sh)
+
+# ---------------------------------------------------------------------------
+# Generated-image storage
+#   GEMINI_IMAGE_DIR  — folder to save generated images into (created if needed)
+#   GEMINI_PUBLIC_URL — base URL images are served under (for the returned links)
+# ---------------------------------------------------------------------------
+IMAGE_DIR = os.environ.get("GEMINI_IMAGE_DIR", "/home/b/Pictures/gemini")
+PUBLIC_URL = os.environ.get("GEMINI_PUBLIC_URL", "http://localhost:8081").rstrip("/")
+_image_dir = Path(IMAGE_DIR)
+try:
+    _image_dir.mkdir(parents=True, exist_ok=True)
+    _SAVE_ENABLED = True
+    logger.info(f"Saving generated images to {_image_dir}")
+except Exception as e:
+    _SAVE_ENABLED = False
+    logger.warning(f"Image dir {_image_dir} unavailable ({e}); images will not be saved to disk")
+
+_EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+        "image/webp": "webp", "image/gif": "gif"}
 
 # ---------------------------------------------------------------------------
 # CDP patch — suppress DOM.adoptedStyleSheetsModified KeyError
@@ -272,9 +295,28 @@ async def _get_images(page) -> list[dict]:
     return []
 
 
+def _persist(im: dict) -> dict:
+    """Write an extracted image to GEMINI_IMAGE_DIR, adding 'path' and 'url'."""
+    if not _SAVE_ENABLED:
+        return im
+    try:
+        ext = _EXT.get(im.get("mime", "image/jpeg"), "jpg")
+        fname = f"gemini_{int(time.time())}_{uuid.uuid4().hex[:8]}.{ext}"
+        fpath = _image_dir / fname
+        fpath.write_bytes(base64.b64decode(im["b64"]))
+        im["path"] = str(fpath)
+        im["url"] = f"{PUBLIC_URL}/images/{fname}"
+        logger.info(f"saved image -> {fpath}")
+    except Exception as e:
+        logger.warning(f"failed to save image: {e}")
+    return im
+
+
 def _img_markdown(im: dict) -> str:
     alt = im.get("alt") or "generated image"
-    return f"\n\n![{alt}](data:{im['mime']};base64,{im['b64']})"
+    # Prefer the served URL (small); fall back to an inline data URL.
+    src = im.get("url") or f"data:{im['mime']};base64,{im['b64']}"
+    return f"\n\n![{alt}]({src})"
 
 
 def _compose(text: str, imgs: list[dict]) -> str:
@@ -418,6 +460,7 @@ async def run_gemini(messages: list[Message]) -> AsyncGenerator[str, None]:
         yield delta
 
     for im in await _get_images(page):
+        _persist(im)
         logger.info(f"attaching image ({im['mime']}, {len(im['b64'])} b64 chars)")
         yield _img_markdown(im)
 
@@ -431,7 +474,8 @@ async def drive_once(prompt: str) -> tuple[str, list[dict]]:
     text = ""
     async for delta in _stream_completion(page, monitor):
         text += delta
-    return text, await _get_images(page)
+    imgs = [_persist(im) for im in await _get_images(page)]
+    return text, imgs
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +492,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gemini Browser API", lifespan=lifespan)
+
+# Serve saved images so responses can return real links (GEMINI_IMAGE_DIR).
+if _SAVE_ENABLED:
+    app.mount("/images", StaticFiles(directory=str(_image_dir)), name="images")
 
 
 @app.get("/v1/models")
@@ -559,10 +607,14 @@ async def images_generations(req: ImageGenRequest):
 
     data = []
     for im in imgs:
-        if req.response_format == "url":
-            data.append({"url": f"data:{im['mime']};base64,{im['b64']}"})
-        else:
-            data.append({"b64_json": im["b64"]})
+        entry = {"b64_json": im["b64"]}
+        if im.get("url"):
+            entry["url"] = im["url"]
+        elif req.response_format == "url":
+            entry["url"] = f"data:{im['mime']};base64,{im['b64']}"  # not saved to disk
+        if im.get("path"):
+            entry["path"] = im["path"]
+        data.append(entry)
 
     return {"created": int(time.time()), "data": data}
 

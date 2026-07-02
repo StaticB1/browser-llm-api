@@ -6,6 +6,10 @@ Description=Gemini Browser OpenAI-compatible API server
 [Service]
 Type=simple
 WorkingDirectory=/home/b/google_api
+# Where generated images are saved (change this to set your storage path).
+Environment=GEMINI_IMAGE_DIR=/home/b/Pictures/gemini
+# Base URL the saved images are served under (used in returned links).
+Environment=GEMINI_PUBLIC_URL=http://localhost:8081
 # Clear a stale profile lock left by a previous hard crash (ignore if absent).
 ExecStartPre=-/bin/rm -f /home/b/google_api/gemini_profile/SingletonLock /home/b/google_api/gemini_profile/SingletonSocket /home/b/google_api/gemini_profile/SingletonCookie
 # xvfb-run gives Chrome an invisible virtual display (auto-picked server number).

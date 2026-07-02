@@ -60,19 +60,25 @@ systemctl --user start gemini-api
 
 ## Image generation
 
-Gemini generates images from a natural prompt. Two ways to get them out:
+Gemini generates images from a natural prompt. Every generated image is saved to disk **and** served over HTTP, so you get a file and a link.
 
-- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as a markdown data URL: `![AI generated](data:image/jpeg;base64,…)`. Any chat UI that renders markdown will show it. (For image prompts the reply is image-only — Gemini's accompanying text is internal "thinking", not a caption.)
+**Storage path** — set `GEMINI_IMAGE_DIR` in the service unit (`Environment=GEMINI_IMAGE_DIR=…`); default `/home/b/Pictures/gemini`. The folder is created on startup and mounted at `/images/<file>`. `GEMINI_PUBLIC_URL` (default `http://localhost:8081`) is the base used to build the returned links — change it if you reach the server from another host. If the folder isn't writable, saving is skipped and it falls back to inline base64 / `data:` URLs.
+
+- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![AI generated](http://localhost:8081/images/gemini_….jpg)`. (Image prompts reply image-only — Gemini's accompanying text is internal "thinking", not a caption.)
 - **Images endpoint** — OpenAI-style `POST /v1/images/generations`:
 
 ```bash
 curl http://localhost:8081/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a red bicycle on a beach at sunset"}'
-# -> {"created": ..., "data": [{"b64_json": "<jpeg base64>"}]}
+# -> {"created": ..., "data": [{
+#      "b64_json": "<jpeg base64>",
+#      "url":  "http://localhost:8081/images/gemini_….jpg",
+#      "path": "/home/b/Pictures/gemini/gemini_….jpg"
+#    }]}
 ```
 
-`response_format` may be `b64_json` (default) or `url` (returns a `data:` URL). `n` and `size` are accepted but ignored — Gemini decides the count and dimensions. Internally the server waits for the `<img>` to finish rendering, then reads its `blob:` URL out of the page as base64 (blob URLs can't be fetched over HTTP from outside the browser).
+`n` and `size` are accepted but ignored — Gemini decides the count and dimensions. Internally the server waits for the `<img>` to finish rendering, reads its `blob:` URL out of the page as base64 (blob URLs can't be fetched over HTTP from outside the browser), writes it to `GEMINI_IMAGE_DIR`, and returns base64 + URL + path.
 
 ## Caveats
 
