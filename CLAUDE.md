@@ -39,14 +39,16 @@ gen_asset.py         # CLI wrapper: POST /v1/images/generations (no model → DE
                      #   then Pillow post-process (resize/crop/favicon/knockout) → asset file
 AGENT_IMAGE_GUIDE.md # instructions to hand an AI agent for generating site image assets
 gemini_bot.py        # standalone single-prompt prototype (Gemini only). UNCHANGED, not part of the server.
-gemini-api.service   # systemd --user unit; runs server.py under xvfb-run
+serve.sh             # run the server: venv python + display auto-detect (real $DISPLAY else Xvfb)
+install-service.sh   # venv + deps + generate the systemd --user unit from the template
+browser-llm-api.service.template  # unit template; install-service.sh substitutes the clone path
 *_profile/           # per-provider Chrome user-data dirs. Gitignored. Never commit.
 ```
 
 There is no `requirements.txt`. **Deps are installed in a local venv at `./venv`** (system Python
 is PEP-668 externally-managed, so a venv is required): `./venv/bin/pip install nodriver fastapi
-uvicorn pydantic`. Run the server as `./venv/bin/python server.py`; the systemd unit's `ExecStart`
-points at `./venv/bin/python`. Also needs Google Chrome and the system `xvfb` package. Python 3.12.
+uvicorn pydantic`. Run the server with `./serve.sh` (foreground) or `./install-service.sh` (background
+service); both use `./venv/bin/python`. Also needs Google Chrome and the system `xvfb` package. Python 3.12.
 `gen_asset.py` additionally needs **Pillow** (`./venv/bin/pip install Pillow`).
 
 ## The `Provider` abstraction (`providers/base.py`)
@@ -93,23 +95,21 @@ and provider-parameterized** in `server.py`/`base.py`.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `DEFAULT_PROVIDER` | `gemini-browser` | Provider used when `model` is unknown/absent. |
-| `GEMINI_IMAGE_DIR` | `/home/b/Pictures/gemini` | Where generated images are saved (shared across providers). |
+| `GEMINI_IMAGE_DIR` | `~/Pictures/gemini` | Where generated images are saved (shared across providers). |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
 
 ## Running
 
 ```bash
-./venv/bin/python server.py                    # foreground → http://localhost:8081/v1
+./serve.sh                                     # foreground → http://localhost:8081/v1
 
-# background (systemd --user), renders to a virtual Xvfb display — no monitor needed.
-# Fine for ChatGPT/Gemini TEXT and Gemini images; NOT for ChatGPT image gen (needs a GPU display):
-cp gemini-api.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now gemini-api.service
-journalctl --user -u gemini-api -f             # logs live in the journal, NOT server.log
+# background (systemd --user): venv + generated unit + linger, one command:
+./install-service.sh
+journalctl --user -u browser-llm-api -f        # logs live in the journal, NOT server.log
 
-# For ChatGPT IMAGE generation, run on a real (GPU) display instead of Xvfb:
-DISPLAY=:1 ./venv/bin/python server.py
+# serve.sh auto-detects the display: real $DISPLAY (ChatGPT images work) else headless Xvfb.
+# On a headless box, force a real display for ChatGPT image gen:
+DISPLAY=:1 ./serve.sh
 ```
 
 ## Authentication — the #1 failure mode
@@ -118,9 +118,9 @@ DISPLAY=:1 ./venv/bin/python server.py
 human" wall ⇒ that provider's session expired. Re-auth on a real display:
 
 ```bash
-systemctl --user stop gemini-api
-DISPLAY=:1 python3 login.py gemini      # or: chatgpt — visible Chrome opens; sign in; auto-closes
-systemctl --user start gemini-api
+systemctl --user stop browser-llm-api
+DISPLAY=:1 ./venv/bin/python login.py gemini   # or: chatgpt — visible Chrome opens; sign in; auto-closes
+systemctl --user start browser-llm-api
 ```
 
 **Why you must use `login.py`, not a normal Chrome:** `nodriver` launches Chrome with
@@ -164,10 +164,11 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 - **ChatGPT session cookie is chunked**: `__Secure-next-auth.session-token.0` / `.1` (no un-suffixed
   name). `login.py` prefix-matches it and waits for it (not the DOM) before closing, so the session
   actually persists. Gemini's path is behaviorally unchanged from the original.
-- **`gemini-api.service` and image-dir defaults are hardcoded** — `WorkingDirectory`, `ExecStart`,
-  `ExecStartPre`/`ExecStopPost`, and `GEMINI_IMAGE_DIR` are set for `/home/eben/Downloads/google_api`;
-  `ExecStart` uses `/usr/bin/python3.12` (repoint to a venv if you install deps there). Running
-  `server.py` by hand still needs `GEMINI_IMAGE_DIR` set to a writable path or image saving silently disables.
+- **Service unit is generated, not committed** — `install-service.sh` fills
+  `browser-llm-api.service.template` (`__INSTALL_DIR__` → the clone path) into
+  `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `serve.sh` (venv python +
+  display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/gemini`
+  (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
 - **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; the systemd unit clears
   both profiles' locks in `ExecStartPre`. Running by hand? delete `*_profile/Singleton*`.

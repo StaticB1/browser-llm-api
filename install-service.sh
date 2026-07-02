@@ -1,18 +1,38 @@
 #!/usr/bin/env bash
-# Install + start the always-on background service (systemd --user).
-# After this, the API is up at http://localhost:8081 and auto-restarts /
-# auto-starts with your graphical session.
+# Portable installer: set up a venv, install deps, and register an always-on
+# systemd --user service that runs THIS clone (no hardcoded paths — the unit is
+# generated from the template with the real install directory).
+#
+# After this the API is at http://localhost:8081 and auto-starts / auto-restarts
+# (survives logout via linger).
 set -euo pipefail
-cd "$(dirname "$(readlink -f "$0")")"
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd "$DIR"
 
+# 1) venv + dependencies
+if [ ! -x venv/bin/python ]; then
+  echo "[install] creating venv…"
+  python3 -m venv venv
+fi
+echo "[install] installing dependencies…"
+./venv/bin/pip install -q --upgrade pip
+./venv/bin/pip install -q nodriver fastapi uvicorn pydantic pillow
+
+# 2) generate the systemd --user unit for THIS machine/clone
 mkdir -p ~/.config/systemd/user
-cp browser-llm-api.service ~/.config/systemd/user/
+UNIT="$HOME/.config/systemd/user/browser-llm-api.service"
+sed "s#__INSTALL_DIR__#$DIR#g" browser-llm-api.service.template > "$UNIT"
+echo "[install] wrote $UNIT (WorkingDirectory=$DIR)"
+
+# 3) enable + start, and keep it running after logout
 systemctl --user daemon-reload
 systemctl --user enable --now browser-llm-api.service
+loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
 
-echo "--- status ---"
-systemctl --user --no-pager status browser-llm-api.service | head -8 || true
 echo
-echo "Logs:    journalctl --user -u browser-llm-api -f"
-echo "Stop:    systemctl --user stop browser-llm-api"
-echo "Restart: systemctl --user restart browser-llm-api"
+echo "[install] up at http://localhost:8081   (model: gemini-browser | chatgpt-browser)"
+systemctl --user --no-pager status browser-llm-api.service | head -6 || true
+echo
+echo "  logs:    journalctl --user -u browser-llm-api -f"
+echo "  restart: systemctl --user restart browser-llm-api"
+echo "  re-auth: DISPLAY=:1 ./venv/bin/python login.py gemini   # or: chatgpt"

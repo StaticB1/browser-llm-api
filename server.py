@@ -73,7 +73,7 @@ logger.addHandler(_sh)
 #   GEMINI_IMAGE_DIR  — folder to save generated images into (created if needed)
 #   GEMINI_PUBLIC_URL — base URL images are served under (for the returned links)
 # ---------------------------------------------------------------------------
-IMAGE_DIR = os.environ.get("GEMINI_IMAGE_DIR", "/home/b/Pictures/gemini")
+IMAGE_DIR = os.environ.get("GEMINI_IMAGE_DIR", os.path.expanduser("~/Pictures/gemini"))
 PUBLIC_URL = os.environ.get("GEMINI_PUBLIC_URL", "http://localhost:8081").rstrip("/")
 _image_dir = Path(IMAGE_DIR)
 try:

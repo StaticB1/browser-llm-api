@@ -55,7 +55,7 @@ key `local`, model `chatgpt-browser` or `gemini-browser`.
 
 ## Good to know
 
-- **`model`** picks the backend: `chatgpt-browser` or `gemini-browser`. Default is `chatgpt-browser`.
+- **`model`** picks the backend: `gemini-browser` or `chatgpt-browser`. Default is `gemini-browser` (override with `DEFAULT_PROVIDER`).
 - **One request at a time per provider** — calls queue, they don't run in parallel. Latency is real:
   text ~10–40s, images ~30s–4 min. Set generous client timeouts (the bundled client defaults to 440s).
 - **Empty replies?** the session expired → re-run `login.py <provider>` (see above).

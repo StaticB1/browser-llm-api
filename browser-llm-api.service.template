@@ -1,0 +1,19 @@
+[Unit]
+Description=Browser LLM API (OpenAI-compatible: Gemini + ChatGPT via browser automation)
+# Installed by install-service.sh, which replaces __INSTALL_DIR__ with the real
+# clone path. serve.sh picks the venv python and auto-detects the display.
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/serve.sh
+# nodriver detaches Chrome from the cgroup; reap survivors on stop/restart.
+ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./gemini_profile"
+ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./chatgpt_profile"
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
