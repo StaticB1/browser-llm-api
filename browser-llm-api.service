@@ -1,0 +1,20 @@
+[Unit]
+Description=Browser LLM API (OpenAI-compatible: ChatGPT + Gemini via browser automation)
+# Runs on the real X display (via serve.sh) so ChatGPT image generation works.
+# Tied to the graphical session because image gen needs a live GPU-backed display.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/eben/Downloads/google_api/serve.sh
+# Reap detached Chrome for both provider profiles on stop/restart.
+ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./chatgpt_profile"
+ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./gemini_profile"
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=graphical-session.target
