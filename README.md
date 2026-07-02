@@ -6,6 +6,8 @@ Drives the **Gemini web UI** through an automated Chrome browser ([`nodriver`](h
 - **`gemini_bot.py`** — standalone single-prompt prototype (hardcoded prompt → saves the answer).
 - **`login_gemini.py`** — interactive re-auth helper (see below).
 - **`gemini-api.service`** — systemd `--user` unit to run the server in the background.
+- **`gen_asset.py`** — CLI to generate + post-process a website image asset (resize/crop/convert/favicon/transparency).
+- **`AGENT_IMAGE_GUIDE.md`** — instructions to hand an AI coding agent so it uses this API to generate site image assets.
 
 ## How it works
 
@@ -79,6 +81,8 @@ curl http://localhost:8081/v1/images/generations \
 ```
 
 `n` and `size` are accepted but ignored — Gemini decides the count and dimensions. Internally the server waits for the `<img>` to finish rendering, reads its `blob:` URL out of the page as base64 (blob URLs can't be fetched over HTTP from outside the browser), writes it to `GEMINI_IMAGE_DIR`, and returns base64 + URL + path.
+
+**Generating website assets** — output is always a ~1024×559 opaque JPEG, so for real assets (hero images, section backgrounds, textures, avatars, favicons) use `gen_asset.py`, which generates then post-processes with Pillow (resize/crop/convert/favicon/transparency). See **`AGENT_IMAGE_GUIDE.md`** for a ready-to-hand instruction set for an AI coding agent.
 
 ## Caveats
 
