@@ -3,17 +3,19 @@ OpenAI-compatible API server backed by Gemini (browser automation).
 
 Endpoints:
   GET  /v1/models
-  POST /v1/chat/completions  (streaming + non-streaming)
+  POST /v1/chat/completions   (streaming + non-streaming; images inline)
+  POST /v1/images/generations (OpenAI-style image generation)
+  GET  /images/<file>         (saved images, see GEMINI_IMAGE_DIR)
 
 Usage:
-  python server.py
+  python server.py            # listens on 0.0.0.0:8081
 
 OpenClaw openclaw.json:
   {
     "models": {
       "providers": {
         "gemini-browser": {
-          "baseUrl": "http://localhost:8000/v1",
+          "baseUrl": "http://localhost:8081/v1",
           "apiKey": "local",
           "api": "openai-completions",
           "models": [{"id": "gemini-browser", "name": "Gemini (Browser)",
