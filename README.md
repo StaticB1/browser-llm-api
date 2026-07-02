@@ -59,6 +59,14 @@ curl http://localhost:8081/v1/chat/completions \
 ./install-service.sh
 ```
 
+**Display mode** — on a machine with a real display, toggle whether Chrome runs visibly (persists across restarts):
+
+```bash
+./mode.sh            # show current mode
+./mode.sh visible    # run on the real display — enables ChatGPT image gen (a window shows)
+./mode.sh headless   # invisible Xvfb (default) — Gemini images ok, ChatGPT images off
+```
+
 Manage it:
 
 ```bash
