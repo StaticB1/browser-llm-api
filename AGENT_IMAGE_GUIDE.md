@@ -22,8 +22,17 @@ The endpoint runs at `http://localhost:8081`.
   opaque (no transparency).** The `n`, `size`, and aspect-ratio parameters are **ignored**.
 - Therefore you **must post-process** for any other dimension, aspect ratio, square/portrait
   shape, transparency, or file format. Use `gen_asset.py` (below) — it does this for you.
-- **Latency ≈ 30 s per image, and the API handles ONE request at a time.** Generate assets
-  **sequentially, never in parallel** (parallel calls just queue and can time out).
+- **Latency: ~30–40 s per image when warm, occasionally up to ~3 min** under load. The API handles
+  **ONE request at a time** — generate assets **sequentially, never in parallel** (parallel calls
+  just queue and can time out). Use a generous timeout: `gen_asset.py` waits `--timeout` (default
+  440 s); if you call the raw API, set a **≥300 s (ideally ~450 s) client timeout** to match the
+  server's 420 s ceiling. A short client timeout is the #1 cause of "it failed" when the image
+  actually generated fine.
+- **A timed-out/502 call usually still produced the image.** The server writes the file to disk
+  (and returns its `path`) **before** the HTTP response, so on a timeout/502 check the newest file
+  in `GEMINI_IMAGE_DIR` rather than blindly retrying. Long sequential runs stay healthy — the server
+  **auto-recycles its browser every few image gens**, so you won't hit the old "slows down / times
+  out after 4–5 images" wall and never need a manual restart.
 - **Watermark:** Gemini stamps a small ✦ sparkle in the **bottom-right corner**. Square/center
   crops (`--square`) remove it; for full-bleed images either crop a little off the bottom-right
   or keep important content away from that corner.
