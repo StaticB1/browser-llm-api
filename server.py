@@ -118,10 +118,42 @@ class ImageGenRequest(BaseModel):
 _browsers: dict[str, uc.Browser] = {}
 _locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in PROVIDERS}
 
+# The persistent browser's renderer bloats after a handful of image generations
+# (heavy canvas/blobs + growing SPA DOM) and starts timing out; a fresh browser
+# resets it. Recycle a provider's browser once it has done this many image gens.
+_RECYCLE_AFTER_IMAGES = int(os.environ.get("BROWSER_RECYCLE_AFTER_IMAGES", "3"))
+_img_gen_count: dict[str, int] = {name: 0 for name in PROVIDERS}
+
+
+def _note_image_gen(provider) -> None:
+    _img_gen_count[provider.name] = _img_gen_count.get(provider.name, 0) + 1
+
 
 async def get_browser(provider) -> uc.Browser:
     b = _browsers.get(provider.name)
+
+    # Proactively recycle a browser that has generated enough images to bloat.
+    # Called at the start of each (per-provider serialized) request, so the
+    # browser is never recycled mid-response.
+    if b is not None and _img_gen_count.get(provider.name, 0) >= _RECYCLE_AFTER_IMAGES:
+        logger.info(f"[{provider.name}] recycling browser after "
+                    f"{_img_gen_count[provider.name]} image gens")
+        try:
+            b.stop()
+        except Exception as e:
+            logger.warning(f"[{provider.name}] browser stop during recycle failed: {e}")
+        _browsers.pop(provider.name, None)
+        _img_gen_count[provider.name] = 0
+        b = None
+        await asyncio.sleep(2)  # let Chrome release the profile before restart
+
     if b is None:
+        # Clear a stale singleton lock so the fresh start isn't blocked.
+        try:
+            for f in Path(provider.profile_dir).glob("Singleton*"):
+                f.unlink()
+        except Exception:
+            pass
         logger.info(f"[{provider.name}] Starting browser (profile {provider.profile_dir})...")
         b = await uc.start(user_data_dir=provider.profile_dir, browser_args=list(CHROME_ARGS))
         _browsers[provider.name] = b
@@ -267,10 +299,14 @@ async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, Non
     async for delta in _stream_completion(provider, page, monitor):
         yield delta
 
+    n = 0
     for im in await provider.get_images(page):
         _persist(im)
+        n += 1
         logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
         yield _img_markdown(im)
+    if n:
+        _note_image_gen(provider)  # count toward browser recycle
 
     # Leave the tab open — closing or navigating away disrupts the browser.
 
@@ -284,6 +320,8 @@ async def drive_once(provider, prompt: str) -> tuple[str, list[dict]]:
     async for delta in _stream_completion(provider, page, monitor):
         text += delta
     imgs = [_persist(im) for im in await provider.get_images(page)]
+    if imgs:
+        _note_image_gen(provider)  # count toward browser recycle
     return text, imgs
 
 

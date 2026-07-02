@@ -97,6 +97,7 @@ and provider-parameterized** in `server.py`/`base.py`.
 | `DEFAULT_PROVIDER` | `gemini-browser` | Provider used when `model` is unknown/absent. |
 | `GEMINI_IMAGE_DIR` | `~/Pictures/gemini` | Where generated images are saved (shared across providers). |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
+| `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | Recycle a provider's browser after this many image gens (renderer bloats and times out otherwise). |
 
 ## Running
 
