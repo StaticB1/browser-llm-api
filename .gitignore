@@ -1,5 +1,6 @@
-# Browser profile (contains cookies, session data, etc.)
+# Browser profiles (contain cookies, session data, etc.) — one per provider
 gemini_profile/
+chatgpt_profile/
 
 # Logs
 *.log
@@ -9,3 +10,5 @@ gemini_research_data.txt
 
 # Python
 __pycache__/
+venv/
+.venv/

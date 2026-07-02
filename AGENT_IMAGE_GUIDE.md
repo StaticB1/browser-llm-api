@@ -8,6 +8,12 @@ boxes, lorem-picsum links, or empty `src`s.**
 
 The endpoint runs at `http://localhost:8081`.
 
+> **Provider note:** this API is multi-provider (Gemini and ChatGPT). Image requests without a
+> `model` field (as `gen_asset.py` sends) use the server's `DEFAULT_PROVIDER`. The Gemini-specific
+> constraints below (fixed ~1024×559 output, ✦ watermark, Google-account quota) apply when the
+> default is `gemini-browser`; ChatGPT returns a larger PNG with no watermark but needs the server
+> on a GPU display. Post-processing via `gen_asset.py` is identical either way.
+
 ---
 
 ## 1. Hard constraints — read before using
@@ -30,11 +36,11 @@ The endpoint runs at `http://localhost:8081`.
 ## 2. Preferred path: `gen_asset.py`
 
 A wrapper that does **generate → resize/crop/convert/favicon → write the file**. Call it once
-per asset. (It lives at `/home/b/google_api/gen_asset.py`; copy it into the project or call by
+per asset. (It lives at `/home/eben/Downloads/google_api/gen_asset.py`; copy it into the project or call by
 absolute path. Needs Python + Pillow.)
 
 ```
-python3 /home/b/google_api/gen_asset.py --prompt "<description>" --out <path> [shaping flags]
+python3 /home/eben/Downloads/google_api/gen_asset.py --prompt "<description>" --out <path> [shaping flags]
 ```
 
 Flags:
@@ -48,6 +54,8 @@ Flags:
 | `--knockout-bg` | make a flat background transparent (png/webp/ico only; prompt a "solid <color> background") |
 | `--format` | override the inferred format |
 | `--quality N` | JPEG/WebP quality (default 88) |
+| `--model NAME` | pick the provider (`gemini-browser` / `chatgpt-browser`); default = server's `DEFAULT_PROVIDER` |
+| `--timeout SEC` | how long to wait for generation (default 440; ChatGPT can be slow) |
 
 It prints the output path on success. Verify the file (open it / check dimensions) and
 **regenerate with a refined prompt if it's off** — output is non-deterministic.
@@ -58,53 +66,53 @@ It prints the output path on success. Verify the file (open it / check dimension
 
 **Hero / full-width background** — WebP, sized to the layout, keep it uncluttered so text stays legible:
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "misty pine forest at dawn, cinematic wide shot, muted greens, soft light, lots of open sky, uncluttered" \
   --out src/assets/hero.webp --width 1920 --height 1080
 ```
 
 **Section background** — subtle, low-contrast so foreground content reads:
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "abstract soft gradient mesh, pastel blue and lavender, very subtle, minimal, blurred" \
   --out public/bg/features.webp --width 1600 --height 1000
 ```
 
 **Texture / pattern** — ask for "seamless / tileable / low contrast" (tiling is approximate):
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "seamless subtle light-grey concrete texture, uniform, low contrast, tileable" \
   --out public/textures/concrete.webp --width 1024 --height 1024
 ```
 
 **Avatar / mascot** — square PNG; prompt "centered … plain white background":
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "friendly cartoon fox mascot, flat vector, centered, plain white background" \
   --out public/avatar.png --square 256 --knockout-bg
 ```
 
 **Favicon / app icon** — simple bold mark, centered, solid background:
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "minimalist geometric mountain icon, bold, centered, solid white background, simple" \
   --out public/favicon.ico --favicon --knockout-bg
 # also emit a large PNG for apple-touch-icon / PWA:
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "minimalist geometric mountain icon, bold, centered, solid white background, simple" \
   --out public/icon-512.png --square 512 --knockout-bg
 ```
 
 **Illustration / spot image** — transparent PNG on a flat background:
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "flat illustration of a rocket launching, bright colors, plain white background" \
   --out src/assets/rocket.png --square 512 --knockout-bg
 ```
 
 **OG / social share image** — 1200×630:
 ```
-python3 /home/b/google_api/gen_asset.py \
+python3 /home/eben/Downloads/google_api/gen_asset.py \
   --prompt "modern abstract tech background, deep blue and cyan, subtle geometric shapes" \
   --out public/og-image.jpg --width 1200 --height 630
 ```
@@ -151,7 +159,7 @@ Response — use whichever field suits you (`path` is already a file on disk):
 {"created": 1782..., "data": [{
   "b64_json": "<base64 jpeg>",
   "url":  "http://localhost:8081/images/gemini_....jpg",
-  "path": "/home/b/Pictures/gemini/gemini_....jpg"
+  "path": "/home/eben/Pictures/gemini/gemini_....jpg"
 }]}
 ```
 You still have to resize/crop/convert yourself (the wrapper exists so you don't).

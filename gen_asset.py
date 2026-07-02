@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Generate a website image asset via the local Gemini image API, then post-process
-it (resize / crop / convert / favicon / knockout) into exactly what the site needs.
+Generate a website image asset via the local browser-LLM image API, then
+post-process it (resize / crop / convert / favicon / knockout) into exactly what
+the site needs.
 
-The Gemini API only ever returns ONE ~1024x559 landscape JPEG with no transparency,
-so this wraps it: generate -> Pillow post-process -> write the final asset file.
+The API returns a landscape raster with no transparency — Gemini: ~1024x559 JPEG
+(with a ✦ watermark bottom-right); ChatGPT: a larger PNG, no watermark. This wraps
+it: generate -> Pillow post-process -> write the final asset file. Use --model to
+pick the provider (default = the server's DEFAULT_PROVIDER).
 
 Examples:
   # Hero background: 1600x900 WebP, cropped to fill
@@ -24,7 +27,11 @@ Examples:
       --out public/favicon.ico --favicon --knockout-bg
 
 Constraints to respect:
-  * ~30s per image, and the API serves ONE request at a time — generate sequentially.
+  * Generation is slow and serialized per provider — generate sequentially, never
+    in parallel. Gemini ~30s; ChatGPT ~30s-4min (free tier), so --timeout defaults
+    to 440s (above the server's completion deadline).
+  * ChatGPT image generation needs the server on a real GPU display (it renders on
+    a <canvas> that stalls under headless Xvfb); Gemini works headless.
   * --width/--height crop-to-fill (cover) by default; --fit contain pads instead.
   * --knockout-bg makes a flat background transparent (best-effort; only meaningful
     for png/webp/ico output). For clean results prompt "solid <color> background".
@@ -43,18 +50,31 @@ from PIL import Image
 API = os.environ.get("GEMINI_API", "http://localhost:8081") + "/v1/images/generations"
 
 
-def generate(prompt, timeout=220):
+def generate(prompt, model=None, timeout=440):
+    payload = {"prompt": prompt}
+    if model:
+        payload["model"] = model  # else the server uses its DEFAULT_PROVIDER
     req = urllib.request.Request(
         API,
-        data=json.dumps({"prompt": prompt}).encode(),
+        data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         d = json.load(r)
-    if not d.get("data"):
-        raise SystemExit("API returned no image (prompt may have been refused)")
-    b64 = d["data"][0]["b64_json"]
-    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    data = d.get("data") or []
+    if not data:
+        raise SystemExit("API returned no image (prompt refused, or gen timed out server-side)")
+    item = data[0]  # providers may return multiple variants; use the first
+    if item.get("b64_json"):
+        raw = base64.b64decode(item["b64_json"])
+    elif item.get("url"):
+        # Fallback for providers that only return a URL (e.g. a CORS-blocked
+        # remote image); handles http(s) and data: URLs.
+        with urllib.request.urlopen(item["url"], timeout=60) as r2:
+            raw = r2.read()
+    else:
+        raise SystemExit("API response had neither b64_json nor url")
+    return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
 def resize_cover(img, w, h):
@@ -116,9 +136,13 @@ def knockout_bg(img, tol=28):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Generate a website image asset via Gemini.")
+    ap = argparse.ArgumentParser(description="Generate a website image asset via the browser-LLM image API.")
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--out", required=True, help="output file; format inferred from extension")
+    ap.add_argument("--model", help="provider, e.g. gemini-browser | chatgpt-browser "
+                    "(default = server's DEFAULT_PROVIDER)")
+    ap.add_argument("--timeout", type=int, default=440,
+                    help="seconds to wait for generation (default 440; ChatGPT can be slow)")
     ap.add_argument("--width", type=int)
     ap.add_argument("--height", type=int)
     ap.add_argument("--square", type=int, metavar="SIZE", help="center-crop to a SIZExSIZE square")
@@ -130,8 +154,8 @@ def main():
     ap.add_argument("--quality", type=int, default=88)
     args = ap.parse_args()
 
-    print(f"[gen_asset] generating: {args.prompt[:70]}…", file=sys.stderr)
-    img = generate(args.prompt)
+    print(f"[gen_asset] generating ({args.model or 'default'}): {args.prompt[:70]}…", file=sys.stderr)
+    img = generate(args.prompt, model=args.model, timeout=args.timeout)
 
     if args.square:
         img = square(img, args.square)
