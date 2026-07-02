@@ -63,6 +63,11 @@ class GeminiProvider(Provider):
     chat_url = "https://gemini.google.com/app"
     profile_dir = "./gemini_profile"
     stream_url_fragments = ["streamGenerateContent", "GenerateContent", "BardFrontendService"]
+    # Google's authenticated-session cookie — only set after full sign-in, so
+    # login.py waits for it rather than the DOM (which false-positives mid-OAuth,
+    # e.g. on the accounts.google.com sign-in page). Prefix-matches the
+    # __Secure-1PSID / __Secure-1PSIDTS / __Secure-1PSIDCC family.
+    session_cookie = ("__Secure-1PSID", "google.com")
     supports_images = True
     image_text_is_caption = False  # Gemini's image-prompt prose is "thinking" chrome
     input_selector = 'div[contenteditable="true"]'
