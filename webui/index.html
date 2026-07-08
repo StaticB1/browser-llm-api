@@ -107,6 +107,23 @@
   .grid .tag{position:absolute; left:6px; bottom:6px; font-size:10.5px; padding:2px 7px;
              border-radius:999px; background:rgba(10,12,16,.75); color:var(--text)}
 
+  /* ---- status ---- */
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px}
+  .stat{background:var(--panel2); border:1px solid var(--border); border-radius:10px; padding:10px 12px}
+  .stat .k{font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px}
+  .stat .v{font-size:19px; font-weight:650; margin-top:3px; overflow-wrap:anywhere}
+  .stat .v small{font-size:12px; color:var(--muted); font-weight:500}
+  #provcards{display:flex; flex-direction:column; gap:14px}
+  .provhd{display:flex; align-items:center; gap:9px; margin:0 0 12px}
+  .provhd .name{font-size:15px; font-weight:650}
+  .provhd .badge{font-size:11px; color:var(--muted); border:1px solid var(--border);
+                 border-radius:999px; padding:2px 9px}
+  .errline{margin-top:12px; font-size:12.5px; color:var(--err); overflow-wrap:anywhere}
+  .errline b{color:var(--err)}
+  #embedsnippet{background:#0c0e12; border:1px solid var(--border); border-radius:8px;
+                padding:10px 12px; overflow-x:auto; font-size:12.5px; margin:0 0 10px;
+                font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--text)}
+
   footer{
     display:flex; gap:14px; align-items:center; flex-wrap:wrap;
     padding:7px 18px; border-top:1px solid var(--border); background:var(--panel);
@@ -122,6 +139,7 @@
     <button data-tab="chat" class="active">Chat</button>
     <button data-tab="image">Image</button>
     <button data-tab="gallery">Gallery</button>
+    <button data-tab="status">Status</button>
   </nav>
   <div class="spacer"></div>
   <label class="hint" for="provider">provider</label>
@@ -181,9 +199,33 @@
     </div>
     <div class="grid" id="galgrid"></div>
   </section>
+
+  <!-- ============ STATUS ============ -->
+  <section class="view" id="view-status">
+    <div class="card">
+      <h2>Server</h2>
+      <div class="stats" id="srvstats"></div>
+    </div>
+    <div id="provcards"></div>
+    <div class="card">
+      <h2>Embed this chat anywhere</h2>
+      <p class="hint" style="margin:0 0 10px">
+        Paste this into any page on the LAN to add a floating chat bubble backed by this server
+        (CORS is open; no key needed). Config via <code>data-*</code> attrs — provider, title,
+        accent, position, greeting, system.
+      </p>
+      <pre id="embedsnippet"><code></code></pre>
+      <div class="rowline">
+        <button class="btn ghost" id="embedcopy">Copy snippet</button>
+        <button class="btn ghost" id="embedtry">Preview widget on this page</button>
+        <span class="hint" id="embedmsg"></span>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer>
+  <span id="ft-ver"></span>
   <span id="ft-uptime">—</span>
   <span id="ft-dir"></span>
   <span class="spacer"></span>
@@ -200,6 +242,7 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x===b));
   document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === "view-"+b.dataset.tab));
   if (b.dataset.tab === "gallery") loadGallery();
+  if (b.dataset.tab === "status") renderStatus();
 });
 
 /* ---------- providers + status ---------- */
@@ -212,7 +255,16 @@ async function loadModels(){
       sel.appendChild(o);
     }
     const saved = localStorage.getItem("blm.provider");
-    if (saved && [...sel.options].some(o=>o.value===saved)) sel.value = saved;
+    if (saved && [...sel.options].some(o=>o.value===saved)){
+      sel.value = saved;
+    } else {
+      // no saved choice → follow the server's default provider (not just the first option)
+      try{
+        const st = await (await fetch("/api/status")).json();
+        if (st.default_provider && [...sel.options].some(o=>o.value===st.default_provider))
+          sel.value = st.default_provider;
+      }catch(_){}
+    }
   }catch(e){ console.error(e); }
 }
 $("#provider").addEventListener("change", e => localStorage.setItem("blm.provider", e.target.value));
@@ -222,9 +274,19 @@ function fmtUptime(s){
   if (s < 86400) return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m";
   return Math.floor(s/86400)+"d "+Math.floor(s%86400/3600)+"h";
 }
+let lastStatus = null;
+function ago(epoch){
+  if (!epoch) return "—";
+  const s = Math.max(0, Math.floor(Date.now()/1000 - epoch));
+  if (s < 60) return s+"s ago";
+  if (s < 3600) return Math.floor(s/60)+"m ago";
+  if (s < 86400) return Math.floor(s/3600)+"h ago";
+  return Math.floor(s/86400)+"d ago";
+}
 async function pollStatus(){
   try{
     const j = await (await fetch("/api/status")).json();
+    lastStatus = j;
     const pills = Object.entries(j.providers).map(([name,p])=>{
       const cls = p.busy ? "busy" : (p.browser_running ? "ok" : "");
       const state = p.busy ? "busy" : (p.browser_running ? "idle" : "off");
@@ -232,12 +294,81 @@ async function pollStatus(){
       return `<span class="pill" title="browser ${p.browser_running?"running":"not started"} · ${p.images_since_recycle}/${p.recycle_after_images} images until recycle"><span class="dot8 ${cls}"></span><b>${short}</b> ${state}</span>`;
     }).join(" ");
     $("#statuspills").innerHTML = pills;
+    if (j.version) $("#ft-ver").textContent = "v"+j.version;
     $("#ft-uptime").textContent = "server up "+fmtUptime(j.uptime_seconds);
     $("#ft-dir").textContent = j.image_saving ? ("images → "+j.image_dir) : "image saving disabled";
+    if ($("#view-status").classList.contains("active")) renderStatus();
   }catch(e){
     $("#statuspills").innerHTML = `<span class="pill"><span class="dot8"></span><b>server</b> unreachable</span>`;
   }
 }
+
+function statTile(k, v){ return `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`; }
+
+function renderStatus(){
+  const j = lastStatus;
+  if (!j){ $("#srvstats").innerHTML = `<span class="hint">loading…</span>`; return; }
+  $("#srvstats").innerHTML = [
+    statTile("uptime", esc(fmtUptime(j.uptime_seconds))),
+    statTile("default provider", esc((j.default_provider||"").replace("-browser",""))),
+    statTile("display", j.display ? esc(j.display) : `headless <small>(Xvfb)</small>`),
+    statTile("image saving", j.image_saving ? "on" : `<span style="color:var(--muted)">off</span>`),
+  ].join("");
+
+  $("#provcards").innerHTML = Object.entries(j.providers).map(([name,p])=>{
+    const cls = p.busy ? "busy" : (p.browser_running ? "ok" : "");
+    const state = p.busy ? "busy" : (p.browser_running ? "idle" : "not started");
+    const short = esc(name.replace("-browser",""));
+    const avg = p.avg_latency==null ? "—" : `${p.avg_latency}<small>s</small>`;
+    const last = p.last_latency==null ? "—" : `${p.last_latency}<small>s</small>`;
+    const badges = [
+      p.default ? `<span class="badge">default</span>` : "",
+      p.supports_images ? `<span class="badge">images</span>` : "",
+    ].join("");
+    const errline = p.last_error
+      ? `<div class="errline"><b>last error</b> (${ago(p.last_error_at)}): ${esc(p.last_error)}</div>` : "";
+    return `<div class="card">
+      <div class="provhd">
+        <span class="dot8 ${cls}"></span><span class="name">${short}</span>
+        ${badges}<span class="spacer"></span><span class="badge">${state}</span>
+      </div>
+      <div class="stats">
+        ${statTile("requests", p.requests)}
+        ${statTile("errors", p.errors ? `<span style="color:var(--err)">${p.errors}</span>` : "0")}
+        ${statTile("avg latency", avg)}
+        ${statTile("last latency", last)}
+        ${statTile("images → recycle", `${p.images_since_recycle}<small>/${p.recycle_after_images}</small>`)}
+        ${statTile("last request", esc(ago(p.last_request_at)))}
+      </div>
+      ${errline}
+    </div>`;
+  }).join("");
+
+  // embed snippet — pin to the provider currently chosen in the header
+  const prov = $("#provider").value || (j.default_provider||"");
+  const snippet =
+`<script src="${location.origin}/widget.js"
+        data-provider="${esc(prov)}"
+        data-title="Ask AI"><\/script>`;
+  $("#embedsnippet").querySelector("code").textContent = snippet;
+}
+
+$("#embedcopy") && ($("#embedcopy").onclick = async ()=>{
+  const txt = $("#embedsnippet").querySelector("code").textContent;
+  try{ await navigator.clipboard.writeText(txt); $("#embedmsg").textContent = "copied ✓"; }
+  catch(e){ $("#embedmsg").textContent = "copy failed — select manually"; }
+  setTimeout(()=>{ $("#embedmsg").textContent = ""; }, 2500);
+});
+$("#embedtry") && ($("#embedtry").onclick = ()=>{
+  if (window.__browserLlmWidget){ window.BrowserLLMWidget && window.BrowserLLMWidget.open(); return; }
+  const s = document.createElement("script");
+  s.src = "/widget.js";
+  s.setAttribute("data-provider", $("#provider").value || "");
+  s.setAttribute("data-open", "1");
+  document.body.appendChild(s);
+  $("#embedmsg").textContent = "widget injected (bottom-right) ↘";
+  setTimeout(()=>{ $("#embedmsg").textContent = ""; }, 3000);
+});
 
 /* ---------- minimal markdown (safe: escape first) ---------- */
 function md(src){
@@ -397,6 +528,9 @@ $("#galrefresh").onclick = loadGallery;
 $("#galfilter").onchange = loadGallery;
 
 /* ---------- boot ---------- */
+$("#statuspills").style.cursor = "pointer";
+$("#statuspills").title = "open Status";
+$("#statuspills").onclick = () => document.querySelector('button[data-tab="status"]').click();
 loadModels();
 pollStatus();
 setInterval(pollStatus, 5000);

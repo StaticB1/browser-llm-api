@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widget demo — Browser LLM</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root{ --bg:#f6f7fb; --card:#fff; --ink:#1c2230; --muted:#5b6478; --line:#e5e8f0; --accent:#6ea8fe; }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f1115; --card:#171a21; --ink:#e6e9ef; --muted:#8b93a7; --line:#262b36; }
+  }
+  *{box-sizing:border-box}
+  body{ margin:0; background:var(--bg); color:var(--ink);
+        font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  .wrap{ max-width:760px; margin:0 auto; padding:56px 22px 120px; }
+  .kicker{ color:var(--accent); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:13px; }
+  h1{ font-size:34px; line-height:1.15; margin:8px 0 14px; letter-spacing:-.01em; }
+  p.lead{ font-size:18px; color:var(--muted); margin:0 0 28px; }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px 22px; margin:18px 0; }
+  .card h2{ margin:0 0 10px; font-size:17px; }
+  code,pre{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  pre{ background:rgba(127,127,127,.12); border:1px solid var(--line); border-radius:10px;
+       padding:12px 14px; overflow-x:auto; font-size:13.5px; }
+  :not(pre)>code{ background:rgba(127,127,127,.14); border-radius:5px; padding:1px 6px; font-size:14px; }
+  ul{ padding-left:20px; } li{ margin:5px 0; }
+  .hint{ color:var(--muted); font-size:14px; }
+  .arrow{ position:fixed; right:26px; bottom:92px; color:var(--muted); font-size:14px; text-align:right;
+          max-width:200px; }
+  @media (max-width:640px){ .arrow{ display:none } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="kicker">Browser·LLM</div>
+    <h1>Embeddable chat widget — live demo</h1>
+    <p class="lead">This is an ordinary web page. The floating chat bubble in the bottom-right was
+      added with a single <code>&lt;script&gt;</code> tag and talks to your local Browser LLM server.</p>
+
+    <div class="card">
+      <h2>How it was added to this page</h2>
+      <pre><code>&lt;script src="http://localhost:8081/widget.js"
+        data-title="Ask AI"
+        data-greeting="Hi! I'm running on a browser-driven LLM. Ask me anything."&gt;&lt;/script&gt;</code></pre>
+      <p class="hint" style="margin:10px 0 0">
+        The widget discovers the API base from its own script URL, so the host page can live on any
+        origin/port (CORS is open). Configure with <code>data-*</code> attributes:
+        <code>provider</code>, <code>title</code>, <code>accent</code>, <code>position</code>
+        (<code>br</code>/<code>bl</code>), <code>greeting</code>, <code>system</code>, <code>open</code>.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Try it</h2>
+      <ul>
+        <li>Click the 💬 bubble to open the chat.</li>
+        <li>Pick a provider in the header dropdown (gemini / chatgpt).</li>
+        <li>Ask for something with code — it comes back as a real code block.</li>
+        <li>Press <code>Esc</code> or the ✕ to close.</li>
+      </ul>
+      <p class="hint">Control it from the page console too:
+        <code>BrowserLLMWidget.open()</code>, <code>.close()</code>, <code>.reset()</code>,
+        <code>.config({accent:'#9b8cfb'})</code>.</p>
+    </div>
+
+    <p class="hint">Full dashboard: <a href="/" style="color:var(--accent)">/</a> · API: <code>/v1</code></p>
+  </div>
+
+  <div class="arrow">the widget lives here ↘</div>
+
+  <!-- The one line that adds the widget. Served same-origin, so /widget.js resolves. -->
+  <script src="/widget.js"
+          data-title="Ask AI"
+          data-greeting="Hi! I'm running on a browser-driven LLM. Ask me anything."></script>
+</body>
+</html>

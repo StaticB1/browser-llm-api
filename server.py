@@ -8,11 +8,12 @@ An unknown/absent model falls back to DEFAULT_PROVIDER (env, default gemini-brow
 
 Endpoints:
   GET  /                      (mini web UI — chat, image gen, gallery, status)
+  GET  /widget.js             (embeddable floating chat widget for any LAN page)
   GET  /v1/models
   POST /v1/chat/completions   (streaming + non-streaming; images inline)
   POST /v1/images/generations (OpenAI-style image generation)
   GET  /images/<provider>/<file>  (saved images, per-provider subfolder of GEMINI_IMAGE_DIR)
-  GET  /api/status            (per-provider busy/browser/recycle state, for the UI)
+  GET  /api/status            (per-provider busy/browser/recycle + live telemetry)
   GET  /api/gallery           (list saved images, newest first; ?provider=&limit=)
 
 Usage:
@@ -58,6 +59,7 @@ from providers import (
     PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS,
     CompletionTracker,
 )
+from _version import __version__
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -135,6 +137,44 @@ _img_gen_count: dict[str, int] = {name: 0 for name in PROVIDERS}
 
 def _note_image_gen(provider) -> None:
     _img_gen_count[provider.name] = _img_gen_count.get(provider.name, 0) + 1
+
+
+# Lightweight per-provider telemetry for the dashboard's live status panel.
+# In-memory only (reset on restart). Latency is wall-clock for the actual browser
+# drive (queue-wait excluded), so it reflects model/site speed, not our overhead.
+_metrics: dict[str, dict] = {
+    name: {
+        "requests": 0,           # completed requests (chat + image)
+        "errors": 0,             # of which failed
+        "total_latency": 0.0,    # sum of durations, for the running average
+        "last_latency": None,    # most recent duration (s)
+        "last_error": None,      # most recent error text (truncated)
+        "last_error_at": None,   # epoch seconds
+        "last_request_at": None,  # epoch seconds
+    }
+    for name in PROVIDERS
+}
+
+
+def _record_request(name: str, started: float, error: Optional[BaseException] = None) -> None:
+    """Fold one finished request into the provider's telemetry (in-memory).
+
+    ``started`` is a ``time.monotonic()`` stamp taken *after* the per-provider
+    lock is acquired, so the recorded latency excludes time spent queued behind
+    another in-flight request.
+    """
+    m = _metrics.get(name)
+    if m is None:
+        return
+    dur = time.monotonic() - started
+    m["requests"] += 1
+    m["total_latency"] += dur
+    m["last_latency"] = round(dur, 2)
+    m["last_request_at"] = int(time.time())
+    if error is not None:
+        m["errors"] += 1
+        m["last_error"] = str(error)[:200]
+        m["last_error_at"] = int(time.time())
 
 
 async def get_browser(provider) -> uc.Browser:
@@ -265,6 +305,10 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
     tracker = CompletionTracker()
     start = time.monotonic()
     deadline = start + _BASE_DEADLINE
+    # Some providers' extracted text reshapes near the end (see
+    # Provider.buffered_stream); for those we suppress incremental deltas and
+    # emit the final authoritative text once, so append-only SSE stays correct.
+    buffered = getattr(provider, "buffered_stream", False)
 
     while True:
         now = time.monotonic()
@@ -281,6 +325,8 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
                     f"[{provider.name}] completion deadline reached "
                     f"({now - start:.0f}s, {tracker.text_len} chars)"
                 )
+                if buffered and tracker.text:
+                    yield tracker.text
                 return
 
         await asyncio.sleep(0.8)
@@ -292,7 +338,7 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
         cdp_done = monitor.stream_done.is_set()
 
         chunk, done = tracker.feed(now, raw, is_gen, img, cdp_done=cdp_done)
-        if chunk:
+        if chunk and not buffered:
             yield chunk
 
         logger.debug(
@@ -306,6 +352,8 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
                 f"[{provider.name}] Done ({done}). {tracker.text_len} chars"
                 f"{' (CDP)' if tracker.cdp_fired else ''}"
             )
+            if buffered and tracker.text:
+                yield tracker.text
             return
 
 
@@ -362,7 +410,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Browser LLM API", lifespan=lifespan)
+app = FastAPI(title="Browser LLM API", version=__version__, lifespan=lifespan)
 
 # The API is unauthenticated and LAN/localhost-only by design; CORS-open so the
 # web UI (and any local tool) can call it from other origins/ports.
@@ -378,7 +426,10 @@ if _SAVE_ENABLED:
     app.mount("/images", StaticFiles(directory=str(_image_dir)), name="images")
 
 _STARTED_AT = time.time()
-_UI_FILE = Path(__file__).resolve().parent / "webui" / "index.html"
+_WEBUI_DIR = Path(__file__).resolve().parent / "webui"
+_UI_FILE = _WEBUI_DIR / "index.html"
+_WIDGET_FILE = _WEBUI_DIR / "widget.js"
+_WIDGET_DEMO_FILE = _WEBUI_DIR / "widget-demo.html"
 
 
 # ---------------------------------------------------------------------------
@@ -394,11 +445,40 @@ async def web_ui():
         "the JSON API at <code>/v1/...</code> still works.</p>", status_code=200)
 
 
+@app.get("/version")
+async def version():
+    """Package version (also in /api/status)."""
+    return {"name": "browser-llm-api", "version": __version__}
+
+
+@app.get("/demo", include_in_schema=False)
+@app.get("/widget-demo", include_in_schema=False)
+async def widget_demo():
+    """Standalone page demonstrating the embeddable chat widget on a non-dashboard
+    page. Handy for testing the widget in isolation."""
+    if _WIDGET_DEMO_FILE.exists():
+        return FileResponse(_WIDGET_DEMO_FILE, media_type="text/html")
+    raise HTTPException(status_code=404, detail="widget-demo.html not found")
+
+
+@app.get("/widget.js", include_in_schema=False)
+async def widget_js():
+    """Self-contained embeddable chat widget. Drop into any page on the LAN with
+    ``<script src="http://<host>:8081/widget.js"></script>`` — it discovers this
+    server as its API base from its own script URL. CORS is already open."""
+    if _WIDGET_FILE.exists():
+        # no-cache so edits to the widget show up without a hard refresh
+        return FileResponse(_WIDGET_FILE, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="widget.js not found")
+
+
 @app.get("/api/status")
 async def api_status():
     """Lightweight server/provider state for the UI's status bar (no browser I/O)."""
     providers = {}
     for name, p in PROVIDERS.items():
+        m = _metrics[name]
         providers[name] = {
             "browser_running": name in _browsers,
             "busy": _locks[name].locked(),
@@ -406,9 +486,18 @@ async def api_status():
             "images_since_recycle": _img_gen_count.get(name, 0),
             "recycle_after_images": _RECYCLE_AFTER_IMAGES,
             "default": name == DEFAULT_PROVIDER,
+            # live telemetry (in-memory, reset on restart)
+            "requests": m["requests"],
+            "errors": m["errors"],
+            "avg_latency": round(m["total_latency"] / m["requests"], 2) if m["requests"] else None,
+            "last_latency": m["last_latency"],
+            "last_error": m["last_error"],
+            "last_error_at": m["last_error_at"],
+            "last_request_at": m["last_request_at"],
         }
     return {
         "ok": True,
+        "version": __version__,
         "uptime_seconds": int(time.time() - _STARTED_AT),
         "default_provider": DEFAULT_PROVIDER,
         "image_saving": _SAVE_ENABLED,
@@ -503,15 +592,21 @@ async def chat_completions(req: ChatCompletionRequest):
             return f"data: {json.dumps(data)}\n\n"
 
         async def event_stream():
+            started = time.monotonic()
+            err: Optional[BaseException] = None
             try:
                 async with _locks[provider.name]:
+                    started = time.monotonic()  # reset: exclude queue-wait
                     async for chunk in run_chat(provider, req.messages):
                         yield _chunk(chunk, None)
             except Exception as e:
                 # Surface the failure in-band; a raised exception here would
                 # just cut the SSE dead with no explanation for the client.
+                err = e
                 logger.error(f"[{provider.name}] streaming run failed: {e}", exc_info=True)
                 yield _chunk(f"\n\n[browser-llm error: {e}]", None)
+            finally:
+                _record_request(provider.name, started, err)
             yield _chunk(None, "stop")
             yield "data: [DONE]\n\n"
 
@@ -519,11 +614,14 @@ async def chat_completions(req: ChatCompletionRequest):
 
     # --- Non-streaming ---
     async with _locks[provider.name]:
+        started = time.monotonic()
         try:
             text, imgs = await drive_once(provider, _build_prompt(req.messages))
         except Exception as e:
+            _record_request(provider.name, started, e)
             logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+        _record_request(provider.name, started)
     full_text = _compose(text, imgs, provider)
 
     return {
@@ -558,11 +656,14 @@ async def images_generations(req: ImageGenRequest):
         raise HTTPException(status_code=501, detail=f"{provider.name} does not support image generation")
 
     async with _locks[provider.name]:
+        started = time.monotonic()
         try:
             _text, imgs = await drive_once(provider, req.prompt)
         except Exception as e:
+            _record_request(provider.name, started, e)
             logger.error(f"[{provider.name}] image generation failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+        _record_request(provider.name, started)
 
     if not imgs:
         raise HTTPException(
@@ -589,6 +690,17 @@ async def images_generations(req: ImageGenRequest):
 
 
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
+    """Console entry point (``browser-llm``). Host/port via ``BROWSER_LLM_HOST``
+    / ``BROWSER_LLM_PORT`` (defaults 0.0.0.0:8081). Note: the sites need a
+    non-headless Chrome — on a headless box launch via ``serve.sh`` (Xvfb) rather
+    than calling this directly."""
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+    host = os.environ.get("BROWSER_LLM_HOST", "0.0.0.0")
+    port = int(os.environ.get("BROWSER_LLM_PORT", "8081"))
+    logger.info(f"Browser LLM API v{__version__} → http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
