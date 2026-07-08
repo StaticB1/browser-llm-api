@@ -101,6 +101,10 @@ class ChatGPTProvider(Provider):
     # signed-in signal (set only after the OAuth callback fully completes).
     session_cookie = ("__Secure-next-auth.session-token", "chatgpt.com")
     image_text_is_caption = True  # ChatGPT's prose alongside an image is a real caption
+    # Code answers reshape at the end (flattened while streaming → ```fenced``` once
+    # the CodeMirror card finalizes), which append-only delta streaming can't represent
+    # correctly. Buffer and emit the final text once. See Provider.buffered_stream.
+    buffered_stream = True
     # ProseMirror contenteditable composer.
     input_selector = '#prompt-textarea'
     send_selectors = [
@@ -112,37 +116,95 @@ class ChatGPTProvider(Provider):
     load_wait = 7.0  # ChatGPT can be slow to hydrate / may show a bot check
 
     async def get_response_text(self, page) -> str:
+        # ChatGPT renders code blocks as CodeMirror editors (.cm-editor / .cm-content),
+        # NOT plain <pre><code class="language-x">. A naive innerText read flattens the
+        # code card's toolbar (the "Python" language pill + Copy/Run buttons) in with the
+        # code and drops the markdown fence, so answers with code come back as
+        # "Python\nRun\ndef ...". This serializer walks the assistant .markdown read-only,
+        # emitting prose as text and each code editor as a ``` fenced block (language from
+        # the toolbar), skipping the toolbar chrome. Verified against the live DOM 2026-07-08.
         try:
-            result = await page.evaluate("""
+            result = await page.evaluate(r"""
                 (function(){
-                    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-                    let msg = '';
-                    if(msgs.length){
-                        const last = msgs[msgs.length-1];
-                        const md = last.querySelector('.markdown') || last.querySelector('.prose') || last;
-                        msg = (md.innerText || md.textContent || '').trim();
+                    // Extract the real code from a CodeMirror editor (or plain <pre>).
+                    function codeText(el){
+                        var content=(el.classList&&el.classList.contains('cm-content'))
+                            ? el : el.querySelector('.cm-content');
+                        if(content){
+                            var lines=content.querySelectorAll('.cm-line');
+                            if(lines.length) return Array.prototype.map.call(lines,
+                                function(l){return l.textContent;}).join('\n');
+                            return content.textContent||'';
+                        }
+                        var code=el.querySelector('code');
+                        return (code?code.textContent:el.textContent)||'';
                     }
-                    // When ChatGPT routes a big code/doc answer into its Canvas
-                    // side-panel, the message body stays near-empty. Only then do
-                    // we best-effort read the canvas editor (CodeMirror / Monaco /
-                    // a ProseMirror doc that isn't the composer). Virtualized
-                    // editors keep only visible lines in the DOM, so this can be
-                    // partial for very long docs. Best-guess selectors — verify
-                    // against a live session if canvas answers look wrong.
-                    if(msg.length >= 40) return msg;
-                    const composer = document.querySelector('#prompt-textarea');
-                    const isComposer = el => composer && (el === composer || el.contains(composer)
-                        || composer.contains(el) || el.id === 'prompt-textarea');
-                    let canvasTxt = '';
-                    const consider = el => {
-                        if(!el || isComposer(el)) return;
-                        const t = (el.innerText || el.textContent || '').trim();
-                        if(t.length > canvasTxt.length) canvasTxt = t;
-                    };
+                    // Smallest ancestor of the editor that also holds the toolbar
+                    // (its innerText == the flattened "Python\nRun\n<code>" chunk in msg).
+                    function findCard(editor){
+                        var card=editor, n=0;
+                        while(card.parentElement && n<8
+                              && !(card.querySelector && card.querySelector('button'))){
+                            card=card.parentElement; n++;
+                        }
+                        return card;
+                    }
+                    // Language pill is toolbar text (no language-* class on cm <code>).
+                    function langOf(card){
+                        try{
+                            var first=(((card.innerText||'').trim().split('\n')[0])||'').trim().toLowerCase();
+                            if(/^[a-z0-9+#.\-]{1,15}$/.test(first)
+                               && !/^(copy|copy code|run|edit|share|preview|code)$/.test(first)) return first;
+                        }catch(e){}
+                        return '';
+                    }
+                    var msgs=document.querySelectorAll('[data-message-author-role="assistant"]');
+                    var msg='';
+                    if(msgs.length){
+                        var last=msgs[msgs.length-1];
+                        var md=last.querySelector('.markdown')||last.querySelector('.prose')||last;
+                        // Base text = innerText (clean prose, correct list markers). Then
+                        // splice each flattened code card into a ``` fenced block. Matching
+                        // innerText-to-innerText keeps the substitution reliable and leaves
+                        // all prose untouched.
+                        msg=(md.innerText||md.textContent||'').trim();
+                        var editors=md.querySelectorAll('.cm-editor, #code-block-viewer');
+                        if(!editors.length){
+                            editors=Array.prototype.filter.call(md.querySelectorAll('pre'),
+                                function(p){var c=p.querySelector('code');
+                                    return c && (c.textContent||'').trim().length>0;});
+                        }
+                        var seen=[];
+                        for(var e=0;e<editors.length;e++){
+                            var editor=editors[e];
+                            var card=findCard(editor);
+                            if(seen.indexOf(card)>=0) continue; seen.push(card);
+                            var clean=codeText(editor).replace(/\s+$/,'');
+                            if(!clean) continue;
+                            var fence='```'+langOf(card)+'\n'+clean+'\n```';
+                            var chunk=(card.innerText||'').replace(/\s+$/,'');
+                            var idx=chunk?msg.indexOf(chunk):-1;
+                            if(idx>=0){ msg=msg.slice(0,idx)+fence+msg.slice(idx+chunk.length); }
+                            else { var ci=msg.indexOf(clean);   // context mismatch: fence code in place
+                                   if(ci>=0) msg=msg.slice(0,ci)+fence+msg.slice(ci+clean.length); }
+                        }
+                        msg=msg.replace(/\n{3,}/g,'\n\n').trim();
+                    }
+                    if(msg.length>=40 || msg.indexOf('```')>=0) return msg;
+                    // Canvas side-panel fallback: big code/doc answers land in a side
+                    // panel, not in .markdown, leaving the message body near-empty.
+                    // Virtualized editors keep only visible lines, so this can be partial.
+                    var composer=document.querySelector('#prompt-textarea');
+                    var isComposer=function(el){ return composer&&(el===composer||el.contains(composer)
+                        ||composer.contains(el)||el.id==='prompt-textarea'); };
+                    var canvasTxt='';
+                    var consider=function(el){ if(!el||isComposer(el))return;
+                        var t=(el.innerText||el.textContent||'').trim();
+                        if(t.length>canvasTxt.length)canvasTxt=t; };
                     document.querySelectorAll('.cm-content').forEach(consider);
                     document.querySelectorAll('.monaco-editor .view-lines').forEach(consider);
                     document.querySelectorAll('.ProseMirror').forEach(consider);
-                    return canvasTxt.length > msg.length ? canvasTxt : msg;
+                    return canvasTxt.length>msg.length?canvasTxt:msg;
                 })()
             """)
             return result if isinstance(result, str) else ""

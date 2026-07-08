@@ -53,6 +53,25 @@ class TextCompletion(unittest.TestCase):
         self.assertEqual(done, "empty")
 
 
+class BufferedText(unittest.TestCase):
+    """`tracker.text` holds the last non-empty full text — what buffered_stream
+    providers (ChatGPT) emit once at completion, since their extracted text
+    reshapes near the end and can't be streamed as append-only deltas."""
+
+    def test_text_tracks_last_nonempty_and_survives_reshape(self):
+        t = CompletionTracker()
+        t.feed(0.0, "Python\nRun\ndef add(a, b):", True, NO_IMG)   # flattened, streaming
+        self.assertEqual(t.text, "Python\nRun\ndef add(a, b):")
+        # reshape to the final fenced form (NOT a prefix-extension)
+        final = "```python\ndef add(a, b):\n    return a + b\n```"
+        t.feed(1.0, final, False, NO_IMG)
+        self.assertEqual(t.text, final)
+        # a transient empty read must not clobber the captured text
+        _, done = t.feed(1.0 + CompletionTracker.SILENT_TEXT_DONE + 0.1, "", False, NO_IMG)
+        self.assertEqual(done, "text")
+        self.assertEqual(t.text, final)
+
+
 class ImageCompletion(unittest.TestCase):
     def test_placeholder_suppressed_and_image_completes(self):
         t = CompletionTracker()

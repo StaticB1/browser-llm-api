@@ -142,6 +142,7 @@ class CompletionTracker:
 
     def __init__(self):
         self.text_len = 0
+        self.text = ""          # current full (suppression-filtered) response text
         self.cdp_fired = False
         self._last_change: float | None = None
         self._saw_generation = False
@@ -186,6 +187,8 @@ class CompletionTracker:
         # Never surface the loading placeholder / thinking text shown while an
         # image is (really) rendering.
         text = "" if (self._is_placeholder(raw_text) or img_pending) else raw_text
+        if text:
+            self.text = text  # keep last non-empty; done can fire after a transient ""
 
         chunk = ""
         if len(text) > self.text_len:
@@ -253,6 +256,13 @@ class Provider(ABC):
     input_selector: str = 'div[contenteditable="true"]'
     send_selectors: list = ['button[aria-label="Send message"]']
     load_wait: float = 6.0  # seconds to let the page settle before typing
+    # When True, do NOT stream incremental deltas — emit the final full answer
+    # once at completion. Needed for providers whose extracted text *reshapes*
+    # near the end (e.g. ChatGPT: a code answer flattens to "Python\nRun\n<code>"
+    # while streaming, then becomes a ```fenced``` block once its CodeMirror card
+    # finalizes). Append-only SSE can't un-send that divergent prefix, so we
+    # buffer. Incremental (False) is fine for providers whose text only grows.
+    buffered_stream: bool = False
 
     def new_monitor(self) -> StreamMonitor:
         return StreamMonitor(self.stream_url_fragments, self.ws_url_fragments)
