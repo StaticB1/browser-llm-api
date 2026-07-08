@@ -7,10 +7,13 @@ Providers are selected per-request via the OpenAI ``model`` field:
 An unknown/absent model falls back to DEFAULT_PROVIDER (env, default gemini-browser).
 
 Endpoints:
+  GET  /                      (mini web UI — chat, image gen, gallery, status)
   GET  /v1/models
   POST /v1/chat/completions   (streaming + non-streaming; images inline)
   POST /v1/images/generations (OpenAI-style image generation)
   GET  /images/<provider>/<file>  (saved images, per-provider subfolder of GEMINI_IMAGE_DIR)
+  GET  /api/status            (per-provider busy/browser/recycle state, for the UI)
+  GET  /api/gallery           (list saved images, newest first; ?provider=&limit=)
 
 Usage:
   python server.py            # listens on 0.0.0.0:8081
@@ -46,7 +49,8 @@ from typing import AsyncGenerator, Optional
 
 import nodriver as uc
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -360,9 +364,94 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Browser LLM API", lifespan=lifespan)
 
+# The API is unauthenticated and LAN/localhost-only by design; CORS-open so the
+# web UI (and any local tool) can call it from other origins/ports.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Serve saved images so responses can return real links (GEMINI_IMAGE_DIR).
 if _SAVE_ENABLED:
     app.mount("/images", StaticFiles(directory=str(_image_dir)), name="images")
+
+_STARTED_AT = time.time()
+_UI_FILE = Path(__file__).resolve().parent / "webui" / "index.html"
+
+
+# ---------------------------------------------------------------------------
+# Mini web UI + status/gallery API (used by the UI, handy for scripts too)
+# ---------------------------------------------------------------------------
+@app.get("/", include_in_schema=False)
+@app.get("/ui", include_in_schema=False)
+async def web_ui():
+    if _UI_FILE.exists():
+        return FileResponse(_UI_FILE, media_type="text/html")
+    return HTMLResponse(
+        "<h1>Browser LLM API</h1><p>web UI file missing (webui/index.html) — "
+        "the JSON API at <code>/v1/...</code> still works.</p>", status_code=200)
+
+
+@app.get("/api/status")
+async def api_status():
+    """Lightweight server/provider state for the UI's status bar (no browser I/O)."""
+    providers = {}
+    for name, p in PROVIDERS.items():
+        providers[name] = {
+            "browser_running": name in _browsers,
+            "busy": _locks[name].locked(),
+            "supports_images": p.supports_images,
+            "images_since_recycle": _img_gen_count.get(name, 0),
+            "recycle_after_images": _RECYCLE_AFTER_IMAGES,
+            "default": name == DEFAULT_PROVIDER,
+        }
+    return {
+        "ok": True,
+        "uptime_seconds": int(time.time() - _STARTED_AT),
+        "default_provider": DEFAULT_PROVIDER,
+        "image_saving": _SAVE_ENABLED,
+        "image_dir": str(_image_dir),
+        "display": os.environ.get("DISPLAY", ""),
+        "providers": providers,
+    }
+
+
+@app.get("/api/gallery")
+async def api_gallery(provider: Optional[str] = None, limit: int = 60):
+    """Saved generated images, newest first. ``provider`` accepts a slug
+    ('gemini') or a model name ('gemini-browser'); absent = all providers."""
+    if not _SAVE_ENABLED:
+        return {"images": [], "image_dir": None}
+    want = None
+    if provider:
+        want = provider.replace("-browser", "").strip().lower()
+    exts = set(_EXT.values())
+    items = []
+    try:
+        for sub in sorted(_image_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            slug = sub.name
+            if want and slug != want:
+                continue
+            for f in sub.iterdir():
+                if not f.is_file() or f.suffix.lstrip(".").lower() not in exts:
+                    continue
+                st = f.stat()
+                items.append({
+                    "provider": slug,
+                    "file": f.name,
+                    "url": f"/images/{slug}/{f.name}",
+                    "bytes": st.st_size,
+                    "mtime": int(st.st_mtime),
+                })
+    except Exception as e:
+        logger.warning(f"gallery listing failed: {e}")
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    limit = max(1, min(int(limit or 60), 500))
+    return {"images": items[:limit], "total": len(items), "image_dir": str(_image_dir)}
 
 
 @app.get("/v1/models")
@@ -390,66 +479,72 @@ async def chat_completions(req: ChatCompletionRequest):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    async with _locks[provider.name]:
-        if req.stream:
-            # --- Streaming (SSE) ---
-            async def event_stream():
-                async for chunk in run_chat(provider, req.messages):
-                    data = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": provider.name,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": chunk},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(data)}\n\n"
-
-                done = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": provider.name,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                }
-                yield f"data: {json.dumps(done)}\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-        else:
-            # --- Non-streaming ---
-            try:
-                text, imgs = await drive_once(provider, _build_prompt(req.messages))
-            except Exception as e:
-                logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=str(e))
-            full_text = _compose(text, imgs, provider)
-
-            return {
+    if req.stream:
+        # --- Streaming (SSE) ---
+        # The provider lock is taken INSIDE the generator: FastAPI runs the
+        # generator after this handler returns, so a lock around the
+        # `return StreamingResponse(...)` would be released before the first
+        # poll and let concurrent requests fight over one browser tab.
+        def _chunk(content: Optional[str], finish: Optional[str]) -> str:
+            data = {
                 "id": completion_id,
-                "object": "chat.completion",
+                "object": "chat.completion.chunk",
                 "created": created,
                 "model": provider.name,
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": full_text},
-                        "finish_reason": "stop",
+                        "delta": {} if content is None
+                                 else {"role": "assistant", "content": content},
+                        "finish_reason": finish,
                     }
                 ],
-                "usage": {
-                    "prompt_tokens": sum(len(m.content.split()) for m in req.messages),
-                    "completion_tokens": len(full_text.split()),
-                    "total_tokens": sum(len(m.content.split()) for m in req.messages)
-                                   + len(full_text.split()),
-                },
             }
+            return f"data: {json.dumps(data)}\n\n"
+
+        async def event_stream():
+            try:
+                async with _locks[provider.name]:
+                    async for chunk in run_chat(provider, req.messages):
+                        yield _chunk(chunk, None)
+            except Exception as e:
+                # Surface the failure in-band; a raised exception here would
+                # just cut the SSE dead with no explanation for the client.
+                logger.error(f"[{provider.name}] streaming run failed: {e}", exc_info=True)
+                yield _chunk(f"\n\n[browser-llm error: {e}]", None)
+            yield _chunk(None, "stop")
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # --- Non-streaming ---
+    async with _locks[provider.name]:
+        try:
+            text, imgs = await drive_once(provider, _build_prompt(req.messages))
+        except Exception as e:
+            logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    full_text = _compose(text, imgs, provider)
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": provider.name,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": full_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": sum(len(m.content.split()) for m in req.messages),
+            "completion_tokens": len(full_text.split()),
+            "total_tokens": sum(len(m.content.split()) for m in req.messages)
+                           + len(full_text.split()),
+        },
+    }
 
 
 @app.post("/v1/images/generations")

@@ -9,7 +9,8 @@ Drives a **chat web UI** through an automated Chrome browser ([`nodriver`](https
 
 An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `gemini-browser`).
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`, `/images/<file>`).
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status` + `/api/gallery` for the UI).
+- **`webui/index.html`** — **mini web UI** served at `http://localhost:8081/` — streaming chat, image generation, a gallery of everything generated so far, and live per-provider status. No build step, single file.
 - **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`.
 - **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt` (see below).
 - **`gemini_bot.py`** — standalone single-prompt Gemini prototype (hardcoded prompt → saves the answer).
@@ -26,7 +27,7 @@ The server keeps **one persistent Chrome per provider** (profile in `gemini_prof
 ## Requirements
 
 - Google Chrome, Python 3.12
-- Deps go in a **venv** (system Python is usually PEP-668 externally-managed): `python3.12 -m venv venv && ./venv/bin/pip install nodriver fastapi uvicorn pydantic`. Run with `./venv/bin/python server.py`.
+- Deps go in a **venv** (system Python is usually PEP-668 externally-managed): `python3.12 -m venv venv && ./venv/bin/pip install -r requirements.txt`. Run with `./venv/bin/python server.py`.
 - Chrome runs **non-headless** on purpose (the sites block true headless). `serve.sh` auto-detects a display: it uses a real `$DISPLAY` if present (needed for ChatGPT image gen), otherwise falls back to headless **Xvfb** (needs the `xvfb` package; Gemini works, ChatGPT images don't). Re-auth uses a real display (e.g. `DISPLAY=:1`).
 - **ChatGPT image generation needs a real GPU display** (see below) — it does not render under headless Xvfb.
 
@@ -37,6 +38,16 @@ The server keeps **one persistent Chrome per provider** (profile in `gemini_prof
 # or the standalone Gemini prototype:
 python3 gemini_bot.py
 ```
+
+## Web UI
+
+Open **`http://localhost:8081/`** in a browser. Three tabs:
+
+- **Chat** — pick a provider, chat with streaming replies and multi-turn context; optional system prompt; generated images render inline. Enter sends, Shift+Enter for a newline.
+- **Image** — one-line prompt → image, with an elapsed-time indicator (free-tier image gen takes 30s–4min).
+- **Gallery** — every image saved to `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
+
+The header shows each provider's live state (off / idle / busy — requests to the same provider queue), and the footer shows server uptime and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
 
 ## Selecting a provider
 
@@ -126,3 +137,11 @@ For **long asset runs**, the provider's browser is **auto-recycled** every few i
 - **One request at a time per provider** (per-provider lock); Gemini and ChatGPT run concurrently, callers to the same provider queue.
 - **`usage` token counts are approximate** (word-split, not a real tokenizer).
 - A hard crash can leave a stale `<profile>/SingletonLock`; the unit clears both providers' locks on start (`ExecStartPre`).
+
+## Tests
+
+The completion decision (when is a streamed answer / image done?) is pure logic in `providers/base.py` and has unit tests that need no browser:
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v
+```

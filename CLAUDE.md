@@ -11,6 +11,10 @@ API key** for either backend; it piggybacks on a logged-in web session stored in
 profile. Prompts are typed into the page and answers (text and generated images) are scraped back
 out of the DOM.
 
+A **mini web UI** (`webui/index.html`, single file, no build step) is served at
+`http://localhost:8081/` — streaming chat, image generation, gallery of saved images, and a live
+per-provider status bar (backed by `/api/status` + `/api/gallery`).
+
 Two providers, selected per-request by the OpenAI **`model`** field:
 
 | model | site | profile | images |
@@ -28,6 +32,11 @@ additionally sits behind Cloudflare/anti-bot. A UI change can silently break ext
 ```
 server.py            # FastAPI app, port 8081. Model→provider router, the generic
                      #   completion loop, generic image persistence, CDP patch.
+                     #   Also serves the web UI at "/" + /api/status + /api/gallery.
+webui/index.html     # mini web UI (single file, no build step): streaming chat,
+                     #   image gen with elapsed timer, gallery, live provider status.
+tests/               # unit tests (no browser needed):
+                     #   ./venv/bin/python -m unittest discover -s tests
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
@@ -45,11 +54,11 @@ browser-llm-api.service.template  # unit template; install-service.sh substitute
 *_profile/           # per-provider Chrome user-data dirs. Gitignored. Never commit.
 ```
 
-There is no `requirements.txt`. **Deps are installed in a local venv at `./venv`** (system Python
-is PEP-668 externally-managed, so a venv is required): `./venv/bin/pip install nodriver fastapi
-uvicorn pydantic`. Run the server with `./serve.sh` (foreground) or `./install-service.sh` (background
+**Deps are installed in a local venv at `./venv`** (system Python is PEP-668
+externally-managed, so a venv is required): `./venv/bin/pip install -r requirements.txt`.
+Run the server with `./serve.sh` (foreground) or `./install-service.sh` (background
 service); both use `./venv/bin/python`. Also needs Google Chrome and the system `xvfb` package. Python 3.12.
-`gen_asset.py` additionally needs **Pillow** (`./venv/bin/pip install Pillow`).
+Pillow (in requirements.txt) is only needed by `gen_asset.py`.
 
 ## The `Provider` abstraction (`providers/base.py`)
 
@@ -131,6 +140,14 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 
 ## Gotchas & conventions
 
+- **The per-provider lock is taken INSIDE the SSE generator** in `chat_completions`
+  (`server.py`). FastAPI runs the generator *after* the handler returns, so an `async with`
+  around `return StreamingResponse(...)` releases the lock before the first poll and lets
+  concurrent requests fight over one browser tab (that bug existed and was fixed 2026-07-08).
+  Don't move it back out. Streaming failures are surfaced in-band as a
+  `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
+- **CompletionTracker has unit tests** — `./venv/bin/python -m unittest discover -s tests`.
+  If you change the done-decision logic in `providers/base.py`, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
   to swallow `KeyError` from unknown CDP events (e.g. `DOM.adoptedStyleSheetsModified`). Called at
   import time by `server.py` and `login.py`; call it in any new entry point.

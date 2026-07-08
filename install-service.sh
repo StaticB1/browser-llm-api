@@ -15,8 +15,10 @@ if [ ! -x venv/bin/python ]; then
   python3 -m venv venv
 fi
 echo "[install] installing dependencies…"
-./venv/bin/pip install -q --upgrade pip
-./venv/bin/pip install -q nodriver fastapi uvicorn pydantic pillow
+# `python -m pip` (not venv/bin/pip): the pip script's shebang hardcodes the venv
+# path at creation time and breaks if the clone is later moved/renamed.
+./venv/bin/python -m pip install -q --upgrade pip
+./venv/bin/python -m pip install -q -r requirements.txt
 
 # 2) generate the systemd --user unit for THIS machine/clone
 mkdir -p ~/.config/systemd/user

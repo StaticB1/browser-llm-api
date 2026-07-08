@@ -5,8 +5,9 @@ Description=Browser LLM API (OpenAI-compatible: Gemini + ChatGPT via browser aut
 
 [Service]
 Type=simple
+# Quoted so a clone path containing spaces still parses as one argument.
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=__INSTALL_DIR__/serve.sh
+ExecStart="__INSTALL_DIR__/serve.sh"
 # nodriver detaches Chrome from the cgroup; reap survivors on stop/restart.
 ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./gemini_profile"
 ExecStopPost=-/usr/bin/pkill -TERM -f "user-data-dir=./chatgpt_profile"

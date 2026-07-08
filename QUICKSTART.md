@@ -20,6 +20,9 @@ Check it's up: `curl -s localhost:8081/v1/models`
 
 ## 2. Use it
 
+**Web UI (easiest)** — open **`http://localhost:8081/`** in a browser: streaming chat,
+image generation, and a gallery of everything generated so far, with live provider status.
+
 **Text / code / HTML** (via the bundled client):
 ```bash
 ./client.py "Explain CORS in two sentences"

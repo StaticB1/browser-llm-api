@@ -1,0 +1,10 @@
+# Install into the local venv (system Python is PEP-668 externally-managed):
+#   python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+# Also needs: Google Chrome + the system `xvfb` package (for headless runs).
+nodriver>=0.50
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2
+
+# Optional — only gen_asset.py needs it (image post-processing).
+Pillow>=10
