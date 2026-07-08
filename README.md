@@ -249,6 +249,13 @@ The completion decision (when is a streamed answer / image done?) is pure logic 
 ./venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Contributors
+
+- **[staticB1](https://github.com/StaticB1)**
+- **Ebenezer "Ebstar" Tarubinga**
+
+Contributions welcome — open an issue or pull request.
+
 ## License
 
 [MIT](LICENSE). Version is defined in `_version.py` (surfaced at `/version`, `/api/status`, and the UI footer).
