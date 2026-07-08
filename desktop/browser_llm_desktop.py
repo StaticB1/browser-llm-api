@@ -6,15 +6,19 @@ A GTK3 client for the local Browser LLM API (the OpenAI-compatible server in thi
 repo, default http://localhost:8081). It does NOT drive any browser itself — all the
 nodriver/Chrome machinery lives in the server; this is a thin, native front-end.
 
-It provides two things:
+It provides:
 
-  * a **tray indicator** (the "widget") — an icon in the GNOME top bar with a menu:
-    Quick chat, Open the full app, pick a provider, live server status, Quit;
-  * a **full app window** — Chat / Images / Gallery / Status tabs, mirroring the web
-    dashboard but as a real desktop window.
+  * a **tray indicator** (the "widget") — a top-bar icon whose popup is built around
+    **quick image generation for whatever VS Code project you're in**: it auto-detects
+    the focused VS Code window, and drops generated images straight into that project
+    (remembering a save folder per project). It also has a Chat tab.
+  * a **full app window** — Chat / Images / Gallery / Status tabs.
 
-Runs on the SYSTEM python3 (which has PyGObject); it needs no pip packages and no
-venv — only the Python standard library plus system GTK3 + AppIndicator.
+Chats are **shared** between the popup and the window (enlarging keeps your conversation)
+and **persisted** to ~/.local/share/browser-llm-desktop/ so they survive restarts.
+
+Runs on the SYSTEM python3 (which has PyGObject); no pip packages, no venv — only the
+Python standard library plus system GTK3 + AppIndicator (+ xdotool for focus detection).
 
     /usr/bin/python3 desktop/browser_llm_desktop.py
     # or:  desktop/run.sh          # or install a launcher:  desktop/install-desktop.sh
@@ -25,10 +29,12 @@ Env:
 import base64
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import gi
@@ -65,6 +71,18 @@ APP_ID = "browser-llm-desktop"
 APP_NAME = "Browser LLM"
 DEFAULT_BASE = os.environ.get("BROWSER_LLM_API", "http://localhost:8081")
 FALLBACK_MODELS = ["gemini-browser", "chatgpt-browser"]
+VSCODE_STORAGE = os.path.expanduser("~/.config/Code/User/globalStorage/storage.json")
+VSCODE_TITLE_SUFFIXES = (" - Visual Studio Code", " — Visual Studio Code",
+                         " - Code - OSS", " - VSCodium")
+
+
+def data_dir():
+    d = os.path.join(GLib.get_user_data_dir(), APP_ID)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
 
 
 # ============================== API client (stdlib) ==============================
@@ -96,7 +114,6 @@ class Api:
             return r.read()
 
     def chat_stream(self, messages, model, timeout=900):
-        """Yield assistant text deltas from an SSE stream."""
         payload = {"model": model, "messages": messages, "stream": True}
         req = urllib.request.Request(
             self._url("/v1/chat/completions"),
@@ -128,6 +145,17 @@ class Api:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
 
+    def image_bytes(self, item):
+        """Turn an images/generations data[] item into raw bytes (b64 / local path / URL)."""
+        if item.get("b64_json"):
+            return base64.b64decode(item["b64_json"])
+        if item.get("path") and os.path.exists(item["path"]):
+            with open(item["path"], "rb") as f:
+                return f.read()
+        if item.get("url"):
+            return self.fetch_bytes(item["url"])
+        return None
+
 
 def humanize_error(exc):
     if isinstance(exc, urllib.error.HTTPError):
@@ -140,6 +168,270 @@ def humanize_error(exc):
     return str(exc) or exc.__class__.__name__
 
 
+# ============================== VS Code project detection ==============================
+def vscode_open_projects():
+    """[(name, path)] for every currently-open VS Code window, newest first."""
+    out, seen = [], set()
+    try:
+        d = json.load(open(VSCODE_STORAGE))
+        for w in d.get("windowsState", {}).get("openedWindows", []):
+            uri = w.get("folder")
+            if not uri or not uri.startswith("file://"):
+                continue
+            path = urllib.parse.unquote(uri[len("file://"):]).rstrip("/")
+            if path and path not in seen:
+                seen.add(path)
+                out.append((os.path.basename(path) or path, path))
+    except Exception:
+        pass
+    return out
+
+
+def active_window_title():
+    try:
+        env = dict(os.environ)
+        env.setdefault("DISPLAY", ":0")
+        r = subprocess.run(["xdotool", "getactivewindow", "getwindowname"],
+                           capture_output=True, text=True, timeout=1.5, env=env)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def vscode_focused_path(projects):
+    """Match the focused window title against `projects` [(name,path)] -> path or None.
+    Only returns for a VS Code window; matches by longest folder-basename suffix so
+    project names that contain ' - ' still resolve."""
+    title = active_window_title()
+    head = None
+    for suf in VSCODE_TITLE_SUFFIXES:
+        if title.endswith(suf):
+            head = title[:-len(suf)].strip().lstrip("●•*✳ ").strip()
+            break
+    if not head:
+        return None
+    best = None
+    for _name, path in projects:
+        b = os.path.basename(path)
+        if head == b or head.endswith(" - " + b) or head.endswith(b):
+            if best is None or len(os.path.basename(best)) < len(b):
+                best = path
+    return best
+
+
+class ProjectManager(GObject.GObject):
+    """Tracks open VS Code projects, auto-follows the focused window, and remembers a
+    save folder per project. Emits 'changed' when the current project / list changes."""
+    __gsignals__ = {"changed": (GObject.SignalFlags.RUN_FIRST, None, ())}
+
+    def __init__(self):
+        super().__init__()
+        self.path = os.path.join(data_dir(), "projects.json")
+        self.folders = {}      # project_path -> save folder
+        self.auto = True       # follow the focused VS Code window
+        self.current = None    # project path
+        self._projects = []    # [(name, path)]
+        self._load()
+        self.refresh()
+        paths = [p for _, p in self._projects]
+        f = vscode_focused_path(self._projects)
+        if self.auto and f:
+            self.current = f
+        if not self.current:
+            self.current = f or (paths[0] if paths else None)
+
+    def _load(self):
+        try:
+            d = json.load(open(self.path))
+            self.folders = d.get("folders", {}) or {}
+            self.auto = d.get("auto", True)
+            self.current = d.get("current")
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"folders": self.folders, "auto": self.auto,
+                           "current": self.current}, f)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass
+
+    def refresh(self):
+        self._projects = vscode_open_projects()
+
+    def projects(self):
+        return list(self._projects)
+
+    def name_of(self, path):
+        for n, p in self._projects:
+            if p == path:
+                return n
+        return os.path.basename(path) if path else "—"
+
+    def set_current(self, path, manual=False):
+        if manual:
+            self.auto = False
+        if path != self.current or manual:
+            self.current = path
+            self._save()
+            self.emit("changed")
+
+    def set_auto(self, on):
+        self.auto = on
+        if on:
+            f = vscode_focused_path(self._projects)
+            if f:
+                self.current = f
+        self._save()
+        self.emit("changed")
+
+    def poll(self):
+        self.refresh()
+        if self.auto:
+            f = vscode_focused_path(self._projects)
+            if f and f != self.current:
+                self.current = f
+                self._save()
+                self.emit("changed")
+        return True
+
+    def folder_for(self, path):
+        return self.folders.get(path)
+
+    def set_folder(self, path, folder):
+        self.folders[path] = folder
+        self._save()
+
+
+# ============================== chat store (shared + persisted) ==============================
+class ChatStore(GObject.GObject):
+    """The single source of truth for conversations. Owns streaming. Both the popup and
+    the app window are views bound to it, so a chat is never lost by switching surface,
+    and it's persisted to disk."""
+    __gsignals__ = {
+        "changed": (GObject.SignalFlags.RUN_FIRST, None, ()),      # full re-render
+        "delta": (GObject.SignalFlags.RUN_FIRST, None, (str,)),    # append streamed chunk
+        "busy": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+    }
+
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+        self.path = os.path.join(data_dir(), "chats.json")
+        self.conversations = []
+        self.current_id = None
+        self.streaming = False
+        self._load()
+        if not self.conversations:
+            self.new_conversation(emit=False)
+        elif self.current_id not in [c["id"] for c in self.conversations]:
+            self.current_id = self.conversations[0]["id"]
+
+    # -- persistence --
+    def _load(self):
+        try:
+            d = json.load(open(self.path))
+            self.conversations = d.get("conversations", [])
+            self.current_id = d.get("current_id")
+        except Exception:
+            self.conversations, self.current_id = [], None
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"current_id": self.current_id,
+                           "conversations": self.conversations}, f)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass
+
+    # -- model --
+    def _by_id(self, cid):
+        for c in self.conversations:
+            if c["id"] == cid:
+                return c
+        return None
+
+    def current(self):
+        return self._by_id(self.current_id)
+
+    def new_conversation(self, emit=True):
+        cid = "c%d" % int(time.time() * 1000)
+        conv = {"id": cid, "title": "New chat", "model": self.state.model,
+                "messages": [], "updated": time.time()}
+        self.conversations.insert(0, conv)
+        self.current_id = cid
+        self._save()
+        if emit:
+            self.emit("changed")
+        return conv
+
+    def switch(self, cid):
+        if cid != self.current_id and self._by_id(cid):
+            self.current_id = cid
+            conv = self.current()
+            if conv and conv.get("model"):
+                self.state.set_model(conv["model"])
+            self._save()
+            self.emit("changed")
+
+    def send(self, text):
+        if self.streaming:
+            return
+        conv = self.current() or self.new_conversation()
+        conv["messages"].append({"role": "user", "content": text})
+        if conv["title"] in ("", "New chat"):
+            conv["title"] = text.strip()[:44]
+        conv["messages"].append({"role": "assistant", "content": ""})  # streaming placeholder
+        conv["model"] = self.state.model
+        conv["updated"] = time.time()
+        self.streaming = True
+        self.emit("changed")
+        self.emit("busy", True)
+        self._save()
+        msgs = [{"role": m["role"], "content": m["content"]} for m in conv["messages"][:-1]]
+        threading.Thread(target=self._worker, args=(conv["id"], msgs, self.state.model),
+                         daemon=True).start()
+
+    def _worker(self, cid, msgs, model):
+        try:
+            got = False
+            for delta in self.state.api.chat_stream(msgs, model):
+                got = True
+                GLib.idle_add(self._on_delta, cid, delta)
+            GLib.idle_add(self._on_done, cid, got, None)
+        except Exception as e:
+            GLib.idle_add(self._on_done, cid, False, humanize_error(e))
+
+    def _on_delta(self, cid, delta):
+        conv = self._by_id(cid)
+        if conv and conv["messages"]:
+            conv["messages"][-1]["content"] += delta
+            if cid == self.current_id:
+                self.emit("delta", delta)
+        return False
+
+    def _on_done(self, cid, got, err):
+        conv = self._by_id(cid)
+        if conv and conv["messages"]:
+            last = conv["messages"][-1]
+            if err:
+                last["content"] = (last["content"] + f"\n⚠ {err}").strip()
+            elif not got and not last["content"]:
+                last["content"] = "(no response — the session may need re-auth)"
+            conv["updated"] = time.time()
+        self.streaming = False
+        self.emit("busy", False)
+        if err or not got:
+            self.emit("changed")
+        self._save()
+        return False
+
+
 # ============================== shared state ==============================
 class AppState(GObject.GObject):
     __gsignals__ = {"model-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,))}
@@ -149,6 +441,8 @@ class AppState(GObject.GObject):
         self.api = api
         self.models = list(FALLBACK_MODELS)
         self.model = FALLBACK_MODELS[0]
+        self.chats = ChatStore(self)
+        self.projects = ProjectManager()
 
     def set_model(self, m):
         if m and m != self.model:
@@ -161,8 +455,6 @@ def notify(title, body):
     if Notify is None:
         return
     try:
-        # libnotify hard-aborts (SIGABRT, not a catchable exception) if .show() runs
-        # before init — so always ensure init here, not only in main().
         if not Notify.is_initted():
             Notify.init(APP_NAME)
         Notify.Notification.new(title, body, APP_ID).show()
@@ -213,8 +505,33 @@ def fmt_uptime(s):
     return f"{s}s"
 
 
+def slugify(text, maxwords=5):
+    words = re.findall(r"[A-Za-z0-9]+", (text or "").lower())[:maxwords]
+    return "-".join(words) or "image"
+
+
+def ext_for_bytes(raw):
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    return ".png"
+
+
+def unique_path(folder, base, ext):
+    cand = os.path.join(folder, base + ext)
+    i = 1
+    while os.path.exists(cand):
+        cand = os.path.join(folder, f"{base}-{i}{ext}")
+        i += 1
+    return cand
+
+
 def make_provider_combo(state):
-    """A ComboBoxText bound two-way to AppState.model (kept in sync across combos)."""
     combo = Gtk.ComboBoxText()
     for m in state.models:
         combo.append_text(m)
@@ -240,28 +557,57 @@ def make_provider_combo(state):
     return combo
 
 
-# ============================== reusable chat panel ==============================
-class ChatPanel(Gtk.Box):
-    """Transcript + input row with streaming. Used by both the popup and the app."""
+def make_project_combo(projects):
+    """ComboBox of open VS Code projects, two-way bound to ProjectManager."""
+    combo = Gtk.ComboBoxText()
+    guard = {"on": False}
 
-    def __init__(self, state, system=None):
+    def rebuild(*_):
+        guard["on"] = True
+        combo.remove_all()
+        for name, path in projects.projects():
+            combo.append(path, name)
+        if projects.current:
+            if combo.get_active_id() != projects.current:
+                if not combo.set_active_id(projects.current):
+                    # current project isn't in the open list — show it anyway
+                    combo.append(projects.current, projects.name_of(projects.current) + " (closed)")
+                    combo.set_active_id(projects.current)
+        guard["on"] = False
+
+    def on_changed(c):
+        if guard["on"]:
+            return
+        pid = c.get_active_id()
+        if pid:
+            projects.set_current(pid, manual=True)
+
+    combo.connect("changed", on_changed)
+    projects.connect("changed", rebuild)
+    rebuild()
+    return combo
+
+
+# ============================== reusable chat panel (view over ChatStore) ==============================
+class ChatPanel(Gtk.Box):
+    def __init__(self, state):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.state = state
-        self.system = system
-        self.history = []
-        self.streaming = False
-        self._has_hint = False
+        self.store = state.chats
+        self._tail = False
 
         self.view = Gtk.TextView()
         self.view.set_editable(False)
         self.view.set_cursor_visible(False)
         self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        for setter in ("set_left_margin", "set_right_margin"):
-            getattr(self.view, setter)(10)
+        self.view.set_left_margin(10)
+        self.view.set_right_margin(10)
         self.view.set_top_margin(8)
         self.view.set_bottom_margin(8)
         self.buf = self.view.get_buffer()
-        self._init_tags()
+        self.buf.create_tag("user_label", foreground="#4f46e5", weight=700)
+        self.buf.create_tag("ai_label", foreground="#7c3aed", weight=700)
+        self.buf.create_tag("meta", foreground="#6b7280", style=Pango.Style.ITALIC, scale=0.92)
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -284,15 +630,12 @@ class ChatPanel(Gtk.Box):
         row.pack_start(self.send_btn, False, False, 0)
         self.pack_start(row, False, False, 0)
 
-        self._show_hint()
+        self.store.connect("changed", lambda *_: self.render())
+        self.store.connect("delta", lambda _s, d: self._append(d))
+        self.store.connect("busy", lambda _s, b: self._set_busy(b))
+        self.render()
+        self._set_busy(self.store.streaming)
 
-    def _init_tags(self):
-        self.buf.create_tag("user_label", foreground="#4f46e5", weight=700)
-        self.buf.create_tag("ai_label", foreground="#7c3aed", weight=700)
-        self.buf.create_tag("meta", foreground="#6b7280", style=Pango.Style.ITALIC, scale=0.92)
-        self.buf.create_tag("error", foreground="#dc2626", weight=700)
-
-    # ---- transcript primitives ----
     def _insert(self, text, *tags):
         end = self.buf.get_end_iter()
         if tags:
@@ -306,109 +649,91 @@ class ChatPanel(Gtk.Box):
         self._insert(name + "\n", tag)
 
     def _scroll(self):
-        mark = self.buf.get_insert()
         self.buf.place_cursor(self.buf.get_end_iter())
-        self.view.scroll_to_mark(mark, 0.0, True, 0, 1.0)
+        self.view.scroll_to_mark(self.buf.get_insert(), 0.0, True, 0, 1.0)
 
-    def _show_hint(self):
-        self._has_hint = True
-        self._insert("Ask anything — answered by the browser-driven LLM on this machine.\n", "meta")
-
-    def _clear_hint(self):
-        if self._has_hint:
-            self.buf.set_text("")
-            self._has_hint = False
-
-    def reset(self):
-        self.history = []
+    def render(self):
         self.buf.set_text("")
-        self._show_hint()
-        self.entry.grab_focus()
+        conv = self.store.current()
+        msgs = conv["messages"] if conv else []
+        if not msgs:
+            self._insert("Ask anything — answered by the browser-driven LLM on this machine.\n",
+                         "meta")
+            self._tail = True
+            return
+        for m in msgs:
+            if m["role"] == "user":
+                self._role("You", "user_label")
+            else:
+                self._role("Assistant", "ai_label")
+            self._insert(m["content"])
+        self._tail = True
+        self._scroll()
 
-    # ---- send / stream ----
+    def _append(self, delta):
+        if self._tail:
+            self._insert(delta)
+            self._scroll()
+
+    def _set_busy(self, b):
+        self.entry.set_sensitive(not b)
+        self.send_btn.set_sensitive(not b)
+        if b:
+            self.spinner.show()
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+            self.spinner.hide()
+            self.entry.grab_focus()
+
     def _on_send(self, *_):
-        if self.streaming:
+        if self.store.streaming:
             return
         text = self.entry.get_text().strip()
         if not text:
             return
         self.entry.set_text("")
-        self._clear_hint()
-        self.history.append({"role": "user", "content": text})
-        self._role("You", "user_label")
-        self._insert(text + "\n")
-        self._scroll()
-        self._start_stream()
-
-    def _start_stream(self):
-        self.streaming = True
-        self.entry.set_sensitive(False)
-        self.send_btn.set_sensitive(False)
-        self.spinner.show()
-        self.spinner.start()
-        self._role("Assistant", "ai_label")
-        self._got_text = False
-        self._ai_text = ""
-        self._scroll()
-        msgs = list(self.history)
-        if self.system:
-            msgs = [{"role": "system", "content": self.system}] + msgs
-        model = self.state.model or FALLBACK_MODELS[0]
-        threading.Thread(target=self._worker, args=(msgs, model), daemon=True).start()
-
-    def _worker(self, msgs, model):
-        try:
-            for delta in self.state.api.chat_stream(msgs, model):
-                GLib.idle_add(self._on_delta, delta)
-            GLib.idle_add(self._on_done)
-        except Exception as e:
-            GLib.idle_add(self._on_error, humanize_error(e))
-
-    def _on_delta(self, delta):
-        self._got_text = True
-        self._ai_text += delta
-        self._insert(delta)
-        self._scroll()
-        return False
-
-    def _on_done(self):
-        if not self._got_text:
-            self._insert("(no response — the session may need re-auth)", "meta")
-        else:
-            self.history.append({"role": "assistant", "content": self._ai_text})
-        self._insert("\n")
-        self._end_stream()
-        return False
-
-    def _on_error(self, msg):
-        self._insert(f"⚠ {msg}\n", "error")
-        self._end_stream()
-        return False
-
-    def _end_stream(self):
-        self.streaming = False
-        self.spinner.stop()
-        self.spinner.hide()
-        self.entry.set_sensitive(True)
-        self.send_btn.set_sensitive(True)
-        self.entry.grab_focus()
-        self._scroll()
+        self.store.send(text)
 
 
-# ============================== image generation panel ==============================
-class ImagePanel(Gtk.Box):
-    def __init__(self, state):
+# ============================== project-aware image panel ==============================
+class ProjectImagePanel(Gtk.Box):
+    """Generate an image and drop it into the active VS Code project's save folder
+    (pick-and-remember). Degrades to just previewing + the server's copy if there's no
+    project."""
+
+    def __init__(self, state, compact=False):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.state = state
+        self.projects = state.projects
+        self.compact = compact
         self.busy = False
         self._t0 = None
         self._timer_id = None
-        self._last_raw = None
-        self.set_border_width(10)
+        self._last_file = None
+        self.set_border_width(8 if compact else 10)
 
+        # project bar
+        pbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        lbl = Gtk.Label(label="Project")
+        lbl.get_style_context().add_class("dim-label")
+        self.project_combo = make_project_combo(self.projects)
+        self.project_combo.set_hexpand(True)
+        self.follow = Gtk.ToggleButton()
+        self.follow.set_image(Gtk.Image.new_from_icon_name("find-location-symbolic",
+                                                           Gtk.IconSize.BUTTON))
+        self.follow.set_tooltip_text("Follow the focused VS Code window")
+        self.follow.set_active(self.projects.auto)
+        self.follow.connect("toggled", lambda t: self.projects.set_auto(t.get_active()))
+        pbar.pack_start(lbl, False, False, 0)
+        pbar.pack_start(self.project_combo, True, True, 0)
+        pbar.pack_start(self.follow, False, False, 0)
+        self.pack_start(pbar, False, False, 0)
+
+        # prompt row
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("Describe an image to generate…")
+        self.entry.set_placeholder_text("Describe an image for this project…")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self._on_gen)
         self.gen = Gtk.Button.new_with_label("Generate")
@@ -418,20 +743,26 @@ class ImagePanel(Gtk.Box):
         row.pack_start(self.gen, False, False, 0)
         self.pack_start(row, False, False, 0)
 
-        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # status row
+        srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.spinner = Gtk.Spinner()
         self.spinner.set_no_show_all(True)
         self.status = Gtk.Label(label="")
         self.status.set_xalign(0)
-        self.status.set_ellipsize(Pango.EllipsizeMode.END)
-        status.pack_start(self.spinner, False, False, 0)
-        status.pack_start(self.status, True, True, 0)
-        self.open_btn = Gtk.Button.new_with_label("Open full image")
-        self.open_btn.set_sensitive(False)
-        self.open_btn.connect("clicked", self._on_open)
-        status.pack_start(self.open_btn, False, False, 0)
-        self.pack_start(status, False, False, 0)
+        self.status.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.open_file = Gtk.Button.new_with_label("Open")
+        self.open_file.set_sensitive(False)
+        self.open_file.connect("clicked", lambda *_: self._last_file and open_uri("file://" + self._last_file))
+        self.open_dir = Gtk.Button.new_with_label("Folder")
+        self.open_dir.set_sensitive(False)
+        self.open_dir.connect("clicked", lambda *_: self._last_file and open_uri("file://" + os.path.dirname(self._last_file)))
+        srow.pack_start(self.spinner, False, False, 0)
+        srow.pack_start(self.status, True, True, 0)
+        srow.pack_start(self.open_file, False, False, 0)
+        srow.pack_start(self.open_dir, False, False, 0)
+        self.pack_start(srow, False, False, 0)
 
+        # preview
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sw.set_vexpand(True)
@@ -440,22 +771,65 @@ class ImagePanel(Gtk.Box):
         sw.add(self.image)
         self.pack_start(sw, True, True, 0)
 
+        self.projects.connect("changed", lambda *_: self._refresh_hint())
+        self._refresh_hint()
+
+    def _refresh_hint(self):
+        self.follow.set_active(self.projects.auto)
+        cur = self.projects.current
+        if cur:
+            saved = self.projects.folder_for(cur)
+            where = os.path.relpath(saved, cur) + "/" if saved else "you'll pick a folder"
+            self.status.set_text(f"→ {self.projects.name_of(cur)}  ({where})")
+        else:
+            self.status.set_text("No VS Code project detected — open one, or images save to the gallery only.")
+
+    def _ensure_folder(self):
+        """Return the save folder for the current project, prompting once (pick & remember)."""
+        cur = self.projects.current
+        if not cur:
+            return None
+        saved = self.projects.folder_for(cur)
+        if saved and os.path.isdir(saved):
+            return saved
+        dlg = Gtk.FileChooserDialog(
+            title=f"Where should images for “{self.projects.name_of(cur)}” be saved?",
+            action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dlg.set_transient_for(self.get_toplevel())
+        dlg.set_modal(True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Save here", Gtk.ResponseType.ACCEPT)
+        if os.path.isdir(cur):
+            dlg.set_current_folder(cur)
+        folder = dlg.get_filename() if dlg.run() == Gtk.ResponseType.ACCEPT else None
+        dlg.destroy()
+        if folder:
+            self.projects.set_folder(cur, folder)
+        return folder
+
     def _on_gen(self, *_):
         if self.busy:
             return
         prompt = self.entry.get_text().strip()
         if not prompt:
             return
+        folder = None
+        if self.projects.current:
+            folder = self._ensure_folder()
+            if folder is None and self.projects.folder_for(self.projects.current) is None:
+                self.status.set_text("Cancelled — no folder chosen.")
+                return
         model = self.state.model or FALLBACK_MODELS[0]
         self.busy = True
         self.gen.set_sensitive(False)
-        self.open_btn.set_sensitive(False)
+        self.open_file.set_sensitive(False)
+        self.open_dir.set_sensitive(False)
         self.spinner.show()
         self.spinner.start()
         self._t0 = time.monotonic()
         self.status.set_text(f"Generating with {model}…  0s")
         self._timer_id = GLib.timeout_add_seconds(1, self._tick, model)
-        threading.Thread(target=self._worker, args=(prompt, model), daemon=True).start()
+        threading.Thread(target=self._worker, args=(prompt, model, folder), daemon=True).start()
 
     def _tick(self, model):
         if not self.busy:
@@ -463,24 +837,24 @@ class ImagePanel(Gtk.Box):
         self.status.set_text(f"Generating with {model}…  {int(time.monotonic() - self._t0)}s")
         return True
 
-    def _worker(self, prompt, model):
+    def _worker(self, prompt, model, folder):
         try:
             res = self.state.api.generate_image(prompt, model)
             data = (res or {}).get("data") or []
             if not data:
                 raise RuntimeError("server returned no image")
             item = data[0]
-            raw, link = None, item.get("url") or item.get("path")
-            if item.get("b64_json"):
-                raw = base64.b64decode(item["b64_json"])
-            elif item.get("path") and os.path.exists(item["path"]):
-                with open(item["path"], "rb") as f:
-                    raw = f.read()
-            elif item.get("url"):
-                raw = self.state.api.fetch_bytes(item["url"])
+            raw = self.state.api.image_bytes(item)
             if raw is None:
                 raise RuntimeError("could not load the generated image")
-            GLib.idle_add(self._on_result, raw, str(link or ""))
+            saved_path = None
+            if folder:
+                name = slugify(prompt) + "-" + time.strftime("%H%M%S")
+                saved_path = unique_path(folder, name, ext_for_bytes(raw))
+                with open(saved_path, "wb") as f:
+                    f.write(raw)
+            server_link = item.get("path") or item.get("url") or ""
+            GLib.idle_add(self._on_result, raw, saved_path, server_link)
         except Exception as e:
             GLib.idle_add(self._on_error, humanize_error(e))
 
@@ -493,34 +867,35 @@ class ImagePanel(Gtk.Box):
             GLib.source_remove(self._timer_id)
             self._timer_id = None
 
-    def _on_result(self, raw, link):
+    def _on_result(self, raw, saved_path, server_link):
         self._finish()
-        self._last_raw = raw
-        try:
-            self.image.set_from_pixbuf(pixbuf_from_bytes(raw, 900, 900))
-        except Exception as e:
-            self.status.set_text(f"loaded but could not display: {e}")
-            return
         secs = int(time.monotonic() - self._t0)
-        self.status.set_text(f"Done in {secs}s  ·  {link}" if link else f"Done in {secs}s")
-        self.open_btn.set_sensitive(True)
+        try:
+            self.image.set_from_pixbuf(pixbuf_from_bytes(raw, 300 if self.compact else 820,
+                                                         300 if self.compact else 820))
+        except Exception as e:
+            self.status.set_text(f"generated but could not display: {e}")
+            return False
+        self._last_file = saved_path
+        if saved_path:
+            cur = self.projects.current
+            rel = os.path.relpath(saved_path, cur) if cur else saved_path
+            self.status.set_text(f"✓ Saved to {rel}  ({secs}s)")
+            self.open_file.set_sensitive(True)
+            self.open_dir.set_sensitive(True)
+            notify(APP_NAME, f"Image saved to {self.projects.name_of(cur)}/{rel}")
+        else:
+            self.status.set_text(f"✓ Generated in {secs}s · saved to gallery ({server_link})")
+            if server_link and os.path.exists(server_link):
+                self._last_file = server_link
+                self.open_file.set_sensitive(True)
+                self.open_dir.set_sensitive(True)
         return False
 
     def _on_error(self, msg):
         self._finish()
         self.status.set_text(f"⚠ {msg}")
         return False
-
-    def _on_open(self, *_):
-        if not self._last_raw:
-            return
-        path = os.path.join(GLib.get_tmp_dir(), f"browser-llm-{int(time.monotonic() * 1000)}.png")
-        try:
-            with open(path, "wb") as f:
-                f.write(self._last_raw)
-            open_uri("file://" + path)
-        except Exception:
-            pass
 
 
 # ============================== gallery panel ==============================
@@ -629,7 +1004,7 @@ class ImageViewer(Gtk.Window):
         try:
             raw = api.fetch_bytes(url)
             GLib.idle_add(self._set, raw)
-        except Exception as e:
+        except Exception:
             GLib.idle_add(self.img.set_from_icon_name, "image-missing-symbolic", Gtk.IconSize.DIALOG)
 
     def _set(self, raw):
@@ -730,7 +1105,7 @@ class MainWindow(Gtk.Window):
     def __init__(self, state):
         super().__init__(title=APP_NAME)
         self.state = state
-        self.set_default_size(780, 640)
+        self.set_default_size(800, 660)
         self.connect("delete-event", self._on_delete)
 
         hb = Gtk.HeaderBar()
@@ -739,33 +1114,57 @@ class MainWindow(Gtk.Window):
         hb.set_subtitle("browser-driven LLM")
         new_chat = Gtk.Button.new_from_icon_name("document-new-symbolic", Gtk.IconSize.BUTTON)
         new_chat.set_tooltip_text("New chat")
-        new_chat.connect("clicked", lambda *_: self.chat.reset())
+        new_chat.connect("clicked", lambda *_: self.state.chats.new_conversation())
+        history = Gtk.Button.new_from_icon_name("document-open-recent-symbolic", Gtk.IconSize.BUTTON)
+        history.set_tooltip_text("Chat history")
+        history.connect("clicked", self._show_history)
         hb.pack_start(new_chat)
+        hb.pack_start(history)
         prov_lbl = Gtk.Label(label="Provider")
         prov_lbl.get_style_context().add_class("dim-label")
         hb.pack_end(make_provider_combo(state))
         hb.pack_end(prov_lbl)
         self.set_titlebar(hb)
 
-        nb = Gtk.Notebook()
+        self.nb = Gtk.Notebook()
         self.chat = ChatPanel(state)
         self.chat.set_border_width(10)
-        nb.append_page(self.chat, Gtk.Label(label="Chat"))
-        nb.append_page(ImagePanel(state), Gtk.Label(label="Images"))
-        nb.append_page(GalleryPanel(state), Gtk.Label(label="Gallery"))
-        nb.append_page(StatusPanel(state), Gtk.Label(label="Status"))
-        self.add(nb)
+        self.nb.append_page(self.chat, Gtk.Label(label="Chat"))
+        self.nb.append_page(ProjectImagePanel(state), Gtk.Label(label="Images"))
+        self.nb.append_page(GalleryPanel(state), Gtk.Label(label="Gallery"))
+        self.nb.append_page(StatusPanel(state), Gtk.Label(label="Status"))
+        self._tabs = {"chat": 0, "images": 1, "gallery": 2, "status": 3}
+        self.add(self.nb)
+
+    def _show_history(self, btn):
+        menu = Gtk.Menu()
+        chats = self.state.chats
+        if not chats.conversations:
+            mi = Gtk.MenuItem.new_with_label("(no chats yet)")
+            mi.set_sensitive(False)
+            menu.append(mi)
+        for c in chats.conversations[:25]:
+            mark = "●  " if c["id"] == chats.current_id else "     "
+            title = (c.get("title") or "New chat")[:50]
+            mi = Gtk.MenuItem.new_with_label(mark + title)
+            mi.connect("activate", lambda _m, cid=c["id"]: (chats.switch(cid),
+                                                            self.nb.set_current_page(0)))
+            menu.append(mi)
+        menu.show_all()
+        menu.popup_at_widget(btn, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
 
     def _on_delete(self, *_):
         self.hide()
-        return True  # keep running in the tray
+        return True
 
-    def present_window(self):
+    def present_window(self, tab=None):
         self.show_all()
+        if tab in self._tabs:
+            self.nb.set_current_page(self._tabs[tab])
         self.present()
 
 
-# ============================== quick-chat popup (the widget) ==============================
+# ============================== quick popup (the widget) ==============================
 class QuickChatWindow(Gtk.Window):
     def __init__(self, state, on_expand=None):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
@@ -776,7 +1175,7 @@ class QuickChatWindow(Gtk.Window):
         self.set_skip_pager_hint(True)
         self.set_keep_above(True)
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
-        self.set_default_size(370, 480)
+        self.set_default_size(390, 580)
         self.connect("delete-event", lambda *_: self.hide() or True)
         self.connect("key-press-event", self._on_key)
 
@@ -792,7 +1191,7 @@ class QuickChatWindow(Gtk.Window):
         combo = make_provider_combo(state)
         expand = Gtk.Button.new_from_icon_name("view-fullscreen-symbolic", Gtk.IconSize.BUTTON)
         expand.set_relief(Gtk.ReliefStyle.NONE)
-        expand.set_tooltip_text("Open full app")
+        expand.set_tooltip_text("Open full app (keeps this chat)")
         expand.connect("clicked", self._on_expand)
         close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
         close.set_relief(Gtk.ReliefStyle.NONE)
@@ -803,10 +1202,33 @@ class QuickChatWindow(Gtk.Window):
         head.pack_start(close, False, False, 0)
         outer.pack_start(head, False, False, 0)
 
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.image_panel = ProjectImagePanel(state, compact=True)
+        self.stack.add_titled(self.image_panel, "image", "Image")
+
+        chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        chat_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        chat_bar.set_border_width(6)
+        new_btn = Gtk.Button.new_from_icon_name("document-new-symbolic", Gtk.IconSize.BUTTON)
+        new_btn.set_tooltip_text("New chat")
+        new_btn.set_relief(Gtk.ReliefStyle.NONE)
+        new_btn.connect("clicked", lambda *_: self.state.chats.new_conversation())
+        chat_bar.pack_end(new_btn, False, False, 0)
+        chat_box.pack_start(chat_bar, False, False, 0)
         self.chat = ChatPanel(state)
         self.chat.set_border_width(8)
-        outer.pack_start(self.chat, True, True, 0)
+        chat_box.pack_start(self.chat, True, True, 0)
+        self.stack.add_titled(chat_box, "chat", "Chat")
+
+        switcher = Gtk.StackSwitcher()
+        switcher.set_stack(self.stack)
+        switcher.set_halign(Gtk.Align.CENTER)
+        switcher.set_border_width(4)
+        outer.pack_start(switcher, False, False, 0)
+        outer.pack_start(self.stack, True, True, 0)
         self.add(outer)
+        self.stack.set_visible_child_name("image")
 
     def _on_key(self, _w, ev):
         if ev.keyval == Gdk.KEY_Escape:
@@ -815,9 +1237,10 @@ class QuickChatWindow(Gtk.Window):
         return False
 
     def _on_expand(self, *_):
+        page = self.stack.get_visible_child_name()
         self.hide()
         if self.on_expand:
-            self.on_expand()
+            self.on_expand("images" if page == "image" else "chat")
 
     def toggle(self):
         if self.get_visible():
@@ -828,7 +1251,6 @@ class QuickChatWindow(Gtk.Window):
             w, _h = self.get_size()
             sw, _sh, sx, sy = screen_wh()
             self.move(sx + sw - w - 12, sy + 44)
-            self.chat.entry.grab_focus()
 
 
 # ============================== tray + application ==============================
@@ -857,9 +1279,9 @@ class TrayApp:
         self._build_indicator()
         GLib.timeout_add_seconds(6, self._poll)
         self._poll()
+        GLib.timeout_add_seconds(2, self.state.projects.poll)
 
     def _bootstrap(self):
-        """Discover providers + default from the live server (falls back gracefully)."""
         try:
             st = self.api.status(timeout=4)
             provs = list((st.get("providers") or {}).keys())
@@ -892,7 +1314,6 @@ class TrayApp:
             return None
 
     def _tray_icon(self):
-        """Rasterize the SVG to a cached PNG for the indicator; fall back to a themed name."""
         cache = os.path.join(GLib.get_user_cache_dir(), APP_ID)
         try:
             os.makedirs(cache, exist_ok=True)
@@ -904,7 +1325,6 @@ class TrayApp:
 
     def _build_indicator(self):
         if AppIndicator3 is None:
-            # No tray library — degrade to just showing the app window.
             notify(APP_NAME, "Tray unavailable; opening the app window.")
             self.main.present_window()
             return
@@ -918,7 +1338,7 @@ class TrayApp:
         ind.set_title(APP_NAME)
 
         menu = Gtk.Menu()
-        mi_quick = Gtk.MenuItem.new_with_label("💬  Quick chat")
+        mi_quick = Gtk.MenuItem.new_with_label("🎨  Quick image / chat")
         mi_quick.connect("activate", lambda *_: self.quick.toggle())
         menu.append(mi_quick)
 
@@ -945,6 +1365,12 @@ class TrayApp:
         self.state.connect("model-changed", self._on_model_changed)
         menu.append(prov)
 
+        self.mi_project = Gtk.MenuItem.new_with_label("Project: …")
+        self.mi_project.set_sensitive(False)
+        menu.append(self.mi_project)
+        self.state.projects.connect("changed", lambda *_: self._update_project_label())
+        self._update_project_label()
+
         self.mi_status = Gtk.MenuItem.new_with_label("…")
         self.mi_status.set_sensitive(False)
         menu.append(self.mi_status)
@@ -962,11 +1388,18 @@ class TrayApp:
         menu.show_all()
         ind.set_menu(menu)
         try:
-            ind.set_secondary_activate_target(mi_quick)  # middle-click → quick chat
+            ind.set_secondary_activate_target(mi_quick)
         except Exception:
             pass
         self.indicator = ind
-        notify(APP_NAME, "Running in the tray — click the icon to chat.")
+        notify(APP_NAME, "Running in the tray — click the icon for quick project images.")
+
+    def _update_project_label(self):
+        if hasattr(self, "mi_project"):
+            cur = self.state.projects.current
+            label = self.state.projects.name_of(cur) if cur else "none open"
+            follow = " (following)" if self.state.projects.auto else ""
+            self.mi_project.set_label(f"Project: {label}{follow}")
 
     def _on_prov_toggled(self, item, model):
         if item.get_active():

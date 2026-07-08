@@ -58,10 +58,18 @@ desktop/               # NATIVE Linux desktop app + tray widget (GTK3), a thin c
                        #   HTTP API — NOT browser automation. Runs on SYSTEM python3 (has
                        #   PyGObject); stdlib only, no venv/pip. GTK3 (not 4) on purpose:
                        #   AppIndicator (the tray) is GTK3-only and can't share a process
-                       #   with GTK4.
-  browser_llm_desktop.py # whole app: Api (stdlib urllib), ChatPanel, ImagePanel,
-                       #   GalleryPanel/ImageViewer, StatusPanel, MainWindow (Chat/Images/
-                       #   Gallery/Status tabs), QuickChatWindow (tray popup), TrayApp.
+                       #   with GTK4. The tray widget's job: generate image assets for the
+                       #   focused VS Code project.
+  browser_llm_desktop.py # whole app: Api (stdlib urllib); ProjectManager (reads open VS Code
+                       #   windows from ~/.config/Code/User/globalStorage/storage.json, resolves
+                       #   the focused window via xdotool, auto-follows focus, remembers a save
+                       #   folder per project in ~/.local/share/browser-llm-desktop/projects.json);
+                       #   ChatStore (single SHARED + persisted conversation store — popup and
+                       #   window are both views, so enlarging never loses the chat; chats.json);
+                       #   ProjectImagePanel (gen -> save into project, pick&remember folder);
+                       #   ChatPanel, GalleryPanel/ImageViewer, StatusPanel, MainWindow (Chat/
+                       #   Images/Gallery/Status + History menu), QuickChatWindow (Image|Chat
+                       #   tabs), TrayApp.
   icon.svg run.sh install-desktop.sh browser-llm-desktop.desktop.in README.md
 tests/               # unit tests (no browser needed):
                      #   ./venv/bin/python -m unittest discover -s tests

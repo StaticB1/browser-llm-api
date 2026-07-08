@@ -35,7 +35,7 @@ client.chat.completions.create(
 | 🔌 **OpenAI-compatible API** | `/v1/chat/completions` + `/v1/images/generations` + `/v1/models` | `http://localhost:8081/v1` |
 | 🖥️ **Web dashboard** | Streaming chat, image generation, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
 | 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble onto any page on your network | `/widget.js` (demo at `/demo`) |
-| 🐧 **Native desktop app** | A GTK tray indicator + full Chat / Images / Gallery / Status window for Linux | [`desktop/`](desktop/README.md) |
+| 🐧 **Native desktop app** | GTK tray widget that generates images for your active **VS Code project**, + a full Chat / Images / Gallery / Status window (Linux) | [`desktop/`](desktop/README.md) |
 
 | `model` | Backend | Images |
 |---------|---------|--------|
@@ -114,14 +114,14 @@ Runtime handle: `window.BrowserLLMWidget.{open, close, reset, config}` — e.g. 
 
 Prefer a **real Linux app** over a browser tab? [`desktop/`](desktop/README.md) has a native GTK3 client:
 
-- a **tray indicator** in your top bar — with a compact **Quick-chat popup**, a provider switcher, and a live server-status line;
-- a **full app window** with Chat / Images / Gallery / Status tabs, mirroring the web dashboard.
+- a **tray indicator** whose popup is built for **quick image assets scoped to your VS Code project** — it auto-detects the focused VS Code window and saves generated images straight into that project (remembering a save folder per project). Plus a Chat tab.
+- a **full app window** with Chat / Images / Gallery / Status tabs.
 
-It's a thin front-end over the same HTTP API (no browser automation lives in it), and runs on the **system `python3`** — **no venv, no pip, standard library only**.
+Chats are **shared** between the popup and the window (enlarging keeps your conversation) and **persisted** across restarts. It's a thin front-end over the same HTTP API (no browser automation lives in it), and runs on the **system `python3`** — **no venv, no pip, standard library only**.
 
 ```bash
-# system GTK3 + AppIndicator (present by default on Ubuntu GNOME):
-sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+# system GTK3 + AppIndicator + xdotool (present/1-cmd on Ubuntu GNOME):
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 libnotify-bin xdotool
 
 ./desktop/run.sh                 # start it — lands in the tray
 ./desktop/install-desktop.sh     # optional: add a "Browser LLM" launcher to the app grid
