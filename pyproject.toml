@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-llm-api"
+description = "OpenAI-compatible API (chat + image generation) backed by an automated Chrome browser session — no API key, drives gemini.google.com / chatgpt.com."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Browser LLM API contributors" }]
+keywords = ["llm", "openai", "gemini", "chatgpt", "browser-automation", "nodriver", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+dynamic = ["version"]
+
+dependencies = [
+    "nodriver>=0.50",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+# gen_asset.py post-processes generated images (resize/crop/favicon/knockout).
+assets = ["Pillow>=10"]
+
+[project.scripts]
+browser-llm = "server:main"
+
+[project.urls]
+Homepage = "https://github.com/StaticB1/google_api"
+Repository = "https://github.com/StaticB1/google_api"
+Issues = "https://github.com/StaticB1/google_api/issues"
+
+# Flat layout: top-level modules + the providers package. The web UI + widget
+# in webui/ are resolved relative to server.py at runtime, so install editable
+# from a clone (`pip install -e .`) — that keeps the source (and webui/) in place.
+[tool.setuptools]
+py-modules = ["server", "client", "login", "gen_asset", "gemini_bot", "_version"]
+
+[tool.setuptools.packages.find]
+include = ["providers*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "_version.__version__" }

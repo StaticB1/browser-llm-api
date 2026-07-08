@@ -12,3 +12,15 @@ gemini_research_data.txt
 __pycache__/
 venv/
 .venv/
+*.pyc
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tooling / test caches
+.pytest_cache/
+.ruff_cache/
+.playwright-mcp/

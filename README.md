@@ -9,8 +9,9 @@ Drives a **chat web UI** through an automated Chrome browser ([`nodriver`](https
 
 An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `gemini-browser`).
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status` + `/api/gallery` for the UI).
-- **`webui/index.html`** — **mini web UI** served at `http://localhost:8081/` — streaming chat, image generation, a gallery of everything generated so far, and live per-provider status. No build step, single file.
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo` for the UI + widget).
+- **`webui/index.html`** — **mini web UI** served at `http://localhost:8081/` — streaming chat, image generation, a gallery of everything generated so far, and a **Status** tab with live per-provider telemetry. No build step, single file.
+- **`webui/widget.js`** — **embeddable chat widget** served at `/widget.js`: one `<script>` tag drops a floating chat bubble onto any page (see [Embeddable widget](#embeddable-widget)). Live demo at `/demo`.
 - **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`.
 - **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt` (see below).
 - **`gemini_bot.py`** — standalone single-prompt Gemini prototype (hardcoded prompt → saves the answer).
@@ -27,7 +28,14 @@ The server keeps **one persistent Chrome per provider** (profile in `gemini_prof
 ## Requirements
 
 - Google Chrome, Python 3.12
-- Deps go in a **venv** (system Python is usually PEP-668 externally-managed): `python3.12 -m venv venv && ./venv/bin/pip install -r requirements.txt`. Run with `./venv/bin/python server.py`.
+- Deps go in a **venv** (system Python is usually PEP-668 externally-managed). Two equivalent ways:
+  ```bash
+  python3.12 -m venv venv
+  ./venv/bin/pip install -r requirements.txt        # then: ./venv/bin/python server.py
+  # — or, as an editable package (adds a `browser-llm` command; `[assets]` pulls in Pillow for gen_asset.py):
+  ./venv/bin/pip install -e ".[assets]"             # then: ./venv/bin/browser-llm   (or ./serve.sh)
+  ```
+  Install **editable** (`-e`) from a clone — the web UI/widget in `webui/` are resolved relative to the source. On a headless box use `./serve.sh` (Xvfb) rather than calling `browser-llm` directly, since the sites need a non-headless Chrome.
 - Chrome runs **non-headless** on purpose (the sites block true headless). `serve.sh` auto-detects a display: it uses a real `$DISPLAY` if present (needed for ChatGPT image gen), otherwise falls back to headless **Xvfb** (needs the `xvfb` package; Gemini works, ChatGPT images don't). Re-auth uses a real display (e.g. `DISPLAY=:1`).
 - **ChatGPT image generation needs a real GPU display** (see below) — it does not render under headless Xvfb.
 
@@ -41,13 +49,40 @@ python3 gemini_bot.py
 
 ## Web UI
 
-Open **`http://localhost:8081/`** in a browser. Three tabs:
+Open **`http://localhost:8081/`** in a browser. Four tabs:
 
 - **Chat** — pick a provider, chat with streaming replies and multi-turn context; optional system prompt; generated images render inline. Enter sends, Shift+Enter for a newline.
 - **Image** — one-line prompt → image, with an elapsed-time indicator (free-tier image gen takes 30s–4min).
 - **Gallery** — every image saved to `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
+- **Status** — live per-provider telemetry (requests, errors, avg + last latency, images-until-recycle countdown), server info (version, uptime, display, image dir), and a copy-paste **embed snippet** with a "Preview widget on this page" button.
 
-The header shows each provider's live state (off / idle / busy — requests to the same provider queue), and the footer shows server uptime and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
+The header shows each provider's live state (off / idle / busy — requests to the same provider queue; click the pills to jump to Status), and the footer shows the version, server uptime, and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
+
+## Embeddable widget
+
+Drop a floating chat bubble onto **any** page on your network with one line — it talks to this server's `/v1/chat/completions`:
+
+```html
+<script src="http://localhost:8081/widget.js"></script>
+```
+
+The widget is self-contained and **Shadow-DOM isolated** (host-page CSS can't leak in or out). It auto-discovers the API base from its own script URL, so the host page can be on any origin/port — the server already sends open CORS headers. See a live demo at **`http://localhost:8081/demo`**.
+
+Configure with `data-*` attributes on the script tag:
+
+| attribute | default | meaning |
+|-----------|---------|---------|
+| `data-provider` | server default | `gemini-browser` / `chatgpt-browser` |
+| `data-title` | `Ask AI` | header text |
+| `data-accent` | `#6ea8fe` | accent color |
+| `data-position` | `br` | `br` (bottom-right) / `bl` (bottom-left) |
+| `data-greeting` | friendly hi | first assistant line |
+| `data-system` | — | a system prompt sent with every turn |
+| `data-open` | — | `1` to start expanded |
+
+Runtime handle: `window.BrowserLLMWidget.{open, close, reset, config}` — e.g. `BrowserLLMWidget.config({accent:'#9b8cfb', provider:'chatgpt-browser'})`. Press `Esc` to close.
+
+> The widget inherits the server's **no-auth, LAN-only** trust model — embedding it just means the unauthenticated endpoint is reachable from more pages. Fine for trusted LAN use; don't expose it beyond your network.
 
 ## Selecting a provider
 
@@ -145,3 +180,11 @@ The completion decision (when is a streamed answer / image done?) is pure logic 
 ```bash
 ./venv/bin/python -m unittest discover -s tests -v
 ```
+
+## License
+
+[MIT](LICENSE). Version is defined in `_version.py` (surfaced at `/version`, `/api/status`, and the UI footer).
+
+## Disclaimer
+
+This tool automates logged-in sessions on third-party sites (gemini.google.com, chatgpt.com) that have **no official API for this use**. It may violate those services' Terms of Service, it is **inherently fragile** (a site UI change can break extraction at any time), and it uses your own account/session. Use it for personal/experimental purposes, at your own risk, and review each provider's ToS. The authors provide no warranty (see [LICENSE](LICENSE)).

@@ -12,8 +12,17 @@ profile. Prompts are typed into the page and answers (text and generated images)
 out of the DOM.
 
 A **mini web UI** (`webui/index.html`, single file, no build step) is served at
-`http://localhost:8081/` — streaming chat, image generation, gallery of saved images, and a live
-per-provider status bar (backed by `/api/status` + `/api/gallery`).
+`http://localhost:8081/` — streaming chat, image generation, gallery of saved images, a live
+per-provider status bar, and a **Status tab** with live telemetry (requests / errors / avg+last
+latency / last-error / recycle countdown per provider), backed by `/api/status` + `/api/gallery`.
+
+There is also an **embeddable chat widget** (`webui/widget.js`, served at `/widget.js`): a
+self-contained, Shadow-DOM-isolated floating chat bubble that any other page on the LAN can add with
+`<script src="http://<host>:8081/widget.js"></script>`. It auto-discovers this server as its API base
+from its own script URL (CORS is already open) and streams from `/v1/chat/completions`. Config via
+`data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `system`, `open`); runtime
+handle `window.BrowserLLMWidget` (`open`/`close`/`reset`/`config`). The Status tab shows a copy-paste
+embed snippet + a "Preview widget on this page" button.
 
 Two providers, selected per-request by the OpenAI **`model`** field:
 
@@ -31,10 +40,20 @@ additionally sits behind Cloudflare/anti-bot. A UI change can silently break ext
 
 ```
 server.py            # FastAPI app, port 8081. Model→provider router, the generic
-                     #   completion loop, generic image persistence, CDP patch.
-                     #   Also serves the web UI at "/" + /api/status + /api/gallery.
+                     #   completion loop, generic image persistence, CDP patch. main()
+                     #   is the `browser-llm` console entry point (BROWSER_LLM_HOST/PORT).
+                     #   Serves "/" + /widget.js + /demo + /version + /api/status
+                     #   (incl. per-provider telemetry: _metrics + _record_request) + /api/gallery.
+_version.py          # single source of truth for __version__ (read by pyproject + server).
+pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` entry point.
+                     #   Flat layout — install editable from a clone (`pip install -e .`).
+LICENSE              # MIT.
 webui/index.html     # mini web UI (single file, no build step): streaming chat,
-                     #   image gen with elapsed timer, gallery, live provider status.
+                     #   image gen with elapsed timer, gallery, live provider status,
+                     #   Status tab (telemetry + embed snippet + version in footer).
+webui/widget.js      # embeddable floating chat bubble (Shadow-DOM isolated, no build step);
+                     #   served at /widget.js; auto-discovers API base from its own <script src>.
+webui/widget-demo.html # standalone demo page (served at /demo) embedding the widget.
 tests/               # unit tests (no browser needed):
                      #   ./venv/bin/python -m unittest discover -s tests
 providers/
@@ -179,6 +198,24 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   A generated image is an `<img src="…/backend-api/estuary/content?id=file_…" alt="Generated image: …">`
   (same-origin → fetchable to base64), NOT `oaiusercontent`/`blob:`. The finished image is *not* inside
   a `data-message-author-role` element, so `image_status`/`get_images` scan the whole page.
+- **ChatGPT code blocks are CodeMirror, and the stream is buffered (fixed 2026-07-08):** an inline code
+  answer is NOT a plain `<pre><code class="language-x">` — it's a **CodeMirror editor** (`.cm-editor` /
+  `.cm-content`, `#code-block-viewer`) with the language shown only as a toolbar pill (no `language-*`
+  class) plus Copy/Run buttons, and **two** `<pre>`s (CM internals). A naive `innerText` read flattened
+  the toolbar in with the code and dropped the markdown fence, so code answers came back as
+  `"Python\nRun\ndef …"`. `get_response_text` now keeps `innerText` as the prose base (untouched — clean
+  prose + list markers) and **surgically splices each code card into a ```fenced``` block**: it finds the
+  editor, extracts the real code from `.cm-content` (or `.cm-line`s), reads the language from the toolbar,
+  and replaces the card's flattened `innerText` chunk in-place (innerText-to-innerText match, so the
+  substitution is reliable). Verified against the live DOM. **Because the extracted text *reshapes* near
+  the end** (flattened while streaming → fenced once CM finalizes), append-only SSE deltas can't represent
+  it — so ChatGPT sets `Provider.buffered_stream = True` (`providers/base.py`): `_stream_completion`
+  suppresses incremental deltas and emits the final authoritative text **once** at completion
+  (`CompletionTracker.text` holds the last non-empty full text). Gemini keeps incremental streaming
+  (`buffered_stream = False`). Trade-off: ChatGPT answers appear all-at-once (spinner until done) instead
+  of typing in — the cost of correctness for a reshaping source. Known limit: very long code may be partial
+  (CodeMirror virtualizes offscreen lines); the Canvas side-panel fallback still applies when `.markdown`
+  is near-empty.
 - **ChatGPT session cookie is chunked**: `__Secure-next-auth.session-token.0` / `.1` (no un-suffixed
   name). `login.py` prefix-matches it and waits for it (not the DOM) before closing, so the session
   actually persists. Gemini's path is behaviorally unchanged from the original.
