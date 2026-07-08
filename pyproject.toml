@@ -8,7 +8,10 @@ description = "OpenAI-compatible API (chat + image generation) backed by an auto
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-authors = [{ name = "Browser LLM API contributors" }]
+authors = [
+    { name = "staticB1", email = "bsiwonde@gmail.com" },
+    { name = 'Ebenezer "Ebstar" Tarubinga', email = "ebstarmusic@gmail.com" },
+]
 keywords = ["llm", "openai", "gemini", "chatgpt", "browser-automation", "nodriver", "fastapi"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,9 +38,9 @@ assets = ["Pillow>=10"]
 browser-llm = "server:main"
 
 [project.urls]
-Homepage = "https://github.com/StaticB1/google_api"
-Repository = "https://github.com/StaticB1/google_api"
-Issues = "https://github.com/StaticB1/google_api/issues"
+Homepage = "https://github.com/StaticB1/browser-llm-api"
+Repository = "https://github.com/StaticB1/browser-llm-api"
+Issues = "https://github.com/StaticB1/browser-llm-api/issues"
 
 # Flat layout: top-level modules + the providers package. The web UI + widget
 # in webui/ are resolved relative to server.py at runtime, so install editable

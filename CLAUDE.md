@@ -233,5 +233,5 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 ## Git
 
 Default/main branch is **`master`** (there is no `main` branch), remote `origin` →
-https://github.com/StaticB1/google_api. Never commit `*_profile/`, `*.log`,
+https://github.com/StaticB1/browser-llm-api. Never commit `*_profile/`, `*.log`,
 `gemini_research_data.txt`, or `__pycache__/` (all gitignored).
