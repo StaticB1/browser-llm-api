@@ -1,51 +1,77 @@
 # Browser LLM API
 
-Drives a **chat web UI** through an automated Chrome browser ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and exposes it as an **OpenAI-compatible API**. No official API key — it uses a logged-in web session. Two providers, chosen per-request by the OpenAI **`model`** field:
+**Turn the AI you already use in your browser into a local, OpenAI-compatible API — no API keys, no per-token bills.**
 
-| `model` | site | profile | images |
-|---------|------|---------|--------|
-| `gemini-browser` | gemini.google.com | `gemini_profile/` | ✅ |
-| `chatgpt-browser` | chatgpt.com | `chatgpt_profile/` | ✅ |
+Browser LLM API drives a real, logged-in **ChatGPT** and **Gemini** session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and re-exposes it as the same HTTP API your tools already speak. Point any OpenAI SDK, script, or app at `http://localhost:8081/v1` and get **streaming chat *and* image generation** — powered by your existing subscription (or free tier), running entirely on your own machine.
+
+![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
+
+```python
+# It's the OpenAI SDK you already know — just change the base URL.
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8081/v1", api_key="not-needed")
+
+client.chat.completions.create(
+    model="chatgpt-browser",                       # or "gemini-browser"
+    messages=[{"role": "user", "content": "Write a haiku about local-first AI."}],
+)
+```
+
+## Why you might want this
+
+- 🔑 **No API keys, no metered billing.** It rides your normal logged-in web session, so you use the plan you already pay for — or the free tier — instead of a separate paid API.
+- 🔌 **Drop-in OpenAI compatibility.** `/v1/chat/completions` (streaming + non-streaming) and `/v1/images/generations`, with the same request/response shapes. Existing OpenAI clients, LangChain, scripts, and dev tools "just work."
+- 🎨 **Chat *and* images.** Both providers generate images from a prompt; results come back as a link **and** a saved file.
+- 🧩 **Two providers, one field.** Switch between ChatGPT and Gemini per request via the `model` field. Run both at once — they're independent.
+- 🏠 **Local & private to your LAN.** Everything runs on your box; nothing goes to a third-party API broker.
+- 🖥️ **Use it four ways** (below): REST API, a web dashboard, an embeddable chat widget, or a **native Linux desktop app**.
+
+> **The honest catch:** this automates logged-in sessions on sites that have **no official API for this** — so it's inherently fragile (a site UI change can break it), may conflict with each provider's Terms of Service, and is meant for **personal / experimental** use on your own account. See the [Disclaimer](#disclaimer).
+
+## What's in the box
+
+| Surface | What it is | Where |
+|---------|-----------|-------|
+| 🔌 **OpenAI-compatible API** | `/v1/chat/completions` + `/v1/images/generations` + `/v1/models` | `http://localhost:8081/v1` |
+| 🖥️ **Web dashboard** | Streaming chat, image generation, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
+| 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble onto any page on your network | `/widget.js` (demo at `/demo`) |
+| 🐧 **Native desktop app** | A GTK tray indicator + full Chat / Images / Gallery / Status window for Linux | [`desktop/`](desktop/README.md) |
+
+| `model` | Backend | Images |
+|---------|---------|--------|
+| `chatgpt-browser` | chatgpt.com | ✅ |
+| `gemini-browser` | gemini.google.com | ✅ |
 
 An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `gemini-browser`).
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions` streaming + non-streaming, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo` for the UI + widget).
-- **`webui/index.html`** — **mini web UI** served at `http://localhost:8081/` — streaming chat, image generation, a gallery of everything generated so far, and a **Status** tab with live per-provider telemetry. No build step, single file.
-- **`webui/widget.js`** — **embeddable chat widget** served at `/widget.js`: one `<script>` tag drops a floating chat bubble onto any page (see [Embeddable widget](#embeddable-widget)). Live demo at `/demo`.
-- **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`.
-- **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt` (see below).
-- **`gemini_bot.py`** — standalone single-prompt Gemini prototype (hardcoded prompt → saves the answer).
-- **`serve.sh`** / **`install-service.sh`** / **`browser-llm-api.service.template`** — run the server (venv + display auto-detect), and install it as a background `systemd --user` service generated for this clone.
-- **`gen_asset.py`** — CLI to generate + post-process a website image asset (resize/crop/convert/favicon/transparency). Uses `/v1/images/generations`; needs Pillow.
-- **`AGENT_IMAGE_GUIDE.md`** — instructions to hand an AI coding agent so it uses this API to generate site image assets.
+## Quick start
+
+```bash
+# 1. Install into a virtualenv (system Python is usually externally-managed).
+python3.12 -m venv venv
+./venv/bin/pip install -e ".[assets]"     # editable install; [assets] adds Pillow for gen_asset.py
+
+# 2. Start the server (auto-detects a display; falls back to headless Xvfb).
+./serve.sh                                 # → http://localhost:8081
+
+# 3. Sign in once per provider (a real Chrome window opens — log in, it closes itself).
+DISPLAY=:1 ./venv/bin/python login.py chatgpt      # and/or: gemini
+
+# 4. Use it.
+curl http://localhost:8081/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"chatgpt-browser","messages":[{"role":"user","content":"hello!"}]}'
+```
+
+Then open **`http://localhost:8081/`** for the web dashboard, or run the [native desktop app](#native-desktop-app). You need **Google Chrome** and **Python 3.12** installed; on a headless box also install the system `xvfb` package.
+
+> First answer empty, or you hit a sign-in / "verify you're human" wall? That provider's session just needs a fresh login — see [Authentication](#authentication).
 
 ## How it works
 
-The server keeps **one persistent Chrome per provider** (profile in `gemini_profile/` / `chatgpt_profile/`, gitignored), started lazily on first use. On each request it opens the site, types the prompt, and reads the streamed answer out of the DOM — Gemini by walking the shadow DOM, ChatGPT from the plain-DOM `.markdown` of the last assistant turn. Completion is detected via a CDP network signal (the provider's streaming request finishing) with a DOM-stability fallback. Requests are serialized **per provider** by a lock, so Gemini and ChatGPT can run concurrently.
+The server keeps **one persistent Chrome per provider** (profile in `gemini_profile/` / `chatgpt_profile/`, gitignored), started lazily on first use. On each request it opens the site, types the prompt, and reads the streamed answer back out of the DOM — Gemini by walking the shadow DOM, ChatGPT from the plain-DOM `.markdown` of the last assistant turn. Completion is detected via a CDP network signal (the provider's streaming request finishing) with a DOM-stability fallback. Requests are serialized **per provider** by a lock, so Gemini and ChatGPT can run concurrently while callers to the *same* provider queue.
 
 > **Note on ChatGPT:** the ChatGPT selectors are best-guess against the live UI (which changes often and sits behind Cloudflare/anti-bot) and may need tweaking. Automating chatgpt.com may also conflict with OpenAI's ToS — use accordingly.
-
-## Requirements
-
-- Google Chrome, Python 3.12
-- Deps go in a **venv** (system Python is usually PEP-668 externally-managed). Two equivalent ways:
-  ```bash
-  python3.12 -m venv venv
-  ./venv/bin/pip install -r requirements.txt        # then: ./venv/bin/python server.py
-  # — or, as an editable package (adds a `browser-llm` command; `[assets]` pulls in Pillow for gen_asset.py):
-  ./venv/bin/pip install -e ".[assets]"             # then: ./venv/bin/browser-llm   (or ./serve.sh)
-  ```
-  Install **editable** (`-e`) from a clone — the web UI/widget in `webui/` are resolved relative to the source. On a headless box use `./serve.sh` (Xvfb) rather than calling `browser-llm` directly, since the sites need a non-headless Chrome.
-- Chrome runs **non-headless** on purpose (the sites block true headless). `serve.sh` auto-detects a display: it uses a real `$DISPLAY` if present (needed for ChatGPT image gen), otherwise falls back to headless **Xvfb** (needs the `xvfb` package; Gemini works, ChatGPT images don't). Re-auth uses a real display (e.g. `DISPLAY=:1`).
-- **ChatGPT image generation needs a real GPU display** (see below) — it does not render under headless Xvfb.
-
-## Run once (foreground)
-
-```bash
-./serve.sh                   # serves http://localhost:8081/v1 (venv + display auto-detect)
-# or the standalone Gemini prototype:
-python3 gemini_bot.py
-```
 
 ## Web UI
 
@@ -56,7 +82,7 @@ Open **`http://localhost:8081/`** in a browser. Four tabs:
 - **Gallery** — every image saved to `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
 - **Status** — live per-provider telemetry (requests, errors, avg + last latency, images-until-recycle countdown), server info (version, uptime, display, image dir), and a copy-paste **embed snippet** with a "Preview widget on this page" button.
 
-The header shows each provider's live state (off / idle / busy — requests to the same provider queue; click the pills to jump to Status), and the footer shows the version, server uptime, and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
+The header shows each provider's live state (off / idle / busy — click the pills to jump to Status), and the footer shows the version, server uptime, and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
 
 ## Embeddable widget
 
@@ -83,6 +109,25 @@ Configure with `data-*` attributes on the script tag:
 Runtime handle: `window.BrowserLLMWidget.{open, close, reset, config}` — e.g. `BrowserLLMWidget.config({accent:'#9b8cfb', provider:'chatgpt-browser'})`. Press `Esc` to close.
 
 > The widget inherits the server's **no-auth, LAN-only** trust model — embedding it just means the unauthenticated endpoint is reachable from more pages. Fine for trusted LAN use; don't expose it beyond your network.
+
+## Native desktop app
+
+Prefer a **real Linux app** over a browser tab? [`desktop/`](desktop/README.md) has a native GTK3 client:
+
+- a **tray indicator** in your top bar — with a compact **Quick-chat popup**, a provider switcher, and a live server-status line;
+- a **full app window** with Chat / Images / Gallery / Status tabs, mirroring the web dashboard.
+
+It's a thin front-end over the same HTTP API (no browser automation lives in it), and runs on the **system `python3`** — **no venv, no pip, standard library only**.
+
+```bash
+# system GTK3 + AppIndicator (present by default on Ubuntu GNOME):
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+
+./desktop/run.sh                 # start it — lands in the tray
+./desktop/install-desktop.sh     # optional: add a "Browser LLM" launcher to the app grid
+```
+
+Point it at a non-default server with `BROWSER_LLM_API=http://host:8081`. Full details in [`desktop/README.md`](desktop/README.md).
 
 ## Selecting a provider
 
@@ -121,7 +166,7 @@ systemctl --user restart browser-llm-api
 journalctl --user -u browser-llm-api -f  # live logs (server.log stays empty; the journal is the log)
 ```
 
-## Authentication (important)
+## Authentication
 
 **Each provider needs its own login**, stored in its own profile (`gemini_profile/` / `chatgpt_profile/`). When answers come back empty or you see a sign-in / "verify you're human" wall, that provider's session has expired.
 
@@ -137,7 +182,7 @@ systemctl --user start browser-llm-api
 
 Both providers generate images from a natural prompt. Generated images are saved to disk **and** served over HTTP, so you get a file and a link.
 
-**Storage path** — `GEMINI_IMAGE_DIR` (env; `serve.sh` defaults it to `~/Pictures/gemini`). The folder is created on startup and mounted at `/images/<file>`. `GEMINI_PUBLIC_URL` (default `http://localhost:8081`) is the base used to build the returned links — change it if you reach the server from another host. If the folder isn't writable, saving is skipped and it falls back to inline base64 / `data:` URLs.
+**Storage path** — `GEMINI_IMAGE_DIR` (env; `serve.sh` defaults it to `~/Pictures/browser-llm`). The folder is created on startup and mounted at `/images/<file>`. `GEMINI_PUBLIC_URL` (default `http://localhost:8081`) is the base used to build the returned links — change it if you reach the server from another host. If the folder isn't writable, saving is skipped and it falls back to inline base64 / `data:` URLs.
 
 - **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![...](http://localhost:8081/images/gemini_….png)`. Gemini replies image-only (its accompanying text is internal "thinking"); ChatGPT keeps its caption text and appends the image.
 - **Images endpoint** — OpenAI-style `POST /v1/images/generations` (`model` selects the provider):
@@ -149,7 +194,7 @@ curl http://localhost:8081/v1/images/generations \
 # -> {"created": ..., "data": [{
 #      "b64_json": "<base64>",
 #      "url":  "http://localhost:8081/images/gemini_….png",
-#      "path": "~/Pictures/gemini/gemini_….png"
+#      "path": "~/Pictures/browser-llm/gemini/gemini_….png"
 #    }]}
 ```
 
@@ -165,6 +210,29 @@ For **long asset runs**, the provider's browser is **auto-recycled** every few i
 ./venv/bin/python gen_asset.py --prompt "friendly cartoon fox mascot, flat vector, centered, solid white background" \
     --out public/avatar.png --square 256 --knockout-bg
 ```
+
+## Configuration
+
+| env var | default | meaning |
+|---------|---------|---------|
+| `DEFAULT_PROVIDER` | `gemini-browser` | provider used when `model` is unknown/absent |
+| `GEMINI_IMAGE_DIR` (`IMAGE_DIR`) | `~/Pictures/browser-llm` | base dir for saved images (per-provider subfolders) |
+| `GEMINI_PUBLIC_URL` | `http://localhost:8081` | base URL used to build returned image links |
+| `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | recycle a provider's browser after this many image gens |
+| `BROWSER_LLM_API` | `http://localhost:8081` | server URL the desktop app / `client.py` connect to |
+
+## Project layout
+
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo`). `main()` is the `browser-llm` console entry point.
+- **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`. `base.py` holds the generic completion loop + the unit-tested done-decision logic.
+- **`webui/`** — `index.html` (mini web dashboard), `widget.js` (embeddable bubble), `widget-demo.html` (`/demo`). Single files, no build step.
+- **`desktop/`** — native Linux desktop app + tray widget (GTK3). See [`desktop/README.md`](desktop/README.md).
+- **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt`.
+- **`client.py`** — tiny stdlib CLI/import client for the API (`./client.py "prompt"`, or `from client import ask`).
+- **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow).
+- **`serve.sh`** / **`install-service.sh`** / **`mode.sh`** / **`browser-llm-api.service.template`** — run the server and manage it as a background `systemd --user` service (generated for this clone).
+- **`gemini_bot.py`** — standalone single-prompt Gemini prototype.
+- **`AGENT_IMAGE_GUIDE.md`** — instructions to hand an AI coding agent so it uses this API to generate site image assets.
 
 ## Caveats
 

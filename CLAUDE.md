@@ -54,6 +54,15 @@ webui/index.html     # mini web UI (single file, no build step): streaming chat,
 webui/widget.js      # embeddable floating chat bubble (Shadow-DOM isolated, no build step);
                      #   served at /widget.js; auto-discovers API base from its own <script src>.
 webui/widget-demo.html # standalone demo page (served at /demo) embedding the widget.
+desktop/               # NATIVE Linux desktop app + tray widget (GTK3), a thin client of the
+                       #   HTTP API — NOT browser automation. Runs on SYSTEM python3 (has
+                       #   PyGObject); stdlib only, no venv/pip. GTK3 (not 4) on purpose:
+                       #   AppIndicator (the tray) is GTK3-only and can't share a process
+                       #   with GTK4.
+  browser_llm_desktop.py # whole app: Api (stdlib urllib), ChatPanel, ImagePanel,
+                       #   GalleryPanel/ImageViewer, StatusPanel, MainWindow (Chat/Images/
+                       #   Gallery/Status tabs), QuickChatWindow (tray popup), TrayApp.
+  icon.svg run.sh install-desktop.sh browser-llm-desktop.desktop.in README.md
 tests/               # unit tests (no browser needed):
                      #   ./venv/bin/python -m unittest discover -s tests
 providers/

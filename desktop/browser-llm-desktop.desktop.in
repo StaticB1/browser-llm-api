@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Browser LLM
+GenericName=AI Chat & Image Client
+Comment=Native chat + image client for the local Browser LLM API (lives in the tray)
+Exec=/usr/bin/python3 "__APP__"
+Icon=browser-llm-desktop
+Terminal=false
+Categories=Network;InstantMessaging;GTK;
+Keywords=AI;LLM;Chat;Gemini;ChatGPT;Image;
+StartupNotify=true
+StartupWMClass=browser_llm_desktop.py

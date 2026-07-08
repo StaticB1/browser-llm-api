@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+  <!-- chat bubble body + tail -->
+  <g fill="url(#g)">
+    <rect x="6" y="8" width="36" height="27" rx="8"/>
+    <path d="M17 32 L17 43 L29 33 Z"/>
+  </g>
+  <!-- AI sparkle -->
+  <path fill="#ffffff"
+        d="M24 12.2 l2.7 6.6 6.6 2.7 -6.6 2.7 -2.7 6.6 -2.7 -6.6 -6.6 -2.7 6.6 -2.7 z"/>
+</svg>
