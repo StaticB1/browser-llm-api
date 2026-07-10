@@ -31,6 +31,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -83,6 +84,24 @@ def data_dir():
     except Exception:
         pass
     return d
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json_atomic(path, obj):
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(obj, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 # ============================== API client (stdlib) ==============================
@@ -213,7 +232,7 @@ def vscode_focused_path(projects):
     best = None
     for _name, path in projects:
         b = os.path.basename(path)
-        if head == b or head.endswith(" - " + b) or head.endswith(b):
+        if head == b or head.endswith(" - " + b):
             if best is None or len(os.path.basename(best)) < len(b):
                 best = path
     return best
@@ -241,23 +260,14 @@ class ProjectManager(GObject.GObject):
             self.current = f or (paths[0] if paths else None)
 
     def _load(self):
-        try:
-            d = json.load(open(self.path))
-            self.folders = d.get("folders", {}) or {}
-            self.auto = d.get("auto", True)
-            self.current = d.get("current")
-        except Exception:
-            pass
+        d = load_json(self.path, {})
+        self.folders = d.get("folders", {}) or {}
+        self.auto = d.get("auto", True)
+        self.current = d.get("current")
 
     def _save(self):
-        try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"folders": self.folders, "auto": self.auto,
-                           "current": self.current}, f)
-            os.replace(tmp, self.path)
-        except Exception:
-            pass
+        save_json_atomic(self.path, {"folders": self.folders, "auto": self.auto,
+                                     "current": self.current})
 
     def refresh(self):
         self._projects = vscode_open_projects()
@@ -289,14 +299,25 @@ class ProjectManager(GObject.GObject):
         self.emit("changed")
 
     def poll(self):
-        self.refresh()
-        if self.auto:
-            f = vscode_focused_path(self._projects)
-            if f and f != self.current:
-                self.current = f
-                self._save()
-                self.emit("changed")
+        """Called every 2s from the GTK main loop. The actual work (re-reading
+        storage.json, shelling out to xdotool) is offloaded to a worker thread so a
+        slow/hanging xdotool can't freeze the UI (unlike a direct call, which would
+        run on the main thread)."""
+        threading.Thread(target=self._poll_worker, daemon=True).start()
         return True
+
+    def _poll_worker(self):
+        projects = vscode_open_projects()
+        focused = vscode_focused_path(projects) if self.auto else None
+        GLib.idle_add(self._poll_apply, projects, focused)
+
+    def _poll_apply(self, projects, focused):
+        self._projects = projects
+        if self.auto and focused and focused != self.current:
+            self.current = focused
+            self._save()
+            self.emit("changed")
+        return False
 
     def folder_for(self, path):
         return self.folders.get(path)
@@ -314,7 +335,7 @@ class ChatStore(GObject.GObject):
     __gsignals__ = {
         "changed": (GObject.SignalFlags.RUN_FIRST, None, ()),      # full re-render
         "delta": (GObject.SignalFlags.RUN_FIRST, None, (str,)),    # append streamed chunk
-        "busy": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        "busy": (GObject.SignalFlags.RUN_FIRST, None, (bool, str)),  # (streaming, conversation id)
     }
 
     def __init__(self, state):
@@ -323,7 +344,8 @@ class ChatStore(GObject.GObject):
         self.path = os.path.join(data_dir(), "chats.json")
         self.conversations = []
         self.current_id = None
-        self.streaming = False
+        self.streaming = set()  # conversation ids with an in-flight request
+        self._seq = 0          # disambiguates ids minted within the same millisecond
         self._load()
         if not self.conversations:
             self.new_conversation(emit=False)
@@ -332,22 +354,16 @@ class ChatStore(GObject.GObject):
 
     # -- persistence --
     def _load(self):
-        try:
-            d = json.load(open(self.path))
+        d = load_json(self.path, None)
+        if d is None:
+            self.conversations, self.current_id = [], None
+        else:
             self.conversations = d.get("conversations", [])
             self.current_id = d.get("current_id")
-        except Exception:
-            self.conversations, self.current_id = [], None
 
     def _save(self):
-        try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"current_id": self.current_id,
-                           "conversations": self.conversations}, f)
-            os.replace(tmp, self.path)
-        except Exception:
-            pass
+        save_json_atomic(self.path, {"current_id": self.current_id,
+                                     "conversations": self.conversations})
 
     # -- model --
     def _by_id(self, cid):
@@ -360,7 +376,11 @@ class ChatStore(GObject.GObject):
         return self._by_id(self.current_id)
 
     def new_conversation(self, emit=True):
-        cid = "c%d" % int(time.time() * 1000)
+        # Timestamp alone can collide when two conversations are minted within the
+        # same millisecond (e.g. rapid "New chat" clicks); the counter guarantees
+        # a unique id within this process regardless.
+        self._seq += 1
+        cid = "c%d-%d" % (int(time.time() * 1000), self._seq)
         conv = {"id": cid, "title": "New chat", "model": self.state.model,
                 "messages": [], "updated": time.time()}
         self.conversations.insert(0, conv)
@@ -379,22 +399,26 @@ class ChatStore(GObject.GObject):
             self._save()
             self.emit("changed")
 
+    def is_streaming(self, cid):
+        return cid in self.streaming
+
     def send(self, text):
-        if self.streaming:
-            return
         conv = self.current() or self.new_conversation()
+        cid = conv["id"]
+        if cid in self.streaming:
+            return
         conv["messages"].append({"role": "user", "content": text})
         if conv["title"] in ("", "New chat"):
             conv["title"] = text.strip()[:44]
         conv["messages"].append({"role": "assistant", "content": ""})  # streaming placeholder
         conv["model"] = self.state.model
         conv["updated"] = time.time()
-        self.streaming = True
+        self.streaming.add(cid)
         self.emit("changed")
-        self.emit("busy", True)
+        self.emit("busy", True, cid)
         self._save()
         msgs = [{"role": m["role"], "content": m["content"]} for m in conv["messages"][:-1]]
-        threading.Thread(target=self._worker, args=(conv["id"], msgs, self.state.model),
+        threading.Thread(target=self._worker, args=(cid, msgs, self.state.model),
                          daemon=True).start()
 
     def _worker(self, cid, msgs, model):
@@ -421,11 +445,13 @@ class ChatStore(GObject.GObject):
             last = conv["messages"][-1]
             if err:
                 last["content"] = (last["content"] + f"\n⚠ {err}").strip()
+                last["error"] = True
             elif not got and not last["content"]:
                 last["content"] = "(no response — the session may need re-auth)"
+                last["error"] = True
             conv["updated"] = time.time()
-        self.streaming = False
-        self.emit("busy", False)
+        self.streaming.discard(cid)
+        self.emit("busy", False, cid)
         if err or not got:
             self.emit("changed")
         self._save()
@@ -608,6 +634,7 @@ class ChatPanel(Gtk.Box):
         self.buf.create_tag("user_label", foreground="#4f46e5", weight=700)
         self.buf.create_tag("ai_label", foreground="#7c3aed", weight=700)
         self.buf.create_tag("meta", foreground="#6b7280", style=Pango.Style.ITALIC, scale=0.92)
+        self.buf.create_tag("error", foreground="#dc2626", weight=700)
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -630,11 +657,11 @@ class ChatPanel(Gtk.Box):
         row.pack_start(self.send_btn, False, False, 0)
         self.pack_start(row, False, False, 0)
 
-        self.store.connect("changed", lambda *_: self.render())
+        self.store.connect("changed", self._on_store_changed)
         self.store.connect("delta", lambda _s, d: self._append(d))
-        self.store.connect("busy", lambda _s, b: self._set_busy(b))
+        self.store.connect("busy", lambda _s, b, cid: self._on_busy(cid))
         self.render()
-        self._set_busy(self.store.streaming)
+        self._sync_busy()
 
     def _insert(self, text, *tags):
         end = self.buf.get_end_iter()
@@ -666,7 +693,10 @@ class ChatPanel(Gtk.Box):
                 self._role("You", "user_label")
             else:
                 self._role("Assistant", "ai_label")
-            self._insert(m["content"])
+            if m.get("error"):
+                self._insert(m["content"], "error")
+            else:
+                self._insert(m["content"])
         self._tail = True
         self._scroll()
 
@@ -674,6 +704,17 @@ class ChatPanel(Gtk.Box):
         if self._tail:
             self._insert(delta)
             self._scroll()
+
+    def _on_store_changed(self, *_):
+        self.render()
+        self._sync_busy()
+
+    def _on_busy(self, cid):
+        if cid == self.store.current_id:
+            self._sync_busy()
+
+    def _sync_busy(self):
+        self._set_busy(self.store.is_streaming(self.store.current_id))
 
     def _set_busy(self, b):
         self.entry.set_sensitive(not b)
@@ -687,7 +728,7 @@ class ChatPanel(Gtk.Box):
             self.entry.grab_focus()
 
     def _on_send(self, *_):
-        if self.store.streaming:
+        if self.store.is_streaming(self.store.current_id):
             return
         text = self.entry.get_text().strip()
         if not text:
@@ -784,27 +825,26 @@ class ProjectImagePanel(Gtk.Box):
         else:
             self.status.set_text("No VS Code project detected — open one, or images save to the gallery only.")
 
-    def _ensure_folder(self):
-        """Return the save folder for the current project, prompting once (pick & remember)."""
-        cur = self.projects.current
-        if not cur:
+    def _ensure_folder(self, project):
+        """Return the save folder for `project`, prompting once (pick & remember)."""
+        if not project:
             return None
-        saved = self.projects.folder_for(cur)
+        saved = self.projects.folder_for(project)
         if saved and os.path.isdir(saved):
             return saved
         dlg = Gtk.FileChooserDialog(
-            title=f"Where should images for “{self.projects.name_of(cur)}” be saved?",
+            title=f"Where should images for “{self.projects.name_of(project)}” be saved?",
             action=Gtk.FileChooserAction.SELECT_FOLDER)
         dlg.set_transient_for(self.get_toplevel())
         dlg.set_modal(True)
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.add_button("Save here", Gtk.ResponseType.ACCEPT)
-        if os.path.isdir(cur):
-            dlg.set_current_folder(cur)
+        if os.path.isdir(project):
+            dlg.set_current_folder(project)
         folder = dlg.get_filename() if dlg.run() == Gtk.ResponseType.ACCEPT else None
         dlg.destroy()
         if folder:
-            self.projects.set_folder(cur, folder)
+            self.projects.set_folder(project, folder)
         return folder
 
     def _on_gen(self, *_):
@@ -813,10 +853,14 @@ class ProjectImagePanel(Gtk.Box):
         prompt = self.entry.get_text().strip()
         if not prompt:
             return
+        # Capture the target project now — generation can take tens of seconds to
+        # minutes, during which auto-follow may move self.projects.current elsewhere;
+        # the result must still be attributed to the project it was requested for.
+        project = self.projects.current
         folder = None
-        if self.projects.current:
-            folder = self._ensure_folder()
-            if folder is None and self.projects.folder_for(self.projects.current) is None:
+        if project:
+            folder = self._ensure_folder(project)
+            if folder is None and self.projects.folder_for(project) is None:
                 self.status.set_text("Cancelled — no folder chosen.")
                 return
         model = self.state.model or FALLBACK_MODELS[0]
@@ -829,7 +873,8 @@ class ProjectImagePanel(Gtk.Box):
         self._t0 = time.monotonic()
         self.status.set_text(f"Generating with {model}…  0s")
         self._timer_id = GLib.timeout_add_seconds(1, self._tick, model)
-        threading.Thread(target=self._worker, args=(prompt, model, folder), daemon=True).start()
+        threading.Thread(target=self._worker, args=(prompt, model, folder, project),
+                         daemon=True).start()
 
     def _tick(self, model):
         if not self.busy:
@@ -837,7 +882,7 @@ class ProjectImagePanel(Gtk.Box):
         self.status.set_text(f"Generating with {model}…  {int(time.monotonic() - self._t0)}s")
         return True
 
-    def _worker(self, prompt, model, folder):
+    def _worker(self, prompt, model, folder, project):
         try:
             res = self.state.api.generate_image(prompt, model)
             data = (res or {}).get("data") or []
@@ -854,9 +899,24 @@ class ProjectImagePanel(Gtk.Box):
                 with open(saved_path, "wb") as f:
                     f.write(raw)
             server_link = item.get("path") or item.get("url") or ""
-            GLib.idle_add(self._on_result, raw, saved_path, server_link)
+            GLib.idle_add(self._on_result, raw, saved_path, server_link, project)
         except Exception as e:
             GLib.idle_add(self._on_error, humanize_error(e))
+
+    def _local_viewable_copy(self, raw, server_link):
+        """A path Open/Folder can always use, regardless of where the server runs.
+        Prefers the server's own path/url if it happens to already exist on this
+        filesystem, otherwise writes the (already-fetched) bytes to a temp file —
+        so viewing still works against a remote server or with no project folder."""
+        if server_link and os.path.exists(server_link):
+            return server_link
+        try:
+            fd, path = tempfile.mkstemp(prefix="browser-llm-", suffix=ext_for_bytes(raw))
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            return path
+        except Exception:
+            return None
 
     def _finish(self):
         self.busy = False
@@ -867,7 +927,7 @@ class ProjectImagePanel(Gtk.Box):
             GLib.source_remove(self._timer_id)
             self._timer_id = None
 
-    def _on_result(self, raw, saved_path, server_link):
+    def _on_result(self, raw, saved_path, server_link, project):
         self._finish()
         secs = int(time.monotonic() - self._t0)
         try:
@@ -876,20 +936,18 @@ class ProjectImagePanel(Gtk.Box):
         except Exception as e:
             self.status.set_text(f"generated but could not display: {e}")
             return False
-        self._last_file = saved_path
         if saved_path:
-            cur = self.projects.current
-            rel = os.path.relpath(saved_path, cur) if cur else saved_path
+            rel = os.path.relpath(saved_path, project) if project else saved_path
             self.status.set_text(f"✓ Saved to {rel}  ({secs}s)")
+            self._last_file = saved_path
             self.open_file.set_sensitive(True)
             self.open_dir.set_sensitive(True)
-            notify(APP_NAME, f"Image saved to {self.projects.name_of(cur)}/{rel}")
+            notify(APP_NAME, f"Image saved to {self.projects.name_of(project)}/{rel}")
         else:
             self.status.set_text(f"✓ Generated in {secs}s · saved to gallery ({server_link})")
-            if server_link and os.path.exists(server_link):
-                self._last_file = server_link
-                self.open_file.set_sensitive(True)
-                self.open_dir.set_sensitive(True)
+            self._last_file = self._local_viewable_copy(raw, server_link)
+            self.open_file.set_sensitive(self._last_file is not None)
+            self.open_dir.set_sensitive(self._last_file is not None)
         return False
 
     def _on_error(self, msg):
