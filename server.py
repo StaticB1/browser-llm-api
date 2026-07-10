@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import nodriver as uc
+import websockets.exceptions
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -177,6 +178,24 @@ def _record_request(name: str, started: float, error: Optional[BaseException] = 
         m["last_error_at"] = int(time.time())
 
 
+async def _browser_alive(b: uc.Browser) -> bool:
+    """Cheap liveness probe for a cached browser: the Chrome process must still
+    be running AND its CDP websocket must answer. Catches both an exited Chrome
+    and the 2026-07-09 failure mode where the process lived on but the CDP
+    connection had silently died — previously the first (or, before the
+    eviction fix, every) request after that just failed."""
+    try:
+        if b.stopped:  # Chrome process has exited
+            return False
+        # Same call nodriver's own Browser._get_targets makes; Browser.send
+        # re-attaches a dropped socket first, so this probes "usable", and
+        # can even transparently heal a dropped-but-recoverable connection.
+        await asyncio.wait_for(b.send(uc.cdp.target.get_targets()), timeout=5)
+        return True
+    except Exception:
+        return False
+
+
 async def get_browser(provider) -> uc.Browser:
     b = _browsers.get(provider.name)
 
@@ -195,6 +214,21 @@ async def get_browser(provider) -> uc.Browser:
         b = None
         await asyncio.sleep(2)  # let Chrome release the profile before restart
 
+    # Never hand out a browser whose process or CDP connection is dead —
+    # replace it now so THIS request succeeds, instead of failing it once
+    # and only recovering on the next one.
+    if b is not None and not await _browser_alive(b):
+        logger.warning(f"[{provider.name}] cached browser is dead (process or CDP "
+                       f"connection); starting a fresh one")
+        try:
+            b.stop()
+        except Exception:
+            pass
+        _browsers.pop(provider.name, None)
+        _img_gen_count[provider.name] = 0
+        b = None
+        await asyncio.sleep(2)  # let Chrome release the profile before restart
+
     if b is None:
         # Clear a stale singleton lock so the fresh start isn't blocked.
         try:
@@ -206,6 +240,38 @@ async def get_browser(provider) -> uc.Browser:
         b = await uc.start(user_data_dir=provider.profile_dir, browser_args=list(CHROME_ARGS))
         _browsers[provider.name] = b
     return b
+
+
+def _is_dead_transport(exc: BaseException) -> bool:
+    """True if `exc` indicates the CDP connection/browser process itself died
+    (as opposed to an ordinary in-page failure like 'no image produced'). A
+    provider that hits this must not be reused for the next request — it will
+    just fail identically until the process is restarted (see 2026-07-09
+    incident: one dead ChatGPT connection silently broke every request for the
+    rest of the day)."""
+    if isinstance(exc, (websockets.exceptions.ConnectionClosed, ConnectionError, OSError)):
+        return True
+    # nodriver's Connection.send raises RuntimeError("WebSocket is not connected")
+    # once the socket is gone — same corpse, different wrapper.
+    if isinstance(exc, RuntimeError) and "websocket" in str(exc).lower():
+        return True
+    return False
+
+
+async def _evict_dead_browser(provider, exc: BaseException) -> None:
+    """Drop a provider's cached browser after a transport-level failure so the
+    *next* request starts a fresh one instead of retrying against a corpse."""
+    if not _is_dead_transport(exc):
+        return
+    b = _browsers.pop(provider.name, None)
+    _img_gen_count[provider.name] = 0  # count tracked THAT browser's bloat, not the next one's
+    if b is not None:
+        logger.warning(f"[{provider.name}] browser connection died ({exc!r}); "
+                       f"evicting so the next request starts fresh")
+        try:
+            b.stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -362,19 +428,23 @@ async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, Non
     append any generated images as markdown links."""
     prompt = _build_prompt(messages)
     browser = await get_browser(provider)
-    page, monitor = await provider.open_and_send(browser, prompt)
+    try:
+        page, monitor = await provider.open_and_send(browser, prompt)
 
-    async for delta in _stream_completion(provider, page, monitor):
-        yield delta
+        async for delta in _stream_completion(provider, page, monitor):
+            yield delta
 
-    n = 0
-    for im in await provider.get_images(page):
-        _persist(im, provider)
-        n += 1
-        logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
-        yield _img_markdown(im)
-    if n:
-        _note_image_gen(provider)  # count toward browser recycle
+        n = 0
+        for im in await provider.get_images(page):
+            _persist(im, provider)
+            n += 1
+            logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
+            yield _img_markdown(im)
+        if n:
+            _note_image_gen(provider)  # count toward browser recycle
+    except Exception as e:
+        await _evict_dead_browser(provider, e)
+        raise
 
     # Leave the tab open — closing or navigating away disrupts the browser.
 
@@ -383,14 +453,18 @@ async def drive_once(provider, prompt: str) -> tuple[str, list[dict]]:
     """Non-streaming drive used by non-streaming chat and the images endpoint:
     returns (text, images)."""
     browser = await get_browser(provider)
-    page, monitor = await provider.open_and_send(browser, prompt)
-    text = ""
-    async for delta in _stream_completion(provider, page, monitor):
-        text += delta
-    imgs = [_persist(im, provider) for im in await provider.get_images(page)]
-    if imgs:
-        _note_image_gen(provider)  # count toward browser recycle
-    return text, imgs
+    try:
+        page, monitor = await provider.open_and_send(browser, prompt)
+        text = ""
+        async for delta in _stream_completion(provider, page, monitor):
+            text += delta
+        imgs = [_persist(im, provider) for im in await provider.get_images(page)]
+        if imgs:
+            _note_image_gen(provider)  # count toward browser recycle
+        return text, imgs
+    except Exception as e:
+        await _evict_dead_browser(provider, e)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -479,8 +553,12 @@ async def api_status():
     providers = {}
     for name, p in PROVIDERS.items():
         m = _metrics[name]
+        b = _browsers.get(name)
         providers[name] = {
-            "browser_running": name in _browsers,
+            # not just cached — the Chrome process must actually still be alive
+            # (b.stopped is a free returncode check, no browser I/O; the deeper
+            # CDP-connection probe happens lazily in get_browser per request)
+            "browser_running": b is not None and not b.stopped,
             "busy": _locks[name].locked(),
             "supports_images": p.supports_images,
             "images_since_recycle": _img_gen_count.get(name, 0),

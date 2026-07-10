@@ -48,6 +48,12 @@ _version.py          # single source of truth for __version__ (read by pyproject
 pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` entry point.
                      #   Flat layout — install editable from a clone (`pip install -e .`).
 LICENSE              # MIT.
+README.md            # project overview / usage.
+QUICKSTART.md        # fast-path setup guide.
+client.py            # tiny stdlib-only CLI/importable client (no deps): `./client.py "prompt"`
+                     #   or `from client import ask`. Env BROWSER_LLM_API/BROWSER_LLM_MODEL.
+mode.sh              # toggle the systemd service's Chrome visibility (headless/visible) via a
+                     #   drop-in override: `./mode.sh headless|visible`; `./mode.sh` shows current mode.
 webui/index.html     # mini web UI (single file, no build step): streaming chat,
                      #   image gen with elapsed timer, gallery, live provider status,
                      #   Status tab (telemetry + embed snippet + version in footer).
@@ -239,13 +245,29 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 - **Service unit is generated, not committed** — `install-service.sh` fills
   `browser-llm-api.service.template` (`__INSTALL_DIR__` → the clone path) into
   `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `serve.sh` (venv python +
-  display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/gemini`
+  display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/browser-llm`
   (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
 - **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; the systemd unit clears
   both profiles' locks in `ExecStartPre`. Running by hand? delete `*_profile/Singleton*`.
 - **Logs**: `server.py` writes `server.log` (mode `w`, wiped each start) + stderr; under systemd the
   journal is the real log. `gemini_bot.py` writes `gemini_session.log`.
+- **Dead browser/CDP connection used to wedge a provider until restart (fixed 2026-07-10):**
+  `get_browser()` only recycled a cached browser after `BROWSER_RECYCLE_AFTER_IMAGES` image gens — it
+  never noticed a browser that was still *in the cache* but actually dead (Chrome exited, or the CDP
+  websocket dropped: `websockets.exceptions.ConnectionClosedError`, seen 2026-07-09 on a long-idle
+  ChatGPT session). Every request reused the corpse and failed identically until a manual service
+  restart (~20h that day), while `/api/status` kept reporting `browser_running: true`. Fixed in four
+  layers (verified live by killing ChatGPT's Chrome mid-session — next request self-healed, HTTP 200):
+  - `_browser_alive()` probe in `get_browser()`: `b.stopped` + a 5s `cdp.target.get_targets()` ping
+    (via `Browser.send`, which also re-attaches a dropped-but-recoverable socket) — a dead cached
+    browser is replaced *before* the request runs, so it succeeds instead of failing once.
+  - `run_chat`/`drive_once` catch drive exceptions → `_evict_dead_browser()` pops the cache on
+    transport-level errors (`ConnectionClosed`/`ConnectionError`/`OSError`, plus nodriver's
+    `RuntimeError("WebSocket is not connected")`), so even mid-request death can't wedge the next one.
+  - Eviction resets `_img_gen_count` — the bloat count belonged to the dead browser, not its successor.
+  - `/api/status`'s `browser_running` now checks `not b.stopped` (free returncode check, no browser
+    I/O), so the UI shows the truth when Chrome dies.
 
 ## Git
 
