@@ -18,6 +18,8 @@
  *   data-greeting  first assistant line                   (default: friendly hi)
  *   data-system    a system prompt sent with every turn   (default: none)
  *   data-open      "1" to start expanded                  (default: closed)
+ *   data-key       API key, sent as Bearer — needed when the server sets
+ *                  BROWSER_LLM_API_KEY and this page isn't on the server box
  * All are also overridable at runtime via window.BrowserLLMWidget.config(...).
  * ---------------------------------------------------------------------------
  */
@@ -52,7 +54,14 @@
     greeting: attr("greeting", "Hi! Ask me anything."),
     system: attr("system", ""),
     open: attr("open", "") === "1",
+    key: attr("key", ""),
   };
+
+  function apiHeaders(h) {
+    h = h || {};
+    if (cfg.key) h["Authorization"] = "Bearer " + cfg.key;
+    return h;
+  }
 
   // ---- shadow-DOM host (style isolation both ways) ------------------------
   var host = document.createElement("div");
@@ -180,7 +189,7 @@
 
   // ---- provider selector (populated from /v1/models) ----------------------
   function loadModels() {
-    fetch(cfg.base + "/v1/models").then(function (r) { return r.json(); }).then(function (j) {
+    fetch(cfg.base + "/v1/models", { headers: apiHeaders() }).then(function (r) { return r.json(); }).then(function (j) {
       el.prov.innerHTML = "";
       (j.data || []).forEach(function (m) {
         var o = document.createElement("option");
@@ -219,7 +228,7 @@
     var full = "";
     fetch(cfg.base + "/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     }).then(function (res) {
       if (!res.ok) {

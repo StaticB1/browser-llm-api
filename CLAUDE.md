@@ -50,8 +50,12 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
 LICENSE              # MIT.
 README.md            # project overview / usage.
 QUICKSTART.md        # fast-path setup guide.
+authz.py             # stdlib-only access control + remote-upstream config: loopback detection,
+                     #   API-key gating rules (which paths need the key), REMOTE_PROVIDERS parsing.
+                     #   Separate from server.py so tests import it without server's side effects.
 client.py            # tiny stdlib-only CLI/importable client (no deps): `./client.py "prompt"`
-                     #   or `from client import ask`. Env BROWSER_LLM_API/BROWSER_LLM_MODEL.
+                     #   or `from client import ask`. Env BROWSER_LLM_API/BROWSER_LLM_MODEL/
+                     #   BROWSER_LLM_API_KEY.
 mode.sh              # toggle the systemd service's Chrome visibility (headless/visible) via a
                      #   drop-in override: `./mode.sh headless|visible`; `./mode.sh` shows current mode.
 webui/index.html     # mini web UI (single file, no build step): streaming chat,
@@ -149,6 +153,9 @@ and provider-parameterized** in `server.py`/`base.py`.
 | `GEMINI_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images; each provider gets a subfolder (`chatgpt/`, `gemini/`). `IMAGE_DIR` also accepted. |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | Recycle a provider's browser after this many image gens (renderer bloats and times out otherwise). |
+| `BROWSER_LLM_API_KEY` | *(unset)* | When set, **non-loopback** clients must send it (`Authorization: Bearer …` or `X-Api-Key`) on `/v1/*` and `/api/*`. Localhost stays open; pages/assets (`/`, `/widget.js`, `/images/*`, …) stay public. Makes binding to `0.0.0.0` sane. |
+| `REMOTE_PROVIDERS` | *(unset)* | `model=url[,model=url…]` — proxy those models to **another browser-llm-api instance** instead of a local browser (overrides the local provider of the same name). E.g. a second install without a ChatGPT login sets `chatgpt-browser=http://<host-with-login>:8081`. |
+| `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`). |
 
 ## Running
 
@@ -179,6 +186,33 @@ systemctl --user start browser-llm-api
 `--password-store=basic`, while a normal Chrome uses the system keyring. Cookies written by one
 **cannot be decrypted by the other**. The service's Chrome is also invisible (Xvfb), so you can't
 sign in there — the helper opens a real, visible window in the *same* cookie store.
+
+## Sharing a provider across machines (auth + remote proxying, added 2026-07-13)
+
+- **Auth model:** localhost is always unauthenticated. With `BROWSER_LLM_API_KEY` set, non-loopback
+  clients need the key on `/v1/*` + `/api/*`; pages/assets (`/`, `/ui`, `/widget.js`, `/demo`,
+  `/version`, `/images/*`) stay public — image links must work in a bare `<img>`/browser, and the
+  filenames are unguessable (uuid hex). CORS preflights (OPTIONS) are exempt — they can't carry auth
+  headers; the real request is still checked. Decision helpers live in `authz.py` (unit-tested,
+  `tests/test_authz.py`); the middleware in `server.py` is registered **after** CORSMiddleware so it
+  runs before it.
+- **Remote proxying:** `REMOTE_PROVIDERS="chatgpt-browser=http://<host>:8081"` +
+  `REMOTE_API_KEY=<upstream key>` makes this install forward that model verbatim to the other
+  instance (httpx, streaming relayed byte-for-byte; ~940s timeout ≥ the 900s max drive deadline). A
+  remote mapping **overrides** the local provider of the same name and shows up in `/v1/models`,
+  `/api/status` (`remote_upstream` field) and telemetry. Failures surface exactly like local ones:
+  502 with detail non-streaming, in-band `[browser-llm error: remote: …]` chunk streaming. The
+  proxy takes **no local lock** (the upstream's per-provider lock serializes), and lifespan skips
+  pre-warming a remote default. Requires `httpx` (in requirements.txt; guarded import — local-only
+  installs without it still run).
+- **This box (eben)** is set up as the upstream: systemd override
+  (`~/.config/systemd/user/browser-llm-api.service.d/override.conf`) binds `0.0.0.0`, sets the API
+  key + `GEMINI_PUBLIC_URL=http://192.168.1.34:8081`; ufw allows 8081 from 192.168.0.0/16 only.
+- **Web UI key:** open `http://<host>:8081/#key=<key>` once — stored in localStorage, attached to
+  all API fetches via a fetch wrapper. Widget: `data-key="<key>"` attr. `client.py`:
+  `BROWSER_LLM_API_KEY` env.
+- The venv's `pip` script has a stale shebang (venv predates a folder rename) — use
+  `./venv/bin/python -m pip …`, not `./venv/bin/pip …`.
 
 ## Gotchas & conventions
 

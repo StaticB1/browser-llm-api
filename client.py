@@ -15,7 +15,8 @@ Import from any project:
   from client import ask
   html = ask("Output ONLY an HTML page ...", model="chatgpt-browser")
 
-Env: BROWSER_LLM_API (default http://localhost:8081), BROWSER_LLM_MODEL (default chatgpt-browser)
+Env: BROWSER_LLM_API (default http://localhost:8081), BROWSER_LLM_MODEL (default chatgpt-browser),
+     BROWSER_LLM_API_KEY (sent as Bearer; required by a remote server that has a key configured)
 """
 import argparse
 import json
@@ -25,6 +26,7 @@ import urllib.request
 
 BASE = os.environ.get("BROWSER_LLM_API", "http://localhost:8081").rstrip("/")
 DEFAULT_MODEL = os.environ.get("BROWSER_LLM_MODEL", "chatgpt-browser")
+API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
 
 
 def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=None):
@@ -35,10 +37,13 @@ def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=Non
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     payload = {"model": model or DEFAULT_MODEL, "messages": messages, "stream": stream}
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
     req = urllib.request.Request(
         BASE + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         if not stream:

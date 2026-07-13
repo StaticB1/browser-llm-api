@@ -220,6 +220,33 @@ For **long asset runs**, the provider's browser is **auto-recycled** every few i
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | base URL used to build returned image links |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | recycle a provider's browser after this many image gens |
 | `BROWSER_LLM_API` | `http://localhost:8081` | server URL the desktop app / `client.py` connect to |
+| `BROWSER_LLM_API_KEY` | *(unset)* | require this key (`Authorization: Bearer …` or `X-Api-Key`) from **non-localhost** clients on `/v1/*` and `/api/*`; localhost stays open |
+| `REMOTE_PROVIDERS` | *(unset)* | `model=url[,…]` — proxy those models to another browser-llm-api instance instead of a local browser |
+| `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`) |
+
+## Sharing a provider with another machine
+
+One machine has a logged-in ChatGPT (or Gemini) session; a friend runs this same project without
+one. Point the friend's install at yours — their server proxies that model to your box, and
+everything on their side (web UI, widget, desktop app, gallery of their own Gemini) keeps working:
+
+```bash
+# On the machine WITH the login (the upstream):
+export BROWSER_LLM_HOST=0.0.0.0                      # listen on the LAN
+export BROWSER_LLM_API_KEY=$(openssl rand -hex 24)   # gate non-localhost clients
+export GEMINI_PUBLIC_URL=http://<your-lan-ip>:8081   # so returned image links resolve remotely
+./serve.sh
+
+# On the friend's machine:
+export REMOTE_PROVIDERS="chatgpt-browser=http://<your-lan-ip>:8081"
+export REMOTE_API_KEY=<the key from above>
+./serve.sh
+```
+
+Requests for `chatgpt-browser` on the friend's box are forwarded verbatim (streaming included);
+all other models still run in their own local browser. Different networks? Put both machines on a
+[Tailscale](https://tailscale.com) tailnet and use the tailnet IP instead of the LAN IP — nothing
+else changes.
 
 ## Project layout
 

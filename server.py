@@ -50,16 +50,22 @@ from typing import AsyncGenerator, Optional
 
 import nodriver as uc
 import websockets.exceptions
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+try:
+    import httpx  # only needed when REMOTE_PROVIDERS is configured
+except ImportError:  # older venv without httpx: local providers still work
+    httpx = None
 
 from providers import (
     PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS,
     CompletionTracker,
 )
+import authz
 from _version import __version__
 
 # ---------------------------------------------------------------------------
@@ -97,6 +103,28 @@ except Exception as e:
 
 _EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
         "image/webp": "webp", "image/gif": "gif"}
+
+# ---------------------------------------------------------------------------
+# Access control + remote upstreams (see authz.py for the full contract).
+#   BROWSER_LLM_API_KEY — when set, non-loopback clients must send this key
+#       (Bearer/X-Api-Key) on /v1/* and /api/*. Localhost stays open.
+#   REMOTE_PROVIDERS    — "model=url[,model=url…]": proxy those models to
+#       another browser-llm-api instance instead of a local browser (e.g.
+#       forward chatgpt-browser to the one machine with a ChatGPT login).
+#   REMOTE_API_KEY      — Bearer key sent on proxied requests (the upstream's
+#       BROWSER_LLM_API_KEY).
+# ---------------------------------------------------------------------------
+API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
+REMOTES = authz.parse_remote_providers(os.environ.get("REMOTE_PROVIDERS"))
+REMOTE_API_KEY = os.environ.get("REMOTE_API_KEY", "").strip()
+# Upstream drive can legitimately take up to _MAX_DEADLINE (900s); give the
+# proxy a little headroom on top so we never cut off a still-working upstream.
+_REMOTE_TIMEOUT = 940.0
+if REMOTES and httpx is None:
+    raise RuntimeError(
+        "REMOTE_PROVIDERS is set but httpx is not installed — "
+        "run: ./venv/bin/pip install -r requirements.txt"
+    )
 
 # Suppress KeyError from unknown CDP events (e.g. DOM.adoptedStyleSheetsModified).
 patch_cdp()
@@ -153,7 +181,7 @@ _metrics: dict[str, dict] = {
         "last_error_at": None,   # epoch seconds
         "last_request_at": None,  # epoch seconds
     }
-    for name in PROVIDERS
+    for name in {*PROVIDERS, *REMOTES}  # remote-only models get telemetry too
 }
 
 
@@ -468,13 +496,125 @@ async def drive_once(provider, prompt: str) -> tuple[str, list[dict]]:
 
 
 # ---------------------------------------------------------------------------
+# Remote upstream proxying (REMOTE_PROVIDERS): requests for a mapped model are
+# forwarded verbatim to another browser-llm-api instance — no local browser.
+# A remote mapping OVERRIDES the local provider of the same name (that's the
+# point: this install has the code for chatgpt-browser but no login).
+# ---------------------------------------------------------------------------
+def _resolve_model(model: Optional[str]) -> str:
+    """The model name a request actually routes to: a known local provider or
+    remote mapping wins; anything else falls back to DEFAULT_PROVIDER (same
+    fallback rule as get_provider, but remote-aware)."""
+    if model and (model in REMOTES or model in PROVIDERS):
+        return model
+    return DEFAULT_PROVIDER
+
+
+def _remote_headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    if REMOTE_API_KEY:
+        h["Authorization"] = f"Bearer {REMOTE_API_KEY}"
+    return h
+
+
+def _remote_timeout():
+    return httpx.Timeout(_REMOTE_TIMEOUT, connect=15)
+
+
+async def _proxy_chat(name: str, url: str, req: ChatCompletionRequest):
+    """Forward a chat completion to the upstream instance. Streaming responses
+    are relayed byte-for-byte (the upstream already speaks correct SSE);
+    failures are surfaced in-band as a chunk, matching local behavior."""
+    payload = req.model_dump(exclude_none=True)
+    payload["model"] = name
+
+    if req.stream:
+        async def relay():
+            started = time.monotonic()
+            err: Optional[BaseException] = None
+            try:
+                async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
+                    async with client.stream("POST", f"{url}/v1/chat/completions",
+                                             json=payload, headers=_remote_headers()) as r:
+                        if r.status_code != 200:
+                            body = (await r.aread()).decode("utf-8", "ignore")[:300]
+                            raise RuntimeError(f"upstream returned {r.status_code}: {body}")
+                        async for chunk in r.aiter_bytes():
+                            yield chunk
+            except Exception as e:
+                err = e
+                logger.error(f"[{name}] remote proxy ({url}) failed: {e}")
+                data = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": name,
+                    "choices": [{"index": 0,
+                                 "delta": {"role": "assistant",
+                                           "content": f"\n\n[browser-llm error: remote: {e}]"},
+                                 "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(data)}\n\n".encode()
+                data["choices"][0]["delta"] = {}
+                data["choices"][0]["finish_reason"] = "stop"
+                yield f"data: {json.dumps(data)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+            finally:
+                _record_request(name, started, err)
+        return StreamingResponse(relay(), media_type="text/event-stream")
+
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
+            r = await client.post(f"{url}/v1/chat/completions",
+                                  json=payload, headers=_remote_headers())
+    except Exception as e:
+        _record_request(name, started, e)
+        logger.error(f"[{name}] remote proxy ({url}) failed: {e}")
+        raise HTTPException(status_code=502, detail=f"remote provider {url} unreachable: {e}")
+    if r.status_code != 200:
+        err = RuntimeError(f"upstream returned {r.status_code}")
+        _record_request(name, started, err)
+        raise HTTPException(status_code=502,
+                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}")
+    _record_request(name, started)
+    return JSONResponse(r.json())
+
+
+async def _proxy_images(name: str, url: str, req: ImageGenRequest):
+    """Forward an image generation to the upstream instance. Returned image
+    URLs point at the upstream (its GEMINI_PUBLIC_URL); /images/* is public
+    there even with an API key set, so the links work in a plain browser."""
+    payload = req.model_dump(exclude_none=True)
+    payload["model"] = name
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
+            r = await client.post(f"{url}/v1/images/generations",
+                                  json=payload, headers=_remote_headers())
+    except Exception as e:
+        _record_request(name, started, e)
+        logger.error(f"[{name}] remote image proxy ({url}) failed: {e}")
+        raise HTTPException(status_code=502, detail=f"remote provider {url} unreachable: {e}")
+    if r.status_code != 200:
+        err = RuntimeError(f"upstream returned {r.status_code}")
+        _record_request(name, started, err)
+        raise HTTPException(status_code=r.status_code if r.status_code in (501, 502) else 502,
+                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}")
+    _record_request(name, started)
+    return JSONResponse(r.json())
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-warm only the default provider; others start lazily on first request
-    # (so an un-logged-in provider never blocks startup).
-    await get_browser(get_provider(DEFAULT_PROVIDER))
+    # (so an un-logged-in provider never blocks startup). A remote default has
+    # no local browser to warm.
+    if DEFAULT_PROVIDER not in REMOTES:
+        await get_browser(get_provider(DEFAULT_PROVIDER))
     logger.info("Server ready.")
     yield
     for b in _browsers.values():
@@ -486,14 +626,37 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Browser LLM API", version=__version__, lifespan=lifespan)
 
-# The API is unauthenticated and LAN/localhost-only by design; CORS-open so the
-# web UI (and any local tool) can call it from other origins/ports.
+# CORS-open so the web UI (and any local tool) can call it from other
+# origins/ports. Auth story: localhost is always open; non-loopback clients
+# need BROWSER_LLM_API_KEY (if set) on /v1/* and /api/* — see authz.py.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    """When BROWSER_LLM_API_KEY is set, gate API paths for non-loopback
+    clients. Loopback (local web UI / desktop app / CLI) stays open, as do
+    page/asset paths (needed for served image links and the UI shell).
+    Registered after CORSMiddleware → runs before it, so OPTIONS preflights
+    (which can't carry auth headers) are exempted in needs_key."""
+    client = request.client.host if request.client else None
+    if (API_KEY and not authz.is_loopback(client)
+            and authz.needs_key(request.url.path, request.method)):
+        supplied = authz.extract_key(request.headers.get("authorization"),
+                                     request.headers.get("x-api-key"))
+        if not authz.key_matches(supplied, API_KEY):
+            return JSONResponse(
+                {"error": {"message": "missing or invalid API key "
+                           "(Authorization: Bearer <key> or X-Api-Key header)",
+                           "type": "invalid_request_error", "code": "invalid_api_key"}},
+                status_code=401,
+            )
+    return await call_next(request)
 
 # Serve saved images so responses can return real links (GEMINI_IMAGE_DIR).
 if _SAVE_ENABLED:
@@ -572,6 +735,31 @@ async def api_status():
             "last_error": m["last_error"],
             "last_error_at": m["last_error_at"],
             "last_request_at": m["last_request_at"],
+            # non-None ⇒ requests for this model are proxied upstream, the
+            # local browser fields above don't apply
+            "remote_upstream": REMOTES.get(name),
+        }
+    # Remote-only models (mapped in REMOTE_PROVIDERS but not a local provider)
+    # still get a status entry so the UI can show them.
+    for name, url in REMOTES.items():
+        if name in providers:
+            continue
+        m = _metrics[name]
+        providers[name] = {
+            "browser_running": False,
+            "busy": False,
+            "supports_images": True,
+            "images_since_recycle": 0,
+            "recycle_after_images": _RECYCLE_AFTER_IMAGES,
+            "default": name == DEFAULT_PROVIDER,
+            "requests": m["requests"],
+            "errors": m["errors"],
+            "avg_latency": round(m["total_latency"] / m["requests"], 2) if m["requests"] else None,
+            "last_latency": m["last_latency"],
+            "last_error": m["last_error"],
+            "last_error_at": m["last_error_at"],
+            "last_request_at": m["last_request_at"],
+            "remote_upstream": url,
         }
     return {
         "ok": True,
@@ -623,6 +811,7 @@ async def api_gallery(provider: Optional[str] = None, limit: int = 60):
 
 @app.get("/v1/models")
 async def list_models():
+    names = list(PROVIDERS) + [n for n in REMOTES if n not in PROVIDERS]
     return {
         "object": "list",
         "data": [
@@ -632,7 +821,7 @@ async def list_models():
                 "created": 1700000000,
                 "owned_by": "google" if name.startswith("gemini") else "openai",
             }
-            for name in PROVIDERS
+            for name in names
         ],
     }
 
@@ -641,6 +830,10 @@ async def list_models():
 async def chat_completions(req: ChatCompletionRequest):
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages is empty")
+
+    name = _resolve_model(req.model)
+    if name in REMOTES:
+        return await _proxy_chat(name, REMOTES[name], req)
 
     provider = get_provider(req.model)
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -728,6 +921,10 @@ async def images_generations(req: ImageGenRequest):
     """OpenAI-compatible image generation, backed by the provider's in-chat image tool."""
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt is empty")
+
+    name = _resolve_model(req.model)
+    if name in REMOTES:
+        return await _proxy_images(name, REMOTES[name], req)
 
     provider = get_provider(req.model)
     if not provider.supports_images:

@@ -5,6 +5,7 @@ nodriver>=0.50
 fastapi>=0.115
 uvicorn>=0.30
 pydantic>=2
+httpx>=0.27         # remote-provider proxying (REMOTE_PROVIDERS)
 
 # Optional — only gen_asset.py needs it (image post-processing).
 Pillow>=10

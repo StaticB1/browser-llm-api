@@ -237,6 +237,24 @@
 const $ = s => document.querySelector(s);
 const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
+/* ---------- API key (only needed when opening this UI from another machine
+   and the server sets BROWSER_LLM_API_KEY; localhost never needs it).
+   Open the UI once as  http://<host>:8081/#key=<key>  — it's remembered. ---- */
+(() => {
+  const m = location.hash.match(/[#&]key=([^&]+)/);
+  if (m) {
+    localStorage.setItem("browserLlmApiKey", decodeURIComponent(m[1]));
+    history.replaceState(null, "", location.pathname + location.search); // don't leave the key in the URL bar
+  }
+  const key = localStorage.getItem("browserLlmApiKey");
+  if (!key) return;
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    opts.headers = Object.assign({}, opts.headers, { "Authorization": "Bearer " + key });
+    return realFetch(url, opts);
+  };
+})();
+
 /* ---------- tabs ---------- */
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x===b));
