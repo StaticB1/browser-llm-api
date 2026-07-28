@@ -232,10 +232,16 @@ class ChatGPTProvider(Provider):
                         }
                         msg=msg.replace(/\n{3,}/g,'\n\n').trim();
                     }
-                    if(msg.length>=40 || msg.indexOf('```')>=0) return msg;
-                    // Canvas side-panel fallback: big code/doc answers land in a side
-                    // panel, not in .markdown, leaving the message body near-empty.
-                    // Virtualized editors keep only visible lines, so this can be partial.
+                    // Canvas / textdoc side-panel: large code/doc answers render in a
+                    // side editor (CodeMirror/Monaco/ProseMirror), NOT in .markdown — the
+                    // message body is then just a short intro ("Here's the file:") or a
+                    // deferral. The old `msg.length>=40` gate returned that intro verbatim
+                    // and never looked at the canvas, so big answers came back as a stub.
+                    // Each request opens a FRESH chat (open_and_send), so any editor on the
+                    // page belongs to THIS answer — never a prior turn — so it's safe to
+                    // always read it and return whichever is the larger, real payload.
+                    // (CodeMirror virtualizes offscreen lines, so a very long canvas can
+                    // still come back partial — a known limitation, not fixed here.)
                     var composer=document.querySelector('#prompt-textarea');
                     var isComposer=function(el){ return composer&&(el===composer||el.contains(composer)
                         ||composer.contains(el)||el.id==='prompt-textarea'); };
@@ -246,7 +252,12 @@ class ChatGPTProvider(Provider):
                     document.querySelectorAll('.cm-content').forEach(consider);
                     document.querySelectorAll('.monaco-editor .view-lines').forEach(consider);
                     document.querySelectorAll('.ProseMirror').forEach(consider);
-                    return canvasTxt.length>msg.length?canvasTxt:msg;
+                    // Return the larger of {message body, canvas payload}. Inline code
+                    // blocks live INSIDE .markdown and are already fenced into `msg`, so
+                    // msg is a superset of them and always wins — only a genuine SIDE
+                    // canvas (a separate editor, not in .markdown) can exceed msg. Require
+                    // >40 chars so a stray/empty editor never beats a short prose reply.
+                    return (canvasTxt.length>40 && canvasTxt.length>msg.length) ? canvasTxt : msg;
                 })()
             """)
             return result if isinstance(result, str) else ""

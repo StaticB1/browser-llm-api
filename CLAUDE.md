@@ -356,9 +356,17 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   deadline → 7-min hang returning nothing. Fix: only a **large, image-shaped** canvas (min side ≥256px)
   counts (image-render canvas is 512–1024px; editor minimap/gutter canvases are narrow). Belt-and-suspenders
   in `CompletionTracker`: if "creating" stays set with no image after generation ends, it's treated as a
-  false positive after 45s. `get_response_text` also falls back to reading the Canvas side-panel editor
-  (`.cm-content` / Monaco `.view-lines` / a non-composer `.ProseMirror`) when the message body is near-empty
-  — best-guess selectors, verify live if canvas answers look wrong.
+  false positive after 45s. `get_response_text` also reads the Canvas side-panel editor
+  (`.cm-content` / Monaco `.view-lines` / a non-composer `.ProseMirror`) and returns whichever is the LARGER
+  payload — the message body or the canvas. (Was gated to "message body near-empty", which let a short intro
+  like *"Here's the file:"* shadow a big canvas and return only the stub; now the canvas always competes.)
+  Safe because each request opens a **fresh chat** (`open_and_send`), so any editor on the page is THIS
+  answer's, never a stale prior turn; inline code blocks live inside `.markdown` and are already fenced into
+  the message, so `msg` is a superset of them and only a genuine SIDE canvas can exceed it. Best-guess
+  selectors — verify live if canvas answers look wrong; and CodeMirror virtualizes offscreen lines, so a very
+  long canvas can still read partial. (Aside: ChatGPT sometimes *refuses* to emit very large content in one
+  message and only offers a canvas — that's model behavior, not a capture bug; chunk the prompt or ask for
+  inline fenced output.)
   A generated image is an `<img src="…/backend-api/estuary/content?id=file_…" alt="Generated image: …">`
   (same-origin → fetchable to base64), NOT `oaiusercontent`/`blob:`. The finished image is *not* inside
   a `data-message-author-role` element, so `image_status`/`get_images` scan the whole page.
