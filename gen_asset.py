@@ -26,6 +26,11 @@ Examples:
   python3 gen_asset.py --prompt "minimalist letter B monogram, bold, centered, solid white background" \
       --out public/favicon.ico --favicon --knockout-bg
 
+  # Image-to-image: restyle an existing asset (the reference is uploaded to the chat)
+  python3 gen_asset.py --ref public/hero.webp --out public/hero-dark.webp \
+      --prompt "same composition, night-time palette, deep blues, keep the layout identical" \
+      --width 1600 --height 900
+
 Constraints to respect:
   * Generation is slow and serialized per provider — generate sequentially, never
     in parallel. Gemini ~30s; ChatGPT ~30s-4min (free tier), so --timeout defaults
@@ -47,15 +52,36 @@ import urllib.request
 
 from PIL import Image
 
-API = os.environ.get("GEMINI_API", "http://localhost:8081") + "/v1/images/generations"
+_BASE = os.environ.get("GEMINI_API", "http://localhost:8081")
+API = _BASE + "/v1/images/generations"
+EDIT_API = _BASE + "/v1/images/edits"      # used when --ref is given (image-to-image)
 
 
-def generate(prompt, model=None, timeout=440):
+def _ref_spec(path_or_url):
+    """Reference image → data: URL (works even when the server is on another
+    machine and can't read this disk). http(s)/data: specs pass through."""
+    s = str(path_or_url)
+    if s[:5].lower() in ("http:", "https", "data:"):
+        return s
+    if not os.path.isfile(s):
+        raise SystemExit(f"[gen_asset] reference image not found: {s}")
+    import mimetypes
+    mime = mimetypes.guess_type(s)[0] or "image/png"
+    with open(s, "rb") as f:
+        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+
+
+def generate(prompt, model=None, timeout=440, refs=None):
     payload = {"prompt": prompt}
     if model:
         payload["model"] = model  # else the server uses its DEFAULT_PROVIDER
+    url = API
+    if refs:
+        # Reference image(s) → image-to-image via the edits endpoint.
+        payload["images"] = [_ref_spec(r) for r in refs]
+        url = EDIT_API
     req = urllib.request.Request(
-        API,
+        url,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -141,6 +167,10 @@ def main():
     ap.add_argument("--out", required=True, help="output file; format inferred from extension")
     ap.add_argument("--model", help="provider, e.g. gemini-browser | chatgpt-browser "
                     "(default = server's DEFAULT_PROVIDER)")
+    ap.add_argument("--ref", action="append", metavar="PATH|URL", dest="refs",
+                    help="reference image for image-to-image (repeatable): the image is "
+                         "uploaded into the chat with the prompt, so you can restyle, "
+                         "extend or clean up an existing asset")
     ap.add_argument("--timeout", type=int, default=440,
                     help="seconds to wait for generation (default 440; ChatGPT can be slow)")
     ap.add_argument("--width", type=int)
@@ -154,8 +184,9 @@ def main():
     ap.add_argument("--quality", type=int, default=88)
     args = ap.parse_args()
 
-    print(f"[gen_asset] generating ({args.model or 'default'}): {args.prompt[:70]}…", file=sys.stderr)
-    img = generate(args.prompt, model=args.model, timeout=args.timeout)
+    what = f"editing {len(args.refs)} ref(s)" if args.refs else "generating"
+    print(f"[gen_asset] {what} ({args.model or 'default'}): {args.prompt[:70]}…", file=sys.stderr)
+    img = generate(args.prompt, model=args.model, timeout=args.timeout, refs=args.refs)
 
     if args.square:
         img = square(img, args.square)

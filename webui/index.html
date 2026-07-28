@@ -83,6 +83,22 @@
   .btn.ghost{background:var(--panel2); color:var(--muted); border:1px solid var(--border); font-weight:550}
   .rowline{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
   .hint{font-size:12.5px; color:var(--muted)}
+  .iconbtn{background:var(--panel2); border:1px solid var(--border); color:var(--muted);
+           border-radius:9px; width:38px; height:38px; font-size:17px; cursor:pointer; flex:none}
+  .iconbtn:hover{color:var(--text); border-color:var(--accent)}
+  .iconbtn.on{color:var(--accent); border-color:var(--accent)}
+  /* attachment thumbnails (chat composer + image tab) */
+  .attachrow{display:flex; gap:8px; flex-wrap:wrap; padding:0 0 8px}
+  .attachrow:empty{display:none}
+  .thumb{position:relative; width:60px; height:60px; border-radius:9px; overflow:hidden;
+         border:1px solid var(--border); background:var(--panel2); flex:none}
+  .thumb img{width:100%; height:100%; object-fit:cover; display:block}
+  .thumb button{position:absolute; top:1px; right:1px; width:18px; height:18px; padding:0;
+                border:none; border-radius:50%; background:rgba(10,12,16,.82); color:#fff;
+                font-size:12px; line-height:18px; cursor:pointer}
+  .composer.drag .box{border-color:var(--accent)}
+  .msg .attached{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px}
+  .msg .attached img{width:82px; height:82px; object-fit:cover; border-radius:8px; margin:0}
   details.sys{font-size:13px; color:var(--muted)}
   details.sys textarea{width:100%; min-height:54px; background:var(--panel2);
     border:1px solid var(--border); border-radius:8px; padding:8px; margin-top:6px}
@@ -156,7 +172,10 @@
         <summary>system prompt (optional)</summary>
         <textarea id="system" placeholder="e.g. You are terse. Output only code."></textarea>
       </details>
+      <div class="attachrow" id="chatattach"></div>
       <div class="box">
+        <button class="iconbtn" id="chatclip" title="attach image(s) — or paste / drop them here">📎</button>
+        <input type="file" id="chatfile" accept="image/*" multiple hidden>
         <textarea id="prompt" rows="1" placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
         <button class="btn ghost" id="newchat" title="clear the conversation">New</button>
         <button class="btn" id="send">Send</button>
@@ -172,12 +191,16 @@
       <div class="rowline">
         <input type="text" id="imgprompt" style="flex:1"
                placeholder="e.g. isometric 3d rocket icon, vibrant, solid background">
+        <button class="iconbtn" id="imgclip" title="reference image(s) for image-to-image">📎</button>
+        <input type="file" id="imgfile" accept="image/*" multiple hidden>
         <button class="btn" id="imggen">Generate</button>
       </div>
+      <div class="attachrow" id="imgattach" style="margin-top:10px"></div>
       <p class="hint" style="margin:10px 0 0">
         Takes 30s–4min (free tiers are slow). ChatGPT image generation needs the server
         on a real display; Gemini works headless too. Results are saved to disk and shown
-        in the <b>Gallery</b> tab.
+        in the <b>Gallery</b> tab. Attach a reference image (📎, paste or drop) to do
+        <b>image-to-image</b> — the reference is uploaded into the chat with your prompt.
       </p>
       <div class="progress" id="imgprog" style="margin-top:10px">
         <span class="spin"></span><span id="imgprogtxt"></span>
@@ -211,8 +234,9 @@
       <h2>Embed this chat anywhere</h2>
       <p class="hint" style="margin:0 0 10px">
         Paste this into any page on the LAN to add a floating chat bubble backed by this server
-        (CORS is open; no key needed). Config via <code>data-*</code> attrs — provider, title,
-        accent, position, greeting, system.
+        (CORS is open; no key needed). It can attach images too (📎, paste or drop). Config via
+        <code>data-*</code> attrs — provider, title, accent, position, greeting, system,
+        attach (<code>data-attach="0"</code> hides 📎).
       </p>
       <pre id="embedsnippet"><code></code></pre>
       <div class="rowline">
@@ -341,7 +365,8 @@ function renderStatus(){
     const last = p.last_latency==null ? "—" : `${p.last_latency}<small>s</small>`;
     const badges = [
       p.default ? `<span class="badge">default</span>` : "",
-      p.supports_images ? `<span class="badge">images</span>` : "",
+      p.supports_images ? `<span class="badge">image out</span>` : "",
+      p.supports_upload ? `<span class="badge">image in</span>` : "",
     ].join("");
     const errline = p.last_error
       ? `<div class="errline"><b>last error</b> (${ago(p.last_error_at)}): ${esc(p.last_error)}</div>` : "";
@@ -404,9 +429,67 @@ function md(src){
   return text.replace(/\u0000B(\d+)\u0000/g, (_,i)=>blocks[+i]);
 }
 
+/* ---------- attachments (image input) ----------
+   Files are read to data: URLs client-side and sent as OpenAI content parts
+   (chat) or the `images` field (image tab); the server uploads them into the
+   provider's chat. Shared by the chat composer and the Image tab. */
+const MAX_ATTACH = 6;
+
+function attachStore(rowSel, onChange){
+  const items = [];   // {name, dataUrl}
+  function render(){
+    $(rowSel).innerHTML = items.map((it,i)=>
+      `<div class="thumb" title="${esc(it.name)}"><img src="${esc(it.dataUrl)}" alt="">
+         <button data-i="${i}" title="remove">×</button></div>`).join("");
+    $(rowSel).querySelectorAll("button").forEach(b => b.onclick = ()=>{
+      items.splice(+b.dataset.i, 1); render();
+    });
+    onChange && onChange(items.length);
+  }
+  async function add(files){
+    for (const f of files || []){
+      if (!f || !f.type || !f.type.startsWith("image/")) continue;
+      if (items.length >= MAX_ATTACH){ alert(`at most ${MAX_ATTACH} images per request`); break; }
+      const dataUrl = await new Promise((res, rej)=>{
+        const fr = new FileReader();
+        fr.onload = ()=>res(fr.result); fr.onerror = rej; fr.readAsDataURL(f);
+      });
+      items.push({name: f.name || "pasted image", dataUrl});
+    }
+    render();
+  }
+  return {items, add, render, clear(){ items.length = 0; render(); },
+          urls(){ return items.map(it=>it.dataUrl); }};
+}
+
+/* Wire a 📎 button + hidden input + paste/drop on a container to a store. */
+function wireAttach(store, btnSel, inputSel, dropSel, pasteTargetSel){
+  $(btnSel).onclick = ()=> $(inputSel).click();
+  $(inputSel).onchange = e => { store.add(e.target.files); e.target.value = ""; };
+  const drop = $(dropSel);
+  if (drop){
+    ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e=>{
+      if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+      e.preventDefault(); drop.classList.add("drag");
+    }));
+    ["dragleave","dragend"].forEach(ev => drop.addEventListener(ev, ()=> drop.classList.remove("drag")));
+    drop.addEventListener("drop", e=>{
+      if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+      e.preventDefault(); drop.classList.remove("drag"); store.add(e.dataTransfer.files);
+    });
+  }
+  const pt = $(pasteTargetSel);
+  if (pt) pt.addEventListener("paste", e=>{
+    const files = [...(e.clipboardData ? e.clipboardData.files : [])];
+    if (files.length){ e.preventDefault(); store.add(files); }
+  });
+}
+
 /* ---------- chat ---------- */
 let messages = [];   // conversation sent back to the API each turn
 let chatBusy = false;
+const chatAttach = attachStore("#chatattach", n => $("#chatclip").classList.toggle("on", n > 0));
+wireAttach(chatAttach, "#chatclip", "#chatfile", "#view-chat .composer", "#prompt");
 
 function addBubble(role, html, meta){
   const d = document.createElement("div");
@@ -420,13 +503,27 @@ function addBubble(role, html, meta){
 async function sendChat(){
   const ta = $("#prompt");
   const text = ta.value.trim();
-  if (!text || chatBusy) return;
+  const imgs = chatAttach.urls();
+  if ((!text && !imgs.length) || chatBusy) return;
   chatBusy = true; $("#send").disabled = true;
   ta.value = ""; ta.style.height = "auto";
 
   const provider = $("#provider").value;
-  messages.push({role:"user", content:text});
-  addBubble("user", md(text));
+  // With images, send OpenAI content parts; they stay in the history so a
+  // follow-up question about the same image still has it (each request drives a
+  // fresh chat, so the server re-uploads them).
+  if (imgs.length){
+    const parts = [];
+    if (text) parts.push({type:"text", text});
+    for (const u of imgs) parts.push({type:"image_url", image_url:{url:u}});
+    messages.push({role:"user", content: parts});
+  } else {
+    messages.push({role:"user", content:text});
+  }
+  const thumbs = imgs.length
+    ? `<div class="attached">${imgs.map(u=>`<img src="${esc(u)}" alt="attached">`).join("")}</div>` : "";
+  addBubble("user", thumbs + md(text));
+  chatAttach.clear();
   const bubble = addBubble("assistant", '<span class="hint">…</span>', provider);
 
   const t0 = Date.now();
@@ -491,20 +588,27 @@ $("#prompt").addEventListener("input", e=>{
 });
 $("#newchat").onclick = ()=>{ messages = []; $("#chatlog").innerHTML = ""; $("#prompt").focus(); };
 
-/* ---------- image generation ---------- */
+/* ---------- image generation (+ image-to-image) ---------- */
+const imgAttach = attachStore("#imgattach", n => $("#imgclip").classList.toggle("on", n > 0));
+wireAttach(imgAttach, "#imgclip", "#imgfile", "#view-image", "#imgprompt");
+
 $("#imggen").onclick = async ()=>{
   const prompt = $("#imgprompt").value.trim();
   if (!prompt) return;
   const provider = $("#provider").value;
+  const refs = imgAttach.urls();
   const btn = $("#imggen"); btn.disabled = true;
   const t0 = Date.now();
   $("#imgprog").classList.add("on");
+  const verb = refs.length ? "editing" : "generating";
   const tick = setInterval(()=>{ $("#imgprogtxt").textContent =
-      `generating with ${provider} · ${Math.floor((Date.now()-t0)/1000)}s (can take minutes)`; }, 500);
+      `${verb} with ${provider} · ${Math.floor((Date.now()-t0)/1000)}s (can take minutes)`; }, 500);
   try{
-    const res = await fetch("/v1/images/generations", {
+    const body = {model: provider, prompt};
+    if (refs.length) body.images = refs;
+    const res = await fetch(refs.length ? "/v1/images/edits" : "/v1/images/generations", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({model: provider, prompt}),
+      body: JSON.stringify(body),
     });
     const j = await res.json();
     if (!res.ok) throw new Error(j.detail || ("HTTP "+res.status));

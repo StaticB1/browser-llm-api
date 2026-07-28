@@ -2,7 +2,7 @@
 
 **Turn the AI you already use in your browser into a local, OpenAI-compatible API — no API keys, no per-token bills.**
 
-Browser LLM API drives a real, logged-in **ChatGPT** and **Gemini** session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and re-exposes it as the same HTTP API your tools already speak. Point any OpenAI SDK, script, or app at `http://localhost:8081/v1` and get **streaming chat *and* image generation** — powered by your existing subscription (or free tier), running entirely on your own machine.
+Browser LLM API drives a real, logged-in **ChatGPT** and **Gemini** session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and re-exposes it as the same HTTP API your tools already speak. Point any OpenAI SDK, script, or app at `http://localhost:8081/v1` and get **streaming chat, vision (send images *in*), and image generation + editing** — powered by your existing subscription (or free tier), running entirely on your own machine.
 
 ![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
 
@@ -20,8 +20,8 @@ client.chat.completions.create(
 ## Why you might want this
 
 - 🔑 **No API keys, no metered billing.** It rides your normal logged-in web session, so you use the plan you already pay for — or the free tier — instead of a separate paid API.
-- 🔌 **Drop-in OpenAI compatibility.** `/v1/chat/completions` (streaming + non-streaming) and `/v1/images/generations`, with the same request/response shapes. Existing OpenAI clients, LangChain, scripts, and dev tools "just work."
-- 🎨 **Chat *and* images.** Both providers generate images from a prompt; results come back as a link **and** a saved file.
+- 🔌 **Drop-in OpenAI compatibility.** `/v1/chat/completions` (streaming + non-streaming), `/v1/images/generations` and `/v1/images/edits`, with the same request/response shapes. Existing OpenAI clients, LangChain, scripts, and dev tools "just work."
+- 🎨 **Chat *and* images — both directions.** Generate images from a prompt (returned as a link **and** a saved file), and **send images in**: vision questions and image-to-image editing, by uploading into the provider's own composer.
 - 🧩 **Two providers, one field.** Switch between ChatGPT and Gemini per request via the `model` field. Run both at once — they're independent.
 - 🏠 **Local & private to your LAN.** Everything runs on your box; nothing goes to a third-party API broker.
 - 🖥️ **Use it four ways** (below): REST API, a web dashboard, an embeddable chat widget, or a **native Linux desktop app**.
@@ -32,15 +32,15 @@ client.chat.completions.create(
 
 | Surface | What it is | Where |
 |---------|-----------|-------|
-| 🔌 **OpenAI-compatible API** | `/v1/chat/completions` + `/v1/images/generations` + `/v1/models` | `http://localhost:8081/v1` |
-| 🖥️ **Web dashboard** | Streaming chat, image generation, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
-| 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble onto any page on your network | `/widget.js` (demo at `/demo`) |
-| 🐧 **Native desktop app** | GTK tray widget that generates images for your active **VS Code project**, + a full Chat / Images / Gallery / Status window (Linux) | [`desktop/`](desktop/README.md) |
+| 🔌 **OpenAI-compatible API** | `/v1/chat/completions` (text + vision) + `/v1/images/generations` + `/v1/images/edits` + `/v1/models` | `http://localhost:8081/v1` |
+| 🖥️ **Web dashboard** | Streaming chat with image attachments, image generation & editing, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
+| 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble (with 📎 image attach) onto any page on your network | `/widget.js` (demo at `/demo`) |
+| 🐧 **Native desktop app** | GTK tray widget that generates/edits images for your active **VS Code project**, + a full Chat / Images / Gallery / Status window (Linux) | [`desktop/`](desktop/README.md) |
 
-| `model` | Backend | Images |
-|---------|---------|--------|
-| `chatgpt-browser` | chatgpt.com | ✅ |
-| `gemini-browser` | gemini.google.com | ✅ |
+| `model` | Backend | Images out | Images in |
+|---------|---------|------------|-----------|
+| `chatgpt-browser` | chatgpt.com | ✅ | ✅ |
+| `gemini-browser` | gemini.google.com | ✅ | ✅ |
 
 An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `gemini-browser`).
 
@@ -69,7 +69,7 @@ Then open **`http://localhost:8081/`** for the web dashboard, or run the [native
 
 ## How it works
 
-The server keeps **one persistent Chrome per provider** (profile in `gemini_profile/` / `chatgpt_profile/`, gitignored), started lazily on first use. On each request it opens the site, types the prompt, and reads the streamed answer back out of the DOM — Gemini by walking the shadow DOM, ChatGPT from the plain-DOM `.markdown` of the last assistant turn. Completion is detected via a CDP network signal (the provider's streaming request finishing) with a DOM-stability fallback. Requests are serialized **per provider** by a lock, so Gemini and ChatGPT can run concurrently while callers to the *same* provider queue.
+The server keeps **one persistent Chrome per provider** (profile in `gemini_profile/` / `chatgpt_profile/`, gitignored), started lazily on first use. On each request it opens the site, uploads any attached images through the page's own file picker (via CDP, so the site sees an ordinary file selection), types the prompt, and reads the streamed answer back out of the DOM — Gemini by walking the shadow DOM, ChatGPT from the plain-DOM `.markdown` of the last assistant turn. Completion is detected via a CDP network signal (the provider's streaming request finishing) with a DOM-stability fallback. Requests are serialized **per provider** by a lock, so Gemini and ChatGPT can run concurrently while callers to the *same* provider queue.
 
 > **Note on ChatGPT:** the ChatGPT selectors are best-guess against the live UI (which changes often and sits behind Cloudflare/anti-bot) and may need tweaking. Automating chatgpt.com may also conflict with OpenAI's ToS — use accordingly.
 
@@ -77,8 +77,8 @@ The server keeps **one persistent Chrome per provider** (profile in `gemini_prof
 
 Open **`http://localhost:8081/`** in a browser. Four tabs:
 
-- **Chat** — pick a provider, chat with streaming replies and multi-turn context; optional system prompt; generated images render inline. Enter sends, Shift+Enter for a newline.
-- **Image** — one-line prompt → image, with an elapsed-time indicator (free-tier image gen takes 30s–4min).
+- **Chat** — pick a provider, chat with streaming replies and multi-turn context; optional system prompt; generated images render inline. Attach images with **📎** (or paste / drag-drop them onto the composer) to ask about a screenshot or photo — thumbnails show in your message and stay in the conversation, so follow-up questions still see them. Enter sends, Shift+Enter for a newline.
+- **Image** — one-line prompt → image, with an elapsed-time indicator (free-tier image gen takes 30s–4min). Attach reference image(s) with **📎** to switch to **image-to-image** (the request goes to `/v1/images/edits`).
 - **Gallery** — every image saved to `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
 - **Status** — live per-provider telemetry (requests, errors, avg + last latency, images-until-recycle countdown), server info (version, uptime, display, image dir), and a copy-paste **embed snippet** with a "Preview widget on this page" button.
 
@@ -92,7 +92,7 @@ Drop a floating chat bubble onto **any** page on your network with one line — 
 <script src="http://localhost:8081/widget.js"></script>
 ```
 
-The widget is self-contained and **Shadow-DOM isolated** (host-page CSS can't leak in or out). It auto-discovers the API base from its own script URL, so the host page can be on any origin/port — the server already sends open CORS headers. See a live demo at **`http://localhost:8081/demo`**.
+The widget is self-contained and **Shadow-DOM isolated** (host-page CSS can't leak in or out). It can attach images too — 📎, paste, or drag-drop onto the composer. It auto-discovers the API base from its own script URL, so the host page can be on any origin/port — the server already sends open CORS headers. See a live demo at **`http://localhost:8081/demo`**.
 
 Configure with `data-*` attributes on the script tag:
 
@@ -105,6 +105,7 @@ Configure with `data-*` attributes on the script tag:
 | `data-greeting` | friendly hi | first assistant line |
 | `data-system` | — | a system prompt sent with every turn |
 | `data-open` | — | `1` to start expanded |
+| `data-attach` | `1` | `0` hides the 📎 image-attach button |
 
 Runtime handle: `window.BrowserLLMWidget.{open, close, reset, config}` — e.g. `BrowserLLMWidget.config({accent:'#9b8cfb', provider:'chatgpt-browser'})`. Press `Esc` to close.
 
@@ -184,7 +185,7 @@ Both providers generate images from a natural prompt. Generated images are saved
 
 **Storage path** — `GEMINI_IMAGE_DIR` (env; `serve.sh` defaults it to `~/Pictures/browser-llm`). The folder is created on startup and mounted at `/images/<file>`. `GEMINI_PUBLIC_URL` (default `http://localhost:8081`) is the base used to build the returned links — change it if you reach the server from another host. If the folder isn't writable, saving is skipped and it falls back to inline base64 / `data:` URLs.
 
-- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![...](http://localhost:8081/images/gemini_….png)`. Gemini replies image-only (its accompanying text is internal "thinking"); ChatGPT keeps its caption text and appends the image.
+- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![...](http://localhost:8081/images/gemini/gemini_….png)`. Gemini replies image-only (its accompanying text is internal "thinking"); ChatGPT keeps its caption text and appends the image.
 - **Images endpoint** — OpenAI-style `POST /v1/images/generations` (`model` selects the provider):
 
 ```bash
@@ -193,7 +194,7 @@ curl http://localhost:8081/v1/images/generations \
   -d '{"model":"gemini-browser","prompt":"a red bicycle on a beach at sunset"}'
 # -> {"created": ..., "data": [{
 #      "b64_json": "<base64>",
-#      "url":  "http://localhost:8081/images/gemini_….png",
+#      "url":  "http://localhost:8081/images/gemini/gemini_….png",
 #      "path": "~/Pictures/browser-llm/gemini/gemini_….png"
 #    }]}
 ```
@@ -211,6 +212,68 @@ For **long asset runs**, the provider's browser is **auto-recycled** every few i
     --out public/avatar.png --square 256 --knockout-bg
 ```
 
+## Image input (vision + image-to-image)
+
+You can send images **in**, not just get them out: attachments are uploaded into the provider's own
+chat composer (the same file picker a human clicks), then the prompt is submitted with them. That
+covers "what's in this screenshot?", "find the bug in this diagram", and image-to-image editing.
+
+**In chat** — standard OpenAI vision content parts. A `data:` URL, an `http(s)` URL, or a local file
+path all work (paths only from localhost — see below):
+
+```bash
+curl http://localhost:8081/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "chatgpt-browser",
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "What is written in this image?"},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGg…"}}
+  ]}]}'
+```
+
+The OpenAI SDK works unchanged, and there's a shorthand (`images`) when you don't want content parts:
+
+```python
+client.chat.completions.create(model="chatgpt-browser", messages=[
+    {"role": "user", "content": [
+        {"type": "text", "text": "Which CSS rule is wrong here?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}},
+    ]}])
+
+# shorthand (not OpenAI): {"messages": [...], "images": ["/path/or/data-url", ...]}
+```
+
+**Image-to-image / edits** — `POST /v1/images/edits` takes OpenAI's multipart upload *or* the same
+JSON body as `/v1/images/generations` plus `image`/`images`. The reference is uploaded with the
+prompt, and the result is saved and returned exactly like a generation:
+
+```bash
+# multipart (what the OpenAI SDK's images.edit sends)
+curl http://localhost:8081/v1/images/edits \
+  -F model=chatgpt-browser -F image=@logo.png \
+  -F 'prompt=same logo, flat vector style, deep navy background, white text'
+
+# or JSON — and /v1/images/generations accepts `image` too, which does the same thing
+curl http://localhost:8081/v1/images/generations -H 'Content-Type: application/json' \
+  -d '{"model":"chatgpt-browser","prompt":"restyle as a night scene","image":"/abs/path/hero.png"}'
+```
+
+Every surface can do it: the **web UI** (📎 in the chat composer and on the Image tab — click, paste
+or drag-drop), the **widget** (📎; disable with `data-attach="0"`), the **desktop app** (📎 in Chat,
+and reference images in the tray's project image panel), `client.py --image FILE` (repeatable), and
+`gen_asset.py --ref FILE` for asset restyling.
+
+**Accepted attachment forms:** `data:` URL, bare base64, `http(s)` URL (downloaded server-side),
+`file://` URL, or a local path. **Local paths are accepted only from loopback clients** — a LAN
+client with the API key would otherwise be able to upload any file off the server box; it must send
+bytes instead (`ALLOW_REMOTE_FILE_PATHS=1` opts out). Limits: `MAX_ATTACHMENTS` (default 6) and
+`MAX_ATTACHMENT_MB` (default 20). Temp files are deleted after the request; your own files are never
+touched. When a model is proxied via `REMOTE_PROVIDERS`, local paths are inlined as `data:` URLs
+before forwarding, so remote providers work the same way (both ends need ≥ 0.2.0).
+
+> Vision requests are subject to the same fragility as the rest: ChatGPT's upload path is verified,
+> Gemini's is built on the generic file-chooser mechanism with best-guess menu labels (its "Upload &
+> tools" button is verified) — if a Gemini upload stops landing, that's the first thing to check.
+
 ## Configuration
 
 | env var | default | meaning |
@@ -223,6 +286,9 @@ For **long asset runs**, the provider's browser is **auto-recycled** every few i
 | `BROWSER_LLM_API_KEY` | *(unset)* | require this key (`Authorization: Bearer …` or `X-Api-Key`) from **non-localhost** clients on `/v1/*` and `/api/*`; localhost stays open |
 | `REMOTE_PROVIDERS` | *(unset)* | `model=url[,…]` — proxy those models to another browser-llm-api instance instead of a local browser |
 | `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`) |
+| `MAX_ATTACHMENTS` | `6` | most input images one request may attach |
+| `MAX_ATTACHMENT_MB` | `20` | per-attachment size ceiling |
+| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | let non-localhost clients attach **server-side file paths** (off by default) |
 
 ## Sharing a provider with another machine
 
@@ -243,20 +309,22 @@ export REMOTE_API_KEY=<the key from above>
 ./serve.sh
 ```
 
-Requests for `chatgpt-browser` on the friend's box are forwarded verbatim (streaming included);
-all other models still run in their own local browser. Different networks? Put both machines on a
+Requests for `chatgpt-browser` on the friend's box are forwarded verbatim (streaming included),
+**including image attachments** — a local file path is read and inlined as a `data:` URL before
+forwarding, since a path means nothing on the upstream's filesystem (both ends need ≥ 0.2.0 for
+image input). All other models still run in their own local browser. Different networks? Put both machines on a
 [Tailscale](https://tailscale.com) tailnet and use the tailnet IP instead of the LAN IP — nothing
 else changes.
 
 ## Project layout
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/models`, `/images/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo`). `main()` is the `browser-llm` console entry point.
-- **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`. `base.py` holds the generic completion loop + the unit-tested done-decision logic.
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, `/images/<provider>/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo`). Also owns the attachment layer: turning whatever a client sent (data URL, base64, http URL, multipart bytes, local path) into files for the browser, and the loopback-only path policy. `main()` is the `browser-llm` console entry point.
+- **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`. `base.py` holds the generic completion loop, the unit-tested done-decision logic, and the generic file-upload machinery (existing file input, or CDP file-chooser interception for sites that create one on demand).
 - **`webui/`** — `index.html` (mini web dashboard), `widget.js` (embeddable bubble), `widget-demo.html` (`/demo`). Single files, no build step.
 - **`desktop/`** — native Linux desktop app + tray widget (GTK3). See [`desktop/README.md`](desktop/README.md).
 - **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt`.
-- **`client.py`** — tiny stdlib CLI/import client for the API (`./client.py "prompt"`, or `from client import ask`).
-- **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow).
+- **`client.py`** — tiny stdlib CLI/import client for the API (`./client.py "prompt"`, `--image FILE` to send images, or `from client import ask`).
+- **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow); `--ref FILE` restyles an existing asset instead of generating from scratch.
 - **`serve.sh`** / **`install-service.sh`** / **`mode.sh`** / **`browser-llm-api.service.template`** — run the server and manage it as a background `systemd --user` service (generated for this clone).
 - **`gemini_bot.py`** — standalone single-prompt Gemini prototype.
 - **`AGENT_IMAGE_GUIDE.md`** — instructions to hand an AI coding agent so it uses this API to generate site image assets.
@@ -264,16 +332,21 @@ else changes.
 ## Caveats
 
 - **Fragile by nature** — each provider depends on its site's live DOM/selectors (Gemini: `model-response`; ChatGPT: `[data-message-author-role="assistant"]`, `[data-testid="send-button"]`). A UI change can break extraction. ChatGPT additionally sits behind Cloudflare/anti-bot.
+- **Image input rides the same selectors.** ChatGPT's upload path is verified end-to-end; Gemini's uses the generic file-chooser mechanism with best-guess menu labels (its "Upload & tools" button is verified) — if Gemini stops receiving attachments, check `attach_click_path` in `providers/gemini.py` first. Attachments are capped by `MAX_ATTACHMENTS` / `MAX_ATTACHMENT_MB`, and a multi-turn conversation re-uploads its images on every request (each request drives a fresh chat), so long image conversations get slower.
 - **One request at a time per provider** (per-provider lock); Gemini and ChatGPT run concurrently, callers to the same provider queue.
 - **`usage` token counts are approximate** (word-split, not a real tokenizer).
 - A hard crash can leave a stale `<profile>/SingletonLock`; the unit clears both providers' locks on start (`ExecStartPre`).
 
 ## Tests
 
-The completion decision (when is a streamed answer / image done?) is pure logic in `providers/base.py` and has unit tests that need no browser:
+The tricky pure logic is unit-tested and needs no browser: the completion decision (when is a
+streamed answer / image done, including transient "Analyzing image"-style placeholders) in
+`providers/base.py`, the API-key/loopback rules in `authz.py`, and the attachment layer (spec forms,
+size/count limits, the loopback-only path policy, remote inlining) in `server.py`.
 
 ```bash
-./venv/bin/python -m unittest discover -s tests -v
+./venv/bin/python -m unittest discover -s tests -v     # tests/test_completion_tracker.py,
+                                                       # tests/test_authz.py, tests/test_attachments.py
 ```
 
 ## Contributors

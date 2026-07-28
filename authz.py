@@ -19,6 +19,11 @@ REMOTE_PROVIDERS / REMOTE_API_KEY
     Comma-separate multiple ``model=url`` pairs. REMOTE_API_KEY is sent as the
     Bearer key on proxied requests (the upstream's BROWSER_LLM_API_KEY).
 
+``is_loopback`` has a second consumer beyond the API-key middleware: server.py
+uses it to decide whether a caller may attach **server-side file paths** to a
+request (see ALLOW_REMOTE_FILE_PATHS). Attaching a path makes the browser upload
+that file, so remote callers must send bytes instead.
+
 Kept separate from server.py so tests can import these helpers without
 server.py's import-time side effects (log-file truncation, CDP patch).
 """

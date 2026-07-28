@@ -7,6 +7,8 @@ CLI:
   ./client.py --model gemini-browser "One-line summary of TCP"
   ./client.py --system "You are terse." "hi"
   ./client.py --stream "tell me a short story"
+  # send images along with the prompt (vision) — repeat --image for several:
+  ./client.py --image shot.png "What's wrong with this UI?"
   # write code/HTML straight to a file, dropping any ``` fences the model adds:
   ./client.py --out index.html --strip-fences \
       "Output ONLY a complete standalone HTML5 landing page for a bakery, inline CSS, no explanation"
@@ -14,6 +16,7 @@ CLI:
 Import from any project:
   from client import ask
   html = ask("Output ONLY an HTML page ...", model="chatgpt-browser")
+  desc = ask("Describe this", images=["/path/to/shot.png"])
 
 Env: BROWSER_LLM_API (default http://localhost:8081), BROWSER_LLM_MODEL (default chatgpt-browser),
      BROWSER_LLM_API_KEY (sent as Bearer; required by a remote server that has a key configured)
@@ -29,13 +32,37 @@ DEFAULT_MODEL = os.environ.get("BROWSER_LLM_MODEL", "chatgpt-browser")
 API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
 
 
-def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=None):
+def _image_spec(path_or_url):
+    """A local path is sent as a data: URL so it works against a remote server
+    too (which can't read this machine's disk); URLs pass through."""
+    s = str(path_or_url)
+    if s[:5].lower() in ("http:", "https", "data:") or s[:7].lower() == "file://":
+        return s
+    if not os.path.isfile(s):
+        raise SystemExit(f"[client] image not found: {s}")
+    import base64
+    import mimetypes
+    mime = mimetypes.guess_type(s)[0] or "image/png"
+    with open(s, "rb") as f:
+        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+
+
+def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=None,
+        images=None):
     """Send a chat completion and return the assistant text.
-    If stream=True, on_delta(str) is called for each chunk as it arrives."""
+    If stream=True, on_delta(str) is called for each chunk as it arrives.
+    ``images`` (paths, data: URLs or http URLs) are uploaded into the provider's
+    chat alongside the prompt."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    if images:
+        content = [{"type": "text", "text": prompt}] if prompt else []
+        content += [{"type": "image_url", "image_url": {"url": _image_spec(i)}}
+                    for i in images]
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": prompt})
     payload = {"model": model or DEFAULT_MODEL, "messages": messages, "stream": stream}
     headers = {"Content-Type": "application/json"}
     if API_KEY:
@@ -72,6 +99,8 @@ def main():
     ap.add_argument("prompt")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="chatgpt-browser | gemini-browser")
     ap.add_argument("--system", help="optional system prompt")
+    ap.add_argument("--image", action="append", metavar="PATH|URL", dest="images",
+                    help="attach an image to the prompt (repeatable)")
     ap.add_argument("--out", help="write the response to this file instead of stdout")
     ap.add_argument("--stream", action="store_true", help="stream tokens as they arrive")
     ap.add_argument("--strip-fences", action="store_true",
@@ -82,7 +111,7 @@ def main():
     live = a.stream and not a.out
     emit = (lambda d: (sys.stdout.write(d), sys.stdout.flush())) if live else None
     text = ask(a.prompt, model=a.model, system=a.system,
-               timeout=a.timeout, stream=a.stream, on_delta=emit)
+               timeout=a.timeout, stream=a.stream, on_delta=emit, images=a.images)
 
     if a.strip_fences:
         text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("```"))

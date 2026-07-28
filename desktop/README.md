@@ -26,7 +26,9 @@ Click the top-bar icon (or middle-click) to open the popup. Two tabs:
   project**. The **first** time you generate for a project it asks where to save (a folder
   picker); after that it remembers and saves there automatically. Files are named from the
   prompt (e.g. `settings-gear-icon-143512.png`), and **Open** / **Folder** buttons appear.
-- **Chat** — a normal streaming chat.
+  The **📎** button attaches reference image(s) → the prompt *edits* them instead of generating
+  from scratch (restyle a logo, re-colour a hero, clean up a screenshot).
+- **Chat** — a normal streaming chat; **📎** attaches images to your message (vision).
 
 > **How project detection works:** open VS Code windows and their real folder paths are read
 > from `~/.config/Code/User/globalStorage/storage.json`; the *focused* window is resolved via
@@ -89,6 +91,8 @@ browser_llm_desktop.py  # the whole app (stdlib + GTK3):
                         #   ChatStore (shared + persisted conversations), ProjectImagePanel,
                         #   ChatPanel, GalleryPanel/ImageViewer, StatusPanel,
                         #   MainWindow, QuickChatWindow, TrayApp
+                        #   image input: image_spec/message_content/choose_images helpers
+                        #   send attachments as data: URLs, so a remote BROWSER_LLM_API works
 icon.svg                # app / tray icon
 run.sh                  # launch on system python3 (checks for gi, gives an install hint)
 install-desktop.sh      # install/uninstall the .desktop launcher + icon (no root)
@@ -103,3 +107,7 @@ browser-llm-desktop.desktop.in  # launcher template (__APP__ -> absolute path at
   say so and chat/image show a friendly error.
 - ChatGPT answers arrive all-at-once (the server buffers that provider's stream); Gemini streams
   incrementally. ChatGPT image generation needs a real display (see the top-level README).
+- **Attached images are sent by value** (read into a `data:` URL), not as file paths — the server
+  only accepts paths from loopback clients, so this keeps working when `BROWSER_LLM_API` points at
+  a server on another machine. Attachments in a conversation are re-sent each turn (every request
+  drives a fresh browser chat), so long image threads get slower.

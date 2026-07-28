@@ -20,22 +20,37 @@ from .base import Provider
 logger = logging.getLogger("gemini_server")
 
 
-# Generated-image render status in the last assistant turn. Only images served
-# from oaiusercontent/blob are counted (avoids counting UI icons/avatars, which
-# would wrongly suppress plain text responses).
+# Shared image predicates. `_isGenImg` matches ChatGPT's generated-image URLs;
+# `_isInput` excludes images WE uploaded as input (a vision request) — those
+# render with the very same blob:/content? URLs, but inside the user's turn or
+# the composer's file tile. Without this exclusion an uploaded image counts as
+# "generated": the completion tracker fires image-stability immediately (cutting
+# the text answer off) and the upload gets echoed back and saved to the gallery.
+_IMG_PREDICATES_JS = """
+  const _isGenImg=(src,alt)=>{src=src||'';alt=(alt||'').trim().toLowerCase();
+    return src.indexOf('backend-api/estuary')>=0||src.indexOf('backend-api/files')>=0
+      ||src.indexOf('oaiusercontent')>=0||src.indexOf('/content?')>=0
+      ||src.indexOf('blob:')===0||alt.indexOf('generated image')===0;};
+  const _isInput=(im)=>{ try{
+    return !!(im.closest('[data-message-author-role="user"]')
+      || im.closest('form') || im.closest('[class*="file-tile"]'));
+  }catch(e){ return false; } };
+"""
+
+# Generated-image render status. Only images served from oaiusercontent/blob are
+# counted (avoids counting UI icons/avatars, which would wrongly suppress plain
+# text responses), and never our own uploaded input images.
 _IMG_STATUS_JS = """
 (function(){
   // A generated image can render in the assistant turn OR in a separate
   // image-generation tile, so scan the whole conversation. Each request opens
   // a fresh chat, so there are no stale images to confuse this.
-  const _isGenImg=(src,alt)=>{src=src||'';alt=(alt||'').trim().toLowerCase();
-    return src.indexOf('backend-api/estuary')>=0||src.indexOf('backend-api/files')>=0
-      ||src.indexOf('oaiusercontent')>=0||src.indexOf('/content?')>=0
-      ||src.indexOf('blob:')===0||alt.indexOf('generated image')===0;};
+""" + _IMG_PREDICATES_JS + """
   const imgs=Array.from(document.querySelectorAll('img'));
   let loaded=0,pending=0;
   imgs.forEach(im=>{
     if(!_isGenImg(im.currentSrc||im.src||'', im.alt||'')) return;
+    if(_isInput(im)) return;
     if(im.naturalWidth>256) loaded++; else pending++;
   });
   // Detect the image-generation progress state. GPT-image renders on a <canvas>
@@ -61,15 +76,13 @@ _IMG_STATUS_JS = """
 # remote src so the caller still gets a usable link.
 _GET_IMAGES_JS = """
 (async function(){
-  const _isGenImg=(src,alt)=>{src=src||'';alt=(alt||'').trim().toLowerCase();
-    return src.indexOf('backend-api/estuary')>=0||src.indexOf('backend-api/files')>=0
-      ||src.indexOf('oaiusercontent')>=0||src.indexOf('/content?')>=0
-      ||src.indexOf('blob:')===0||alt.indexOf('generated image')===0;};
+""" + _IMG_PREDICATES_JS + """
   const imgs=Array.from(document.querySelectorAll('img'));
   const seen=new Set(); const out=[];
   for(const im of imgs){
     const src=im.currentSrc||im.src; if(!src) continue;
     if(!_isGenImg(src, im.alt||'')) continue;
+    if(_isInput(im)) continue;
     if(im.naturalWidth<=256) continue;
     if(seen.has(src)) continue; seen.add(src);
     const rec={mime:'image/png', alt:(im.alt||'').trim(), src:src};
@@ -114,6 +127,28 @@ class ChatGPTProvider(Provider):
         'button[aria-label="Send message"]',
     ]
     load_wait = 7.0  # ChatGPT can be slow to hydrate / may show a bot check
+    # --- image input (upload). Verified live 2026-07-28: chatgpt.com keeps a
+    # hidden `input[data-testid="upload-photos-input"]` (accept=image/*) in the
+    # DOM at rest, so the generic input path attaches without touching the "+"
+    # menu; the click path below is only a fallback if that input disappears.
+    supports_upload = True
+    attach_click_path = [
+        ['button[data-testid="composer-plus-btn"]', 'text:add photos & files',
+         'text:add files and more'],
+        ['text:add photos & files', 'text:upload from computer', 'text:add photos'],
+    ]
+    # Each accepted file renders a 144px "file tile" with a
+    # `button[aria-label="Remove file N: <name>"]`; that button is the reliable
+    # per-file chip count. Busy = the tile still shows a progress indicator.
+    attachment_ready_js = """
+    (function(){
+      var chips=document.querySelectorAll('button[aria-label^="Remove file"]').length;
+      if(!chips) chips=document.querySelectorAll('[class*="file-tile"] img').length;
+      var form=document.querySelector('form')||document.body;
+      var busy=!!form.querySelector('[role="progressbar"], progress');
+      return JSON.stringify({ready:chips, busy:busy});
+    })()
+    """
 
     async def get_response_text(self, page) -> str:
         # ChatGPT renders code blocks as CodeMirror editors (.cm-editor / .cm-content),
@@ -163,6 +198,13 @@ class ChatGPTProvider(Provider):
                     if(msgs.length){
                         var last=msgs[msgs.length-1];
                         var md=last.querySelector('.markdown')||last.querySelector('.prose')||last;
+                        // Transient status text ("Analyzing image" while a vision
+                        // request is processed) lives in the SAME .markdown node,
+                        // marked with loading-shimmer/aria-busy. It is not the
+                        // answer: returning it made short vision requests complete
+                        // early with the placeholder as the whole reply.
+                        if(/loading-shimmer|aria-busy/.test(md.className||'')
+                           || md.getAttribute('aria-busy')==='true') return '';
                         // Base text = innerText (clean prose, correct list markers). Then
                         // splice each flattened code card into a ``` fenced block. Matching
                         // innerText-to-innerText keeps the substitution reliable and leaves
@@ -219,6 +261,17 @@ class ChatGPTProvider(Provider):
                     if(document.querySelector('button[aria-label="Stop streaming"]')) return true;
                     if(document.querySelector('button[aria-label="Stop generating"]')) return true;
                     if(document.querySelector('.result-streaming')) return true;
+                    // Still working: the assistant bubble is showing shimmering
+                    // status text ("Analyzing image" on a vision request). The
+                    // stop button can be absent during that phase, which used to
+                    // look like "settled" and ended the poll before the answer.
+                    var msgs=document.querySelectorAll('[data-message-author-role="assistant"]');
+                    if(msgs.length){
+                        var last=msgs[msgs.length-1];
+                        var md=last.querySelector('.markdown')||last.querySelector('.prose')||last;
+                        if(/loading-shimmer|aria-busy/.test(md.className||'')
+                           || md.getAttribute('aria-busy')==='true') return true;
+                    }
                     return false;
                 })()
             """)

@@ -128,6 +128,26 @@ python3 gen_asset.py \
 
 ---
 
+## 3b. Editing an existing image (image-to-image)
+
+`--ref FILE` (repeatable) uploads a reference image with the prompt, so you can restyle or fix an
+asset instead of regenerating it from a description. Same post-processing flags apply.
+
+```bash
+# re-colour an existing hero to a night palette, same composition
+python3 gen_asset.py --ref public/hero.webp --out public/hero-night.webp \
+    --prompt "identical composition and layout, night-time palette, deep blues, moonlit" \
+    --width 1600 --height 900
+
+# turn a screenshot mock into a clean flat-vector illustration
+python3 gen_asset.py --ref mock.png --out public/feature.png \
+    --prompt "same layout, flat vector illustration, solid white background"
+```
+
+Say what must stay the same ("identical layout", "keep the text") — the model otherwise drifts.
+Raw endpoint: `POST /v1/images/edits` (multipart `image=@file` + `prompt`, or JSON with
+`{"image": "<path|data-url>"}`).
+
 ## 4. Prompt guidance
 
 - **Structure:** `subject + style + composition + palette + lighting/mood`.
@@ -167,9 +187,14 @@ Response — use whichever field suits you (`path` is already a file on disk):
 ```json
 {"created": 1782..., "data": [{
   "b64_json": "<base64 jpeg>",
-  "url":  "http://localhost:8081/images/gemini_....jpg",
-  "path": "~/Pictures/gemini/gemini_....jpg"
+  "url":  "http://localhost:8081/images/gemini/gemini_....jpg",
+  "path": "~/Pictures/browser-llm/gemini/gemini_....jpg"
 }]}
+```
+Image-to-image with the raw API — multipart, or JSON with an `image` field:
+```bash
+curl -s http://localhost:8081/v1/images/edits \
+  -F image=@public/hero.webp -F 'prompt=identical layout, night-time palette'
 ```
 You still have to resize/crop/convert yourself (the wrapper exists so you don't).
 
@@ -179,6 +204,8 @@ You still have to resize/crop/convert yourself (the wrapper exists so you don't)
 
 - Best-effort transparency (flat-background knockout); for clean cutouts always prompt a plain
   solid background.
-- No exact text, logos, or precise layouts.
+- No exact text, logos, or precise layouts. `--ref` helps a lot here: editing an existing asset
+  holds a layout far better than describing one, but still verify the output rather than trusting it.
+- At most `MAX_ATTACHMENTS` (default 6) reference images per request, `MAX_ATTACHMENT_MB` (20) each.
 - Shared Google-account quota; if generation starts failing/returning empty, the login session
   may need re-auth (a human task — tell the user).

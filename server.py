@@ -10,8 +10,9 @@ Endpoints:
   GET  /                      (mini web UI — chat, image gen, gallery, status)
   GET  /widget.js             (embeddable floating chat widget for any LAN page)
   GET  /v1/models
-  POST /v1/chat/completions   (streaming + non-streaming; images inline)
-  POST /v1/images/generations (OpenAI-style image generation)
+  POST /v1/chat/completions   (streaming + non-streaming; images in AND out)
+  POST /v1/images/generations (OpenAI-style image generation; `image` = img2img)
+  POST /v1/images/edits       (image + prompt -> image; JSON or multipart)
   GET  /images/<provider>/<file>  (saved images, per-provider subfolder of GEMINI_IMAGE_DIR)
   GET  /api/status            (per-provider busy/browser/recycle + live telemetry)
   GET  /api/gallery           (list saved images, newest first; ?provider=&limit=)
@@ -41,12 +42,15 @@ import asyncio
 import base64
 import json
 import os
+import re
+import shutil
+import tempfile
 import time
 import uuid
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional, Union
 
 import nodriver as uc
 import websockets.exceptions
@@ -105,6 +109,198 @@ _EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
         "image/webp": "webp", "image/gif": "gif"}
 
 # ---------------------------------------------------------------------------
+# Image INPUT (attachments). A request can hand us an image as a data: URL,
+# bare base64, an http(s) URL, a local file path, or multipart upload bytes;
+# the browser's file picker needs a real file on disk, so specs are materialized
+# into a temp dir for the duration of the drive and deleted afterwards.
+#   MAX_ATTACHMENTS          — most files one request may attach
+#   MAX_ATTACHMENT_MB        — per-file size ceiling
+#   ALLOW_REMOTE_FILE_PATHS  — let NON-loopback clients attach server-side file
+#                              paths (off by default: a LAN client shouldn't be
+#                              able to upload arbitrary files off this box)
+# ---------------------------------------------------------------------------
+_MAX_ATTACHMENTS = max(1, int(os.environ.get("MAX_ATTACHMENTS", "6")))
+_MAX_ATTACHMENT_BYTES = int(float(os.environ.get("MAX_ATTACHMENT_MB", "20")) * 1024 * 1024)
+_ALLOW_REMOTE_FILE_PATHS = (os.environ.get("ALLOW_REMOTE_FILE_PATHS", "").strip().lower()
+                            in ("1", "true", "yes", "on"))
+
+_DATA_URL_RE = re.compile(r"^data:([\w.+-]+/[\w.+-]+)?((?:;[\w.+-]+=?[\w.+-]*)*),(.*)$",
+                          re.I | re.S)
+_B64_RE = re.compile(r"^[A-Za-z0-9+/\s]+={0,2}$")
+# Image signatures, so a spec that carries no mime/extension still gets a name
+# the site's file input will accept.
+_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"BM", "bmp"),
+    (b"\x00\x00\x01\x00", "ico"),
+)
+
+
+def _sniff_ext(data: bytes) -> str:
+    for magic, ext in _MAGIC:
+        if data.startswith(magic):
+            return ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data.lstrip()[:5] == b"<?xml" or data.lstrip()[:4] == b"<svg":
+        return "svg"
+    return ""
+
+
+def _spec_kind(spec: str) -> str:
+    """How to turn an attachment spec into bytes: 'data' | 'http' | 'path'."""
+    s = (spec or "").strip()
+    low = s[:8].lower()
+    if low.startswith("data:"):
+        return "data"
+    if low.startswith(("http://", "https:/")):
+        return "http"
+    if low.startswith("file://"):
+        return "path"
+    # Long, base64-looking and not a plausible path → treat as raw base64.
+    if len(s) > 256 and "/" not in s[:1] and "~" not in s[:1] and _B64_RE.match(s):
+        return "data"
+    return "path"
+
+
+def _decode_data_spec(spec: str) -> tuple[bytes, str]:
+    """(bytes, extension) for a data: URL or a bare base64 blob."""
+    s = spec.strip()
+    declared = ""
+    if s[:5].lower() == "data:":
+        m = _DATA_URL_RE.match(s)
+        if not m:
+            raise HTTPException(status_code=400, detail="malformed data: URL attachment")
+        declared, params, payload = (m.group(1) or ""), (m.group(2) or ""), m.group(3)
+        if "base64" not in params.lower():
+            raise HTTPException(status_code=400,
+                                detail="only base64 data: URLs are supported for attachments")
+    else:
+        payload = s
+    try:
+        data = base64.b64decode(re.sub(r"\s+", "", payload), validate=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"attachment is not valid base64: {e}")
+    if not data:
+        raise HTTPException(status_code=400, detail="attachment decoded to zero bytes")
+    _check_attachment_size(len(data))
+    return data, (_sniff_ext(data) or _EXT.get(declared.lower(), "")
+                  or (declared.split("/")[-1] if "/" in declared else "") or "png")
+
+
+def _check_attachment_size(n: int) -> None:
+    if n > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"attachment is {n / 1e6:.1f} MB; the limit is "
+                   f"{_MAX_ATTACHMENT_BYTES / 1e6:.0f} MB (raise MAX_ATTACHMENT_MB)")
+
+
+async def _download_attachment(url: str) -> bytes:
+    """Fetch an http(s) attachment, capped at MAX_ATTACHMENT_MB."""
+    if httpx is not None:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10)) as client:
+                async with client.stream("GET", url, follow_redirects=True) as r:
+                    if r.status_code >= 400:
+                        raise HTTPException(status_code=400,
+                                            detail=f"attachment URL returned {r.status_code}: {url}")
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        _check_attachment_size(len(buf))
+                    return bytes(buf)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"could not fetch attachment {url}: {e}")
+
+    def _get() -> bytes:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            return resp.read(_MAX_ATTACHMENT_BYTES + 1)
+    try:
+        data = await asyncio.to_thread(_get)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"could not fetch attachment {url}: {e}")
+    _check_attachment_size(len(data))
+    return data
+
+
+def _resolve_local_attachment(spec: str, *, allow_local_paths: bool) -> Path:
+    if not allow_local_paths:
+        raise HTTPException(
+            status_code=400,
+            detail="file-path attachments are only accepted from localhost; send the "
+                   "image as a data: URL (or set ALLOW_REMOTE_FILE_PATHS=1 on the server)")
+    raw = spec.strip()
+    if raw[:7].lower() == "file://":
+        from urllib.parse import unquote, urlparse
+        raw = unquote(urlparse(raw).path)
+    p = Path(raw).expanduser()
+    if not p.is_file():
+        raise HTTPException(status_code=400, detail=f"attachment file not found: {spec}")
+    _check_attachment_size(p.stat().st_size)
+    return p.resolve()
+
+
+@asynccontextmanager
+async def _attachment_files(specs: Optional[list], raw: Optional[list] = None, *,
+                            allow_local_paths: bool = True):
+    """Materialize attachment specs (and raw ``(filename, bytes)`` uploads) into
+    real files for the browser's file input. Temp files are deleted on exit;
+    caller-supplied local paths are used in place and never touched."""
+    specs = [s for s in (specs or []) if isinstance(s, str) and s.strip()]
+    raw = list(raw or [])
+    if len(specs) + len(raw) > _MAX_ATTACHMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many attachments ({len(specs) + len(raw)}); the limit is "
+                   f"{_MAX_ATTACHMENTS} (raise MAX_ATTACHMENTS)")
+
+    tmpdir: Optional[str] = None
+    paths: list[str] = []
+
+    def _write(data: bytes, ext: str, name: str = "") -> str:
+        nonlocal tmpdir
+        if tmpdir is None:
+            tmpdir = tempfile.mkdtemp(prefix="browser-llm-input-")
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "").stem)[:40] or "attachment"
+        fname = f"{stem}_{len(paths) + 1}.{(ext or 'png').lstrip('.')}"
+        fpath = Path(tmpdir) / fname
+        fpath.write_bytes(data)
+        return str(fpath)
+
+    try:
+        for name, data in raw:
+            _check_attachment_size(len(data))
+            if not data:
+                raise HTTPException(status_code=400, detail=f"uploaded file {name!r} is empty")
+            ext = _sniff_ext(data) or Path(name or "").suffix.lstrip(".") or "png"
+            paths.append(_write(data, ext, name))
+        for spec in specs:
+            kind = _spec_kind(spec)
+            if kind == "data":
+                data, ext = _decode_data_spec(spec)
+                paths.append(_write(data, ext))
+            elif kind == "http":
+                data = await _download_attachment(spec.strip())
+                ext = _sniff_ext(data) or Path(spec.split("?")[0]).suffix.lstrip(".") or "png"
+                paths.append(_write(data, ext, Path(spec.split("?")[0]).name))
+            else:
+                paths.append(str(_resolve_local_attachment(
+                    spec, allow_local_paths=allow_local_paths)))
+        if paths:
+            logger.info(f"attachments ready: {[Path(p).name for p in paths]}")
+        yield paths
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 # Access control + remote upstreams (see authz.py for the full contract).
 #   BROWSER_LLM_API_KEY — when set, non-loopback clients must send this key
 #       (Bearer/X-Api-Key) on /v1/* and /api/*. Localhost stays open.
@@ -132,9 +328,30 @@ patch_cdp()
 # ---------------------------------------------------------------------------
 # Pydantic models (OpenAI wire format)
 # ---------------------------------------------------------------------------
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[str] = None
+
+
+class ContentPart(BaseModel):
+    """One part of a multimodal message. Deliberately permissive so the common
+    dialects all work: OpenAI (``{"type":"image_url","image_url":{"url":…}}``),
+    the Responses-style plain-string ``image_url``, and Anthropic's
+    ``{"type":"image","source":{"type":"base64","media_type":…,"data":…}}``."""
+    model_config = {"extra": "allow"}
+
+    type: Optional[str] = None
+    text: Optional[str] = None
+    image_url: Optional[Union[ImageURL, str, dict]] = None
+    source: Optional[dict] = None
+    image: Optional[str] = None
+
+
 class Message(BaseModel):
     role: str
-    content: str
+    # str for plain text, or a list of content parts for text+images (vision).
+    content: Union[str, list[ContentPart], None] = None
+
 
 class ChatCompletionRequest(BaseModel):
     model: str = DEFAULT_PROVIDER
@@ -142,6 +359,11 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    # Convenience shorthand (not OpenAI): attach these images to the prompt
+    # without building content parts. Each item is a data: URL, an http(s) URL,
+    # bare base64, or a local file path (localhost callers only).
+    images: Optional[list[str]] = None
+
 
 class ImageGenRequest(BaseModel):
     prompt: str
@@ -149,6 +371,10 @@ class ImageGenRequest(BaseModel):
     n: Optional[int] = 1
     size: Optional[str] = None
     response_format: Optional[str] = "b64_json"  # "b64_json" | "url" (data: URL)
+    # Reference image(s) -> image-to-image / edit. Same spec forms as
+    # ChatCompletionRequest.images. `image` matches OpenAI's edits field name.
+    image: Optional[Union[str, list[str]]] = None
+    images: Optional[list[str]] = None
 
 # ---------------------------------------------------------------------------
 # Browser state — one persistent instance per provider, one request at a time
@@ -360,26 +586,98 @@ def _compose(text: str, imgs: list[dict], provider) -> str:
 # ---------------------------------------------------------------------------
 # Core: send prompt → stream response text, then generated images
 # ---------------------------------------------------------------------------
-def _build_prompt(messages: list[Message]) -> str:
+def _message_pieces(m: Message) -> tuple[str, list[str]]:
+    """Split one message into (text, image specs). Plain-string content has no
+    images; a content-part list is walked for text and every image dialect we
+    accept (see ContentPart)."""
+    if m.content is None:
+        return "", []
+    if isinstance(m.content, str):
+        return m.content, []
+
+    texts: list[str] = []
+    specs: list[str] = []
+    for part in m.content:
+        if isinstance(part, str):
+            if part.strip():
+                texts.append(part)
+            continue
+        if part.text:
+            texts.append(part.text)
+
+        spec = None
+        iu = part.image_url
+        if isinstance(iu, ImageURL):
+            spec = iu.url
+        elif isinstance(iu, str):
+            spec = iu
+        elif isinstance(iu, dict):
+            spec = iu.get("url")
+        if not spec and isinstance(part.image, str):
+            spec = part.image
+        if not spec and isinstance(part.source, dict):
+            src = part.source
+            data = src.get("data")
+            if isinstance(data, str) and data:
+                mt = src.get("media_type") or "image/png"
+                spec = data if data[:5].lower() == "data:" else f"data:{mt};base64,{data}"
+            elif isinstance(src.get("url"), str):
+                spec = src["url"]
+
+        if isinstance(spec, str) and spec.strip():
+            specs.append(spec.strip())
+        elif (part.type or "").lower() in ("image_url", "image", "input_image"):
+            logger.warning(f"content part typed {part.type!r} carried no usable image")
+
+    return "\n".join(t for t in texts if t).strip(), specs
+
+
+def _build_prompt(messages: list[Message]) -> tuple[str, list[str]]:
     """
-    Flatten the OpenAI messages list into a single prompt. System messages
-    become a preamble; multi-turn history is included so agents get context.
+    Flatten the OpenAI messages list into a single prompt plus the list of image
+    attachments found in it. System messages become a preamble; multi-turn
+    history is included so agents get context.
+
+    Every attached image goes into the one composer message we send, so a turn
+    that carried images is annotated — otherwise a multi-turn transcript gives
+    the model no way to tell which image belonged to which turn.
     """
-    system = [m.content for m in messages if m.role == "system"]
-    turns = [m for m in messages if m.role != "system"]
+    system: list[str] = []
+    turns: list[tuple[Message, str, list[str]]] = []
+    specs: list[str] = []
+    for m in messages:
+        text, imgs = _message_pieces(m)
+        specs.extend(imgs)
+        if m.role == "system":
+            system.append(text)
+        else:
+            turns.append((m, text, imgs))
+
+    def _annotate(text: str, imgs: list[str], multi: bool) -> str:
+        if not imgs or not multi:
+            return text
+        note = f"[{len(imgs)} attached image{'s' if len(imgs) > 1 else ''}]"
+        return f"{text} {note}".strip()
 
     parts = []
-    if system:
-        parts.append("[Context/Instructions: " + " ".join(system) + "]")
+    if any(s for s in system):
+        parts.append("[Context/Instructions: " + " ".join(s for s in system if s) + "]")
 
+    multi = len(turns) > 1
     if len(turns) == 1:
-        parts.append(turns[0].content)
+        parts.append(turns[0][1])
     else:
-        for m in turns:
+        for m, text, imgs in turns:
             label = "User" if m.role == "user" else "Assistant"
-            parts.append(f"{label}: {m.content}")
+            parts.append(f"{label}: {_annotate(text, imgs, multi)}")
 
-    return "\n\n".join(parts)
+    if len(specs) > _MAX_ATTACHMENTS:
+        # Keep the most recent images — those belong to the live turn.
+        logger.warning(f"{len(specs)} images in this conversation; sending the last "
+                       f"{_MAX_ATTACHMENTS} (MAX_ATTACHMENTS)")
+        specs = specs[-_MAX_ATTACHMENTS:]
+
+    return "\n\n".join(p for p in parts if p), specs
 
 
 _BASE_DEADLINE = 420.0   # base ceiling; long image gen on the free tier is slow
@@ -451,25 +749,28 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
             return
 
 
-async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, None]:
-    """Open the provider's chat, send the prompt, stream text deltas, then
-    append any generated images as markdown links."""
-    prompt = _build_prompt(messages)
+async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
+                   raw_uploads: Optional[list] = None,
+                   allow_local_paths: bool = True) -> AsyncGenerator[str, None]:
+    """Open the provider's chat, attach any input images, send the prompt, stream
+    text deltas, then append any generated images as markdown links."""
     browser = await get_browser(provider)
     try:
-        page, monitor = await provider.open_and_send(browser, prompt)
+        async with _attachment_files(attachments, raw_uploads,
+                                     allow_local_paths=allow_local_paths) as files:
+            page, monitor = await provider.open_and_send(browser, prompt, attachments=files)
 
-        async for delta in _stream_completion(provider, page, monitor):
-            yield delta
+            async for delta in _stream_completion(provider, page, monitor):
+                yield delta
 
-        n = 0
-        for im in await provider.get_images(page):
-            _persist(im, provider)
-            n += 1
-            logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
-            yield _img_markdown(im)
-        if n:
-            _note_image_gen(provider)  # count toward browser recycle
+            n = 0
+            for im in await provider.get_images(page):
+                _persist(im, provider)
+                n += 1
+                logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
+                yield _img_markdown(im)
+            if n:
+                _note_image_gen(provider)  # count toward browser recycle
     except Exception as e:
         await _evict_dead_browser(provider, e)
         raise
@@ -477,22 +778,52 @@ async def run_chat(provider, messages: list[Message]) -> AsyncGenerator[str, Non
     # Leave the tab open — closing or navigating away disrupts the browser.
 
 
-async def drive_once(provider, prompt: str) -> tuple[str, list[dict]]:
-    """Non-streaming drive used by non-streaming chat and the images endpoint:
+async def drive_once(provider, prompt: str, attachments: Optional[list] = None, *,
+                     raw_uploads: Optional[list] = None,
+                     allow_local_paths: bool = True) -> tuple[str, list[dict]]:
+    """Non-streaming drive used by non-streaming chat and the images endpoints:
     returns (text, images)."""
     browser = await get_browser(provider)
     try:
-        page, monitor = await provider.open_and_send(browser, prompt)
-        text = ""
-        async for delta in _stream_completion(provider, page, monitor):
-            text += delta
-        imgs = [_persist(im, provider) for im in await provider.get_images(page)]
-        if imgs:
-            _note_image_gen(provider)  # count toward browser recycle
-        return text, imgs
+        async with _attachment_files(attachments, raw_uploads,
+                                     allow_local_paths=allow_local_paths) as files:
+            page, monitor = await provider.open_and_send(browser, prompt, attachments=files)
+            text = ""
+            async for delta in _stream_completion(provider, page, monitor):
+                text += delta
+            imgs = [_persist(im, provider) for im in await provider.get_images(page)]
+            if imgs:
+                _note_image_gen(provider)  # count toward browser recycle
+            return text, imgs
     except Exception as e:
         await _evict_dead_browser(provider, e)
         raise
+
+
+def _prevalidate_specs(specs: list, *, allow_local_paths: bool) -> None:
+    """Catch the cheap attachment mistakes *before* a streaming response starts,
+    so the client gets a real 4xx instead of an in-band error chunk. Only checks
+    that cost nothing (count, and local paths: policy + existence + size);
+    decoding/downloading still happens during the drive."""
+    if len(specs) > _MAX_ATTACHMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many attachments ({len(specs)}); the limit is "
+                   f"{_MAX_ATTACHMENTS} (raise MAX_ATTACHMENTS)")
+    for spec in specs:
+        if _spec_kind(spec) == "path":
+            _resolve_local_attachment(spec, allow_local_paths=allow_local_paths)
+
+
+def _check_upload_support(provider, specs: list, raw: Optional[list] = None) -> None:
+    """Fail fast (and clearly) when a request carries images but the target
+    provider can't take them."""
+    if not (specs or raw):
+        return
+    if not getattr(provider, "supports_upload", False):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider.name} does not support image input (attachments)")
 
 
 # ---------------------------------------------------------------------------
@@ -521,12 +852,66 @@ def _remote_timeout():
     return httpx.Timeout(_REMOTE_TIMEOUT, connect=15)
 
 
-async def _proxy_chat(name: str, url: str, req: ChatCompletionRequest):
+_MIME_BY_EXT = {v: k for k, v in _EXT.items()}
+
+
+async def _spec_to_data_url(spec: str, *, allow_local_paths: bool) -> str:
+    """Turn a local-path attachment spec into a data: URL. A file path is
+    meaningless on the upstream machine, so proxied requests must carry bytes.
+    data:/http(s) specs are already portable and pass through untouched."""
+    if _spec_kind(spec) != "path":
+        return spec
+    p = _resolve_local_attachment(spec, allow_local_paths=allow_local_paths)
+    data = await asyncio.to_thread(p.read_bytes)
+    _check_attachment_size(len(data))
+    ext = (_sniff_ext(data) or p.suffix.lstrip(".")).lower()
+    mime = _MIME_BY_EXT.get(ext, "image/png" if ext != "svg" else "image/svg+xml")
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+async def _inline_paths_for_remote(payload: dict, *, allow_local_paths: bool) -> dict:
+    """Rewrite every local-path attachment in an outgoing proxied payload into a
+    data: URL, in the shapes this API accepts (top-level images/image, plus
+    content parts inside messages)."""
+    async def fix(v):
+        return await _spec_to_data_url(v, allow_local_paths=allow_local_paths) \
+            if isinstance(v, str) and v.strip() else v
+
+    for key in ("images", "image"):
+        v = payload.get(key)
+        if isinstance(v, str):
+            payload[key] = await fix(v)
+        elif isinstance(v, list):
+            payload[key] = [await fix(s) for s in v]
+
+    for m in payload.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            iu = part.get("image_url")
+            if isinstance(iu, str):
+                part["image_url"] = await fix(iu)
+            elif isinstance(iu, dict) and isinstance(iu.get("url"), str):
+                iu["url"] = await fix(iu["url"])
+            if isinstance(part.get("image"), str):
+                part["image"] = await fix(part["image"])
+            src = part.get("source")
+            if isinstance(src, dict) and isinstance(src.get("url"), str):
+                src["url"] = await fix(src["url"])
+    return payload
+
+
+async def _proxy_chat(name: str, url: str, req: ChatCompletionRequest, *,
+                      allow_local_paths: bool = True):
     """Forward a chat completion to the upstream instance. Streaming responses
     are relayed byte-for-byte (the upstream already speaks correct SSE);
     failures are surfaced in-band as a chunk, matching local behavior."""
     payload = req.model_dump(exclude_none=True)
     payload["model"] = name
+    payload = await _inline_paths_for_remote(payload, allow_local_paths=allow_local_paths)
 
     if req.stream:
         async def relay():
@@ -581,16 +966,19 @@ async def _proxy_chat(name: str, url: str, req: ChatCompletionRequest):
     return JSONResponse(r.json())
 
 
-async def _proxy_images(name: str, url: str, req: ImageGenRequest):
-    """Forward an image generation to the upstream instance. Returned image
+async def _proxy_images(name: str, url: str, req: ImageGenRequest, *,
+                        path: str = "/v1/images/generations",
+                        allow_local_paths: bool = True):
+    """Forward an image generation/edit to the upstream instance. Returned image
     URLs point at the upstream (its GEMINI_PUBLIC_URL); /images/* is public
     there even with an API key set, so the links work in a plain browser."""
     payload = req.model_dump(exclude_none=True)
     payload["model"] = name
+    payload = await _inline_paths_for_remote(payload, allow_local_paths=allow_local_paths)
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
-            r = await client.post(f"{url}/v1/images/generations",
+            r = await client.post(f"{url}{path}",
                                   json=payload, headers=_remote_headers())
     except Exception as e:
         _record_request(name, started, e)
@@ -724,6 +1112,7 @@ async def api_status():
             "browser_running": b is not None and not b.stopped,
             "busy": _locks[name].locked(),
             "supports_images": p.supports_images,
+            "supports_upload": getattr(p, "supports_upload", False),
             "images_since_recycle": _img_gen_count.get(name, 0),
             "recycle_after_images": _RECYCLE_AFTER_IMAGES,
             "default": name == DEFAULT_PROVIDER,
@@ -749,6 +1138,7 @@ async def api_status():
             "browser_running": False,
             "busy": False,
             "supports_images": True,
+            "supports_upload": True,  # upstream decides; assume it can
             "images_since_recycle": 0,
             "recycle_after_images": _RECYCLE_AFTER_IMAGES,
             "default": name == DEFAULT_PROVIDER,
@@ -826,16 +1216,34 @@ async def list_models():
     }
 
 
+def _client_may_send_paths(request: Request) -> bool:
+    """Local-path attachments are a file-read primitive, so only loopback callers
+    get them by default (the web UI, desktop app and CLI on this box). A LAN
+    client with the API key must send bytes instead — unless the operator opts in
+    with ALLOW_REMOTE_FILE_PATHS=1."""
+    if _ALLOW_REMOTE_FILE_PATHS:
+        return True
+    client = request.client.host if request.client else None
+    return authz.is_loopback(client)
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, request: Request):
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages is empty")
 
+    allow_paths = _client_may_send_paths(request)
     name = _resolve_model(req.model)
     if name in REMOTES:
-        return await _proxy_chat(name, REMOTES[name], req)
+        return await _proxy_chat(name, REMOTES[name], req, allow_local_paths=allow_paths)
 
     provider = get_provider(req.model)
+    prompt, specs = _build_prompt(req.messages)
+    specs = specs + [s for s in (req.images or []) if isinstance(s, str) and s.strip()]
+    _check_upload_support(provider, specs)
+    _prevalidate_specs(specs, allow_local_paths=allow_paths)
+    if not prompt.strip() and specs:
+        prompt = "Describe this image."  # a bare image with no text still needs a prompt
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -868,7 +1276,8 @@ async def chat_completions(req: ChatCompletionRequest):
             try:
                 async with _locks[provider.name]:
                     started = time.monotonic()  # reset: exclude queue-wait
-                    async for chunk in run_chat(provider, req.messages):
+                    async for chunk in run_chat(provider, prompt, specs,
+                                                allow_local_paths=allow_paths):
                         yield _chunk(chunk, None)
             except Exception as e:
                 # Surface the failure in-band; a raised exception here would
@@ -887,7 +1296,11 @@ async def chat_completions(req: ChatCompletionRequest):
     async with _locks[provider.name]:
         started = time.monotonic()
         try:
-            text, imgs = await drive_once(provider, _build_prompt(req.messages))
+            text, imgs = await drive_once(provider, prompt, specs,
+                                          allow_local_paths=allow_paths)
+        except HTTPException:
+            _record_request(provider.name, started, RuntimeError("bad request"))
+            raise
         except Exception as e:
             _record_request(provider.name, started, e)
             logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
@@ -895,6 +1308,7 @@ async def chat_completions(req: ChatCompletionRequest):
         _record_request(provider.name, started)
     full_text = _compose(text, imgs, provider)
 
+    prompt_tokens = sum(len(_message_pieces(m)[0].split()) for m in req.messages)
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -908,44 +1322,25 @@ async def chat_completions(req: ChatCompletionRequest):
             }
         ],
         "usage": {
-            "prompt_tokens": sum(len(m.content.split()) for m in req.messages),
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": len(full_text.split()),
-            "total_tokens": sum(len(m.content.split()) for m in req.messages)
-                           + len(full_text.split()),
+            "total_tokens": prompt_tokens + len(full_text.split()),
         },
     }
 
 
-@app.post("/v1/images/generations")
-async def images_generations(req: ImageGenRequest):
-    """OpenAI-compatible image generation, backed by the provider's in-chat image tool."""
-    if not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="prompt is empty")
+def _ref_specs(req: ImageGenRequest) -> list[str]:
+    """Reference images on an image request (`image` and/or `images`)."""
+    specs: list[str] = []
+    if isinstance(req.image, str):
+        specs.append(req.image)
+    elif isinstance(req.image, list):
+        specs.extend(s for s in req.image if isinstance(s, str))
+    specs.extend(s for s in (req.images or []) if isinstance(s, str))
+    return [s for s in specs if s.strip()]
 
-    name = _resolve_model(req.model)
-    if name in REMOTES:
-        return await _proxy_images(name, REMOTES[name], req)
 
-    provider = get_provider(req.model)
-    if not provider.supports_images:
-        raise HTTPException(status_code=501, detail=f"{provider.name} does not support image generation")
-
-    async with _locks[provider.name]:
-        started = time.monotonic()
-        try:
-            _text, imgs = await drive_once(provider, req.prompt)
-        except Exception as e:
-            _record_request(provider.name, started, e)
-            logger.error(f"[{provider.name}] image generation failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-        _record_request(provider.name, started)
-
-    if not imgs:
-        raise HTTPException(
-            status_code=502,
-            detail=f"{provider.name} did not return an image for this prompt",
-        )
-
+def _image_payload(imgs: list[dict], response_format: Optional[str]) -> dict:
     data = []
     for im in imgs:
         entry = {}
@@ -955,13 +1350,129 @@ async def images_generations(req: ImageGenRequest):
             entry["url"] = im["url"]
         elif im.get("src"):
             entry["url"] = im["src"]
-        elif req.response_format == "url" and im.get("b64"):
+        elif response_format == "url" and im.get("b64"):
             entry["url"] = f"data:{im['mime']};base64,{im['b64']}"  # not saved to disk
         if im.get("path"):
             entry["path"] = im["path"]
         data.append(entry)
-
     return {"created": int(time.time()), "data": data}
+
+
+async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[list],
+                             response_format: Optional[str], *, allow_local_paths: bool,
+                             what: str = "image generation"):
+    """Shared body of /v1/images/generations and /v1/images/edits."""
+    if not provider.supports_images:
+        raise HTTPException(status_code=501,
+                            detail=f"{provider.name} does not support image generation")
+    _check_upload_support(provider, specs, raw)
+    # Fail before queueing behind another request's (possibly minutes-long) drive.
+    _prevalidate_specs(specs, allow_local_paths=allow_local_paths)
+
+    async with _locks[provider.name]:
+        started = time.monotonic()
+        try:
+            _text, imgs = await drive_once(provider, prompt, specs, raw_uploads=raw,
+                                           allow_local_paths=allow_local_paths)
+        except HTTPException:
+            _record_request(provider.name, started, RuntimeError("bad request"))
+            raise
+        except Exception as e:
+            _record_request(provider.name, started, e)
+            logger.error(f"[{provider.name}] {what} failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+        _record_request(provider.name, started)
+
+    if not imgs:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{provider.name} did not return an image for this prompt",
+        )
+    return _image_payload(imgs, response_format)
+
+
+@app.post("/v1/images/generations")
+async def images_generations(req: ImageGenRequest, request: Request):
+    """OpenAI-compatible image generation, backed by the provider's in-chat image
+    tool. Passing ``image``/``images`` makes it image-to-image (the reference is
+    uploaded into the chat with the prompt)."""
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is empty")
+
+    allow_paths = _client_may_send_paths(request)
+    name = _resolve_model(req.model)
+    if name in REMOTES:
+        return await _proxy_images(name, REMOTES[name], req, allow_local_paths=allow_paths)
+
+    return await _run_image_request(get_provider(req.model), req.prompt, _ref_specs(req),
+                                    None, req.response_format,
+                                    allow_local_paths=allow_paths)
+
+
+@app.post("/v1/images/edits")
+async def images_edits(request: Request):
+    """Image + prompt → image (OpenAI's ``images.edits``). Accepts the official
+    ``multipart/form-data`` upload (fields ``image`` — repeatable — plus
+    ``prompt``/``model``/``response_format``) or the same JSON body as
+    /v1/images/generations. ``mask``/``n``/``size`` are accepted and ignored."""
+    ctype = (request.headers.get("content-type") or "").lower()
+    allow_paths = _client_may_send_paths(request)
+    raw: list = []
+    specs: list[str] = []
+
+    if ctype.startswith("multipart/form-data"):
+        try:
+            form = await request.form()
+        except Exception as e:  # python-multipart missing / malformed body
+            hint = ("; install it with: ./venv/bin/python -m pip install python-multipart"
+                    if "multipart" in str(e).lower() else
+                    " (or send the same fields as JSON)")
+            raise HTTPException(status_code=400,
+                                detail=f"could not parse multipart body: {e}{hint}")
+        prompt = str(form.get("prompt") or "").strip()
+        model = str(form.get("model") or DEFAULT_PROVIDER)
+        response_format = str(form.get("response_format") or "b64_json")
+        for field in ("image", "image[]", "images", "images[]"):
+            for item in form.getlist(field):
+                if hasattr(item, "read"):  # UploadFile
+                    raw.append((getattr(item, "filename", "") or "image.png", await item.read()))
+                elif isinstance(item, str) and item.strip():
+                    specs.append(item.strip())
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="body must be JSON or multipart/form-data")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object")
+        try:
+            req = ImageGenRequest(**{k: v for k, v in body.items()
+                                     if k in ImageGenRequest.model_fields})
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"invalid request: {e}")
+        prompt, model, response_format = req.prompt, req.model, req.response_format
+        specs = _ref_specs(req)
+
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is empty")
+    if not (specs or raw):
+        raise HTTPException(status_code=400,
+                            detail="no image supplied — send `image` (multipart file, "
+                                   "data: URL, http(s) URL, or local path)")
+
+    name = _resolve_model(model)
+    if name in REMOTES:
+        if raw:  # multipart bytes → portable data: URLs for the upstream
+            specs = specs + [
+                f"data:{_MIME_BY_EXT.get(_sniff_ext(data) or 'png', 'image/png')};base64,"
+                f"{base64.b64encode(data).decode()}" for _fname, data in raw]
+        proxied = ImageGenRequest(prompt=prompt, model=name, images=specs,
+                                  response_format=response_format)
+        return await _proxy_images(name, REMOTES[name], proxied,
+                                   path="/v1/images/edits", allow_local_paths=allow_paths)
+
+    return await _run_image_request(get_provider(model), prompt, specs, raw, response_format,
+                                    allow_local_paths=allow_paths, what="image edit")
 
 
 # ---------------------------------------------------------------------------

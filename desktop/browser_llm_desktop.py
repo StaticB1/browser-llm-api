@@ -28,6 +28,7 @@ Env:
 """
 import base64
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -154,10 +155,16 @@ class Api:
                 if delta:
                     yield delta
 
-    def generate_image(self, prompt, model, timeout=900):
+    def generate_image(self, prompt, model, timeout=900, images=None):
+        """Generate an image, or EDIT one when `images` (reference paths/URLs) are
+        given — the server uploads them into the provider's chat with the prompt."""
         payload = {"model": model, "prompt": prompt}
+        path = "/v1/images/generations"
+        if images:
+            payload["images"] = [image_spec(i) for i in images]
+            path = "/v1/images/edits"
         req = urllib.request.Request(
-            self._url("/v1/images/generations"),
+            self._url(path),
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -174,6 +181,68 @@ class Api:
         if item.get("url"):
             return self.fetch_bytes(item["url"])
         return None
+
+
+# ---- image input (attachments) helpers ------------------------------------------
+def image_spec(path_or_url):
+    """Turn a local image path into a data: URL. Sent by value on purpose: the
+    server only accepts file paths from loopback clients, and this app may be
+    pointed at a server on another machine (BROWSER_LLM_API)."""
+    s = str(path_or_url)
+    if s[:5].lower() in ("http:", "https", "data:"):
+        return s
+    mime = mimetypes.guess_type(s)[0] or "image/png"
+    with open(s, "rb") as f:
+        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+
+
+def message_content(text, images):
+    """OpenAI message content: a plain string, or text+image parts when there
+    are attachments."""
+    if not images:
+        return text
+    parts = [{"type": "text", "text": text}] if text else []
+    parts += [{"type": "image_url", "image_url": {"url": image_spec(i)}} for i in images]
+    return parts
+
+
+def message_text(content):
+    """Display text for a message whose content may be multimodal parts."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    out, n_img = [], 0
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text" and p.get("text"):
+            out.append(p["text"])
+        elif p.get("image_url") or p.get("type") in ("image_url", "image", "input_image"):
+            n_img += 1
+    if n_img:
+        out.append(f"[{n_img} image{'s' if n_img > 1 else ''} attached]")
+    return "\n".join(out)
+
+
+def choose_images(parent, title="Attach image(s)"):
+    """Modal image picker → list of paths (empty if cancelled)."""
+    dlg = Gtk.FileChooserDialog(title=title, action=Gtk.FileChooserAction.OPEN)
+    if parent:
+        dlg.set_transient_for(parent)
+    dlg.set_modal(True)
+    dlg.set_select_multiple(True)
+    filt = Gtk.FileFilter()
+    filt.set_name("Images")
+    filt.add_mime_type("image/*")
+    for pat in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.gif", "*.bmp"):
+        filt.add_pattern(pat)
+    dlg.add_filter(filt)
+    dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dlg.add_button("Attach", Gtk.ResponseType.ACCEPT)
+    paths = dlg.get_filenames() if dlg.run() == Gtk.ResponseType.ACCEPT else []
+    dlg.destroy()
+    return paths or []
 
 
 def humanize_error(exc):
@@ -402,14 +471,14 @@ class ChatStore(GObject.GObject):
     def is_streaming(self, cid):
         return cid in self.streaming
 
-    def send(self, text):
+    def send(self, text, images=None):
         conv = self.current() or self.new_conversation()
         cid = conv["id"]
         if cid in self.streaming:
             return
-        conv["messages"].append({"role": "user", "content": text})
+        conv["messages"].append({"role": "user", "content": message_content(text, images)})
         if conv["title"] in ("", "New chat"):
-            conv["title"] = text.strip()[:44]
+            conv["title"] = (text.strip()[:44] or "Image question")
         conv["messages"].append({"role": "assistant", "content": ""})  # streaming placeholder
         conv["model"] = self.state.model
         conv["updated"] = time.time()
@@ -643,6 +712,12 @@ class ChatPanel(Gtk.Box):
         self.pack_start(sw, True, True, 0)
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.attached = []           # image paths to send with the next message
+        self.clip = Gtk.Button()
+        self.clip.set_image(Gtk.Image.new_from_icon_name("mail-attachment-symbolic",
+                                                         Gtk.IconSize.BUTTON))
+        self.clip.set_tooltip_text("Attach image(s) to your message")
+        self.clip.connect("clicked", self._on_attach)
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text("Message…  (Enter to send)")
         self.entry.set_hexpand(True)
@@ -652,10 +727,26 @@ class ChatPanel(Gtk.Box):
         self.send_btn = Gtk.Button.new_with_label("Send")
         self.send_btn.get_style_context().add_class("suggested-action")
         self.send_btn.connect("clicked", self._on_send)
+        row.pack_start(self.clip, False, False, 0)
         row.pack_start(self.entry, True, True, 0)
         row.pack_start(self.spinner, False, False, 0)
         row.pack_start(self.send_btn, False, False, 0)
         self.pack_start(row, False, False, 0)
+
+        # "2 images attached · clear" — only visible when something is attached
+        arow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.attach_lbl = Gtk.Label(label="")
+        self.attach_lbl.set_xalign(0)
+        self.attach_lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.attach_lbl.get_style_context().add_class("dim-label")
+        self.attach_clear = Gtk.Button.new_with_label("Clear")
+        self.attach_clear.set_relief(Gtk.ReliefStyle.NONE)
+        self.attach_clear.connect("clicked", lambda *_: self._set_attached([]))
+        arow.pack_start(self.attach_lbl, True, True, 0)
+        arow.pack_start(self.attach_clear, False, False, 0)
+        self.attach_row = arow
+        self.attach_row.set_no_show_all(True)
+        self.pack_start(arow, False, False, 0)
 
         self.store.connect("changed", self._on_store_changed)
         self.store.connect("delta", lambda _s, d: self._append(d))
@@ -693,10 +784,11 @@ class ChatPanel(Gtk.Box):
                 self._role("You", "user_label")
             else:
                 self._role("Assistant", "ai_label")
+            body = message_text(m["content"])   # content may be text+image parts
             if m.get("error"):
-                self._insert(m["content"], "error")
+                self._insert(body, "error")
             else:
-                self._insert(m["content"])
+                self._insert(body)
         self._tail = True
         self._scroll()
 
@@ -719,6 +811,7 @@ class ChatPanel(Gtk.Box):
     def _set_busy(self, b):
         self.entry.set_sensitive(not b)
         self.send_btn.set_sensitive(not b)
+        self.clip.set_sensitive(not b)
         if b:
             self.spinner.show()
             self.spinner.start()
@@ -727,14 +820,33 @@ class ChatPanel(Gtk.Box):
             self.spinner.hide()
             self.entry.grab_focus()
 
+    def _set_attached(self, paths):
+        self.attached = list(paths)
+        n = len(self.attached)
+        if n:
+            names = ", ".join(os.path.basename(p) for p in self.attached)
+            self.attach_lbl.set_text(f"📎 {n} image{'s' if n > 1 else ''}: {names}")
+            self.attach_row.show()
+            self.attach_lbl.show()
+            self.attach_clear.show()
+        else:
+            self.attach_row.hide()
+
+    def _on_attach(self, *_):
+        paths = choose_images(self.get_toplevel(), "Attach image(s) to your message")
+        if paths:
+            self._set_attached(self.attached + paths)
+
     def _on_send(self, *_):
         if self.store.is_streaming(self.store.current_id):
             return
         text = self.entry.get_text().strip()
-        if not text:
+        if not text and not self.attached:
             return
+        images = self.attached
         self.entry.set_text("")
-        self.store.send(text)
+        self._set_attached([])
+        self.store.send(text, images=images)
 
 
 # ============================== project-aware image panel ==============================
@@ -752,6 +864,7 @@ class ProjectImagePanel(Gtk.Box):
         self._t0 = None
         self._timer_id = None
         self._last_file = None
+        self._verb = "Generating"    # or "Editing" when reference images are attached
         self.set_border_width(8 if compact else 10)
 
         # project bar
@@ -771,8 +884,15 @@ class ProjectImagePanel(Gtk.Box):
         pbar.pack_start(self.follow, False, False, 0)
         self.pack_start(pbar, False, False, 0)
 
-        # prompt row
+        # prompt row (📎 attaches reference image(s) → image-to-image)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.refs = []
+        self.clip = Gtk.Button()
+        self.clip.set_image(Gtk.Image.new_from_icon_name("mail-attachment-symbolic",
+                                                         Gtk.IconSize.BUTTON))
+        self.clip.set_tooltip_text("Reference image(s) — edit/restyle instead of "
+                                   "generating from scratch")
+        self.clip.connect("clicked", self._on_attach)
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text("Describe an image for this project…")
         self.entry.set_hexpand(True)
@@ -780,9 +900,24 @@ class ProjectImagePanel(Gtk.Box):
         self.gen = Gtk.Button.new_with_label("Generate")
         self.gen.get_style_context().add_class("suggested-action")
         self.gen.connect("clicked", self._on_gen)
+        row.pack_start(self.clip, False, False, 0)
         row.pack_start(self.entry, True, True, 0)
         row.pack_start(self.gen, False, False, 0)
         self.pack_start(row, False, False, 0)
+
+        rrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.ref_lbl = Gtk.Label(label="")
+        self.ref_lbl.set_xalign(0)
+        self.ref_lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.ref_lbl.get_style_context().add_class("dim-label")
+        self.ref_clear = Gtk.Button.new_with_label("Clear")
+        self.ref_clear.set_relief(Gtk.ReliefStyle.NONE)
+        self.ref_clear.connect("clicked", lambda *_: self._set_refs([]))
+        rrow.pack_start(self.ref_lbl, True, True, 0)
+        rrow.pack_start(self.ref_clear, False, False, 0)
+        self.ref_row = rrow
+        self.ref_row.set_no_show_all(True)
+        self.pack_start(rrow, False, False, 0)
 
         # status row
         srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -847,6 +982,23 @@ class ProjectImagePanel(Gtk.Box):
             self.projects.set_folder(project, folder)
         return folder
 
+    def _set_refs(self, paths):
+        self.refs = list(paths)
+        n = len(self.refs)
+        if n:
+            names = ", ".join(os.path.basename(p) for p in self.refs)
+            self.ref_lbl.set_text(f"📎 editing {n} reference{'s' if n > 1 else ''}: {names}")
+            self.ref_row.show()
+            self.ref_lbl.show()
+            self.ref_clear.show()
+        else:
+            self.ref_row.hide()
+
+    def _on_attach(self, *_):
+        paths = choose_images(self.get_toplevel(), "Reference image(s) for image-to-image")
+        if paths:
+            self._set_refs(self.refs + paths)
+
     def _on_gen(self, *_):
         if self.busy:
             return
@@ -864,27 +1016,31 @@ class ProjectImagePanel(Gtk.Box):
                 self.status.set_text("Cancelled — no folder chosen.")
                 return
         model = self.state.model or FALLBACK_MODELS[0]
+        refs = list(self.refs)
+        self._verb = "Editing" if refs else "Generating"
         self.busy = True
         self.gen.set_sensitive(False)
+        self.clip.set_sensitive(False)
         self.open_file.set_sensitive(False)
         self.open_dir.set_sensitive(False)
         self.spinner.show()
         self.spinner.start()
         self._t0 = time.monotonic()
-        self.status.set_text(f"Generating with {model}…  0s")
+        self.status.set_text(f"{self._verb} with {model}…  0s")
         self._timer_id = GLib.timeout_add_seconds(1, self._tick, model)
-        threading.Thread(target=self._worker, args=(prompt, model, folder, project),
+        threading.Thread(target=self._worker, args=(prompt, model, folder, project, refs),
                          daemon=True).start()
 
     def _tick(self, model):
         if not self.busy:
             return False
-        self.status.set_text(f"Generating with {model}…  {int(time.monotonic() - self._t0)}s")
+        self.status.set_text(f"{self._verb} with {model}…  "
+                             f"{int(time.monotonic() - self._t0)}s")
         return True
 
-    def _worker(self, prompt, model, folder, project):
+    def _worker(self, prompt, model, folder, project, refs=None):
         try:
-            res = self.state.api.generate_image(prompt, model)
+            res = self.state.api.generate_image(prompt, model, images=refs)
             data = (res or {}).get("data") or []
             if not data:
                 raise RuntimeError("server returned no image")
@@ -923,6 +1079,7 @@ class ProjectImagePanel(Gtk.Box):
         self.spinner.stop()
         self.spinner.hide()
         self.gen.set_sensitive(True)
+        self.clip.set_sensitive(True)
         if self._timer_id:
             GLib.source_remove(self._timer_id)
             self._timer_id = None
@@ -944,7 +1101,8 @@ class ProjectImagePanel(Gtk.Box):
             self.open_dir.set_sensitive(True)
             notify(APP_NAME, f"Image saved to {self.projects.name_of(project)}/{rel}")
         else:
-            self.status.set_text(f"✓ Generated in {secs}s · saved to gallery ({server_link})")
+            done = "Edited" if self._verb == "Editing" else "Generated"
+            self.status.set_text(f"✓ {done} in {secs}s · saved to gallery ({server_link})")
             self._last_file = self._local_viewable_copy(raw, server_link)
             self.open_file.set_sensitive(self._last_file is not None)
             self.open_dir.set_sensitive(self._last_file is not None)

@@ -103,6 +103,58 @@ class ImageCompletion(unittest.TestCase):
         self.assertIsNone(done)
 
 
+class StatusPlaceholder(unittest.TestCase):
+    """A vision request makes ChatGPT show "Analyzing image" in the assistant
+    bubble, sometimes with no stop button — that settled short text used to be
+    returned AS the answer (seen 2026-07-28). It must never be the reply, and it
+    must not end the poll early."""
+
+    def test_analyzing_placeholder_never_becomes_the_answer(self):
+        t = CompletionTracker()
+        answer = "A blue circle beside the words SEVEN ZEBRAS."
+
+        # placeholder showing, stop button gone → looks "settled" but isn't
+        c, done = t.feed(0.0, "Analyzing image", False, NO_IMG)
+        self.assertEqual(c, "")
+        self.assertIsNone(done)
+        c, done = t.feed(CompletionTracker.SILENT_TEXT_DONE + 1.0,
+                         "Analyzing image", False, NO_IMG)
+        self.assertEqual(c, "")
+        self.assertIsNone(done, "placeholder must not complete the request")
+
+        # the real answer arrives and completes normally
+        c, done = t.feed(6.0, answer, True, NO_IMG)
+        self.assertEqual(c, answer)
+        _, done = t.feed(6.0 + CompletionTracker.SILENT_TEXT_DONE + 0.1,
+                         answer, False, NO_IMG)
+        self.assertEqual(done, "text")
+        self.assertEqual(t.text, answer)
+
+    def test_long_answer_opening_with_a_placeholder_word_is_kept(self):
+        # "Analyzing the image, I can see …" is a real answer, not a status line:
+        # only short text counts as a placeholder.
+        t = CompletionTracker()
+        answer = ("Analyzing the image, I can see a solid blue circle in the upper "
+                  "left and two lines of text.")
+        c, done = t.feed(0.0, answer, False, NO_IMG)
+        self.assertEqual(c, answer)
+        _, done = t.feed(CompletionTracker.SILENT_TEXT_DONE + 0.1, answer, False, NO_IMG)
+        self.assertEqual(done, "text")
+
+    def test_placeholder_extends_the_empty_give_up_window(self):
+        t = CompletionTracker()
+        _, done = t.feed(0.0, "Analyzing image", True, NO_IMG)   # generation seen
+        self.assertIsNone(done)
+        # past the normal empty deadline, still patient because a status line shows
+        _, done = t.feed(CompletionTracker.SILENT_EMPTY_DONE + 2.0,
+                         "Analyzing image", False, NO_IMG)
+        self.assertIsNone(done)
+        # but it does eventually give up rather than hang forever
+        _, done = t.feed(CompletionTracker.SILENT_PLACEHOLDER_DONE + 1.0,
+                         "Analyzing image", False, NO_IMG)
+        self.assertEqual(done, "empty")
+
+
 class FalseCreatingGuard(unittest.TestCase):
     """A code-editor <canvas> once made image_status report creating=True
     forever; the guard un-suppresses the text after FALSE_CREATING_TIMEOUT."""

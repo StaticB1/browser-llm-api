@@ -22,6 +22,8 @@ Check it's up: `curl -s localhost:8081/v1/models`
 
 **Web UI (easiest)** — open **`http://localhost:8081/`** in a browser: streaming chat,
 image generation, and a gallery of everything generated so far, with live provider status.
+Attach images with the 📎 button (or just paste / drag-drop them) to ask about a screenshot,
+or to edit an existing image.
 
 **Text / code / HTML** (via the bundled client):
 ```bash
@@ -38,7 +40,17 @@ curl -s localhost:8081/v1/images/generations -H 'Content-Type: application/json'
   -d '{"prompt":"isometric 3d rocket icon, vibrant"}' | jq -r '.data[0].path'
 ```
 
-**Website image assets** (auto resize / crop / favicon / transparency):
+**Send an image IN** (vision, or image-to-image editing):
+```bash
+./client.py --image screenshot.png "What's broken in this layout?"
+
+# edit an existing image (multipart, same shape as OpenAI's images.edit)
+curl -s localhost:8081/v1/images/edits -F image=@logo.png \
+  -F 'prompt=same logo, flat vector, navy background' | jq -r '.data[0].path'
+```
+
+**Website image assets** (auto resize / crop / favicon / transparency; `--ref` restyles an
+existing asset instead of starting from scratch):
 ```bash
 ./venv/bin/python gen_asset.py --prompt "flat vector fox mascot, solid white background" \
   --out avatar.png --square 256 --knockout-bg

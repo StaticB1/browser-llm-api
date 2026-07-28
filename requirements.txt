@@ -6,6 +6,7 @@ fastapi>=0.115
 uvicorn>=0.30
 pydantic>=2
 httpx>=0.27         # remote-provider proxying (REMOTE_PROVIDERS)
+python-multipart>=0.0.9  # multipart uploads on /v1/images/edits (OpenAI's images.edit shape)
 
 # Optional — only gen_asset.py needs it (image post-processing).
 Pillow>=10

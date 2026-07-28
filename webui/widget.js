@@ -20,6 +20,8 @@
  *   data-open      "1" to start expanded                  (default: closed)
  *   data-key       API key, sent as Bearer — needed when the server sets
  *                  BROWSER_LLM_API_KEY and this page isn't on the server box
+ *   data-attach    "0" to hide the 📎 image-attach button (default: shown; the
+ *                  server uploads attached images into the provider's chat)
  * All are also overridable at runtime via window.BrowserLLMWidget.config(...).
  * ---------------------------------------------------------------------------
  */
@@ -55,7 +57,9 @@
     system: attr("system", ""),
     open: attr("open", "") === "1",
     key: attr("key", ""),
+    attach: attr("attach", "1") !== "0",
   };
+  var MAX_ATTACH = 6;
 
   function apiHeaders(h) {
     h = h || {};
@@ -114,6 +118,19 @@
     ".msg a{color:var(--accent)}",
     ".hint{color:#8b93a7;font-size:12px}",
     ".cmp{display:flex;gap:8px;align-items:flex-end;padding:10px;border-top:1px solid #2a2f3a;background:#1d212b}",
+    ".cmp.drag textarea{border-color:var(--accent)}",
+    ".clip{background:#171a21!important;color:#8b93a7!important;border:1px solid #2a2f3a!important;",
+    "  border-radius:9px!important;width:36px;height:36px;padding:0!important;font-size:16px;cursor:pointer}",
+    ".clip:hover,.clip.on{color:var(--accent)!important;border-color:var(--accent)!important}",
+    ".atts{display:flex;gap:6px;flex-wrap:wrap;padding:8px 10px 0;background:#1d212b}",
+    ".atts:empty{display:none}",
+    ".att{position:relative;width:48px;height:48px;border-radius:8px;overflow:hidden;",
+    "  border:1px solid #2a2f3a;flex:none}",
+    ".att img{width:100%;height:100%;object-fit:cover;display:block;margin:0}",
+    ".att button{position:absolute;top:0;right:0;width:16px;height:16px;padding:0;border:none;",
+    "  border-radius:0 0 0 6px;background:rgba(10,12,16,.85);color:#fff;font-size:11px;",
+    "  line-height:16px;cursor:pointer}",
+    ".msg .atts{padding:0 0 6px;background:none}",
     ".cmp textarea{flex:1;background:#171a21;color:#e6e9ef;border:1px solid #2a2f3a;border-radius:9px;",
     "  padding:8px 10px;font:inherit;resize:none;outline:none;max-height:120px;min-height:20px}",
     ".cmp textarea:focus{border-color:var(--accent)}",
@@ -138,7 +155,10 @@
         '<button class="close" title="close" aria-label="close">×</button>' +
       '</div>' +
       '<div class="log"></div>' +
+      '<div class="atts"></div>' +
       '<div class="cmp">' +
+        '<button class="clip" title="attach image(s)" aria-label="attach image">📎</button>' +
+        '<input type="file" class="file" accept="image/*" multiple hidden>' +
         '<textarea rows="1" placeholder="Message…"></textarea>' +
         '<button class="send">Send</button>' +
       '</div>' +
@@ -155,8 +175,13 @@
     ta: root.querySelector(".cmp textarea"),
     send: root.querySelector(".send"),
     fab: root.querySelector(".fab"),
+    cmp: root.querySelector(".cmp"),
+    clip: root.querySelector(".clip"),
+    file: root.querySelector(".file"),
+    atts: root.querySelector(".atts"),
   };
   el.title.textContent = cfg.title;
+  if (!cfg.attach) el.clip.style.display = "none";
 
   // ---- tiny, safe markdown (escape first, then a few constructs) ----------
   function esc(s) {
@@ -200,6 +225,39 @@
     }).catch(function () { el.prov.style.display = "none"; });
   }
 
+  // ---- attachments (image input) ------------------------------------------
+  // Files are read to data: URLs and sent as OpenAI content parts; the server
+  // uploads them into the provider's chat. Paste and drag-drop work too.
+  var atts = [];   // {name, url}
+
+  function renderAtts() {
+    el.atts.innerHTML = "";
+    atts.forEach(function (a, i) {
+      var d = document.createElement("div");
+      d.className = "att";
+      d.title = a.name;
+      d.innerHTML = '<img alt=""><button title="remove">×</button>';
+      d.querySelector("img").src = a.url;
+      d.querySelector("button").onclick = function () { atts.splice(i, 1); renderAtts(); };
+      el.atts.appendChild(d);
+    });
+    el.clip.classList.toggle("on", atts.length > 0);
+  }
+
+  function addFiles(files) {
+    var list = [].slice.call(files || []);
+    list.forEach(function (f) {
+      if (!f || !f.type || f.type.indexOf("image/") !== 0) return;
+      if (atts.length >= MAX_ATTACH) return;
+      var fr = new FileReader();
+      fr.onload = function () {
+        atts.push({ name: f.name || "pasted image", url: fr.result });
+        renderAtts();
+      };
+      fr.readAsDataURL(f);
+    });
+  }
+
   // ---- chat state + send loop --------------------------------------------
   var messages = [];
   var busy = false;
@@ -211,13 +269,27 @@
 
   function send() {
     var text = el.ta.value.trim();
-    if (!text || busy) return;
+    var imgs = atts.map(function (a) { return a.url; });
+    if ((!text && !imgs.length) || busy) return;
     busy = true; el.send.disabled = true;
     el.ta.value = ""; el.ta.style.height = "auto";
 
     var provider = el.prov.value || cfg.provider || undefined;
-    messages.push({ role: "user", content: text });
-    bubble("user", md(text));
+    if (imgs.length) {
+      var parts = [];
+      if (text) parts.push({ type: "text", text: text });
+      imgs.forEach(function (u) { parts.push({ type: "image_url", image_url: { url: u } }); });
+      messages.push({ role: "user", content: parts });
+    } else {
+      messages.push({ role: "user", content: text });
+    }
+    var thumbs = imgs.length
+      ? '<div class="atts">' + imgs.map(function (u) {
+          return '<div class="att"><img src="' + esc(u) + '" alt=""></div>';
+        }).join("") + '</div>'
+      : "";
+    bubble("user", thumbs + md(text));
+    atts = []; renderAtts();
     var out = bubble("bot", '<span class="spin"></span><span class="hint">thinking…</span>');
 
     var payload = { stream: true, messages: [] };
@@ -294,6 +366,25 @@
     el.ta.style.height = "auto";
     el.ta.style.height = Math.min(el.ta.scrollHeight, 120) + "px";
   });
+  el.clip.onclick = function () { el.file.click(); };
+  el.file.onchange = function (e) { addFiles(e.target.files); e.target.value = ""; };
+  el.ta.addEventListener("paste", function (e) {
+    if (!cfg.attach || !e.clipboardData || !e.clipboardData.files.length) return;
+    e.preventDefault(); addFiles(e.clipboardData.files);
+  });
+  ["dragenter", "dragover"].forEach(function (ev) {
+    el.cmp.addEventListener(ev, function (e) {
+      if (!cfg.attach || !e.dataTransfer) return;
+      e.preventDefault(); el.cmp.classList.add("drag");
+    });
+  });
+  ["dragleave", "dragend"].forEach(function (ev) {
+    el.cmp.addEventListener(ev, function () { el.cmp.classList.remove("drag"); });
+  });
+  el.cmp.addEventListener("drop", function (e) {
+    if (!cfg.attach || !e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault(); el.cmp.classList.remove("drag"); addFiles(e.dataTransfer.files);
+  });
 
   loadModels();
   greet();
@@ -304,7 +395,7 @@
   window.BrowserLLMWidget = {
     open: function () { toggle(true); },
     close: function () { toggle(false); },
-    reset: function () { messages = []; greet(); },
+    reset: function () { messages = []; atts = []; renderAtts(); greet(); },
     config: function (o) {
       o = o || {};
       if (o.provider !== undefined) { cfg.provider = o.provider; if (o.provider) el.prov.value = o.provider; }

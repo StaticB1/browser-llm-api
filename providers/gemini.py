@@ -73,6 +73,40 @@ class GeminiProvider(Provider):
     input_selector = 'div[contenteditable="true"]'
     send_selectors = ['button[aria-label="Send message"]']
     load_wait = 6.0
+    # --- image input (upload). Gemini keeps NO <input type="file"> in the DOM at
+    # rest (verified 2026-07-28) — it creates one when you pick "Upload files"
+    # from the "Upload & tools" menu, which would pop a native OS dialog. So this
+    # provider relies on the generic file-chooser interception path: click the
+    # menu, then the upload item, and answer the intercepted chooser over CDP.
+    # The menu labels are best-guess against a signed-in session (this box's
+    # Gemini profile was signed out when this was written) — the "Upload & tools"
+    # button itself IS verified. Adjust the needles if uploads stop landing.
+    supports_upload = True
+    attach_click_path = [
+        ['button[aria-label="Upload & tools"]', 'button[aria-label*="Upload"]',
+         'button[aria-label*="upload"]', 'text:upload & tools'],
+        ['text:upload files', 'text:upload file', 'text:add files',
+         'text:upload from computer', 'text:photos', 'input[type=file]'],
+    ]
+    # An attached file shows as a preview chip near the composer; while it's
+    # still uploading Gemini shows a spinner/progress bar on that chip.
+    attachment_ready_js = """
+    (function(){
+      function deep(root,sel,out){if(!root||!root.querySelectorAll)return;
+        root.querySelectorAll(sel).forEach(e=>out.push(e));
+        root.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)deep(e.shadowRoot,sel,out);});}
+      var chips=[];
+      deep(document,'uploader-file-preview, uploader-file-preview-container, '
+        +'[class*="file-preview"], [class*="attachment-container"], '
+        +'button[aria-label*="Remove"]',chips);
+      var vis=chips.filter(function(e){return e.offsetParent||e.getClientRects().length;});
+      var busy=[];
+      deep(document,'[role="progressbar"], mat-progress-bar, mat-spinner, '
+        +'[class*="uploading"], [class*="loading-indicator"]',busy);
+      return JSON.stringify({ready:vis.length,
+        busy:busy.some(function(e){return e.offsetParent||e.getClientRects().length;})});
+    })()
+    """
 
     async def get_response_text(self, page) -> str:
         """Shadow-DOM-piercing text extractor for the last model-response."""
