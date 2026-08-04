@@ -17,13 +17,30 @@ A **mini web UI** (`webui/index.html`, single file, no build step) is served at
 image-to-image, gallery of saved images, a live per-provider status bar, and a **Status tab** with live telemetry (requests / errors / avg+last
 latency / last-error / recycle countdown per provider), backed by `/api/status` + `/api/gallery`.
 
+**Theming (added 2026-08-04).** The UI is a "precision instrument" design — warm-paper light theme,
+graphite dark theme, borders (not shadows) carrying the structure, mono for every label/metric, a
+faint 24px drafting grid, dot-matrix provider readouts, and a scan line across the answer while it
+streams. Both themes are real designs, not inversions. The header has a 3-state switch
+(light / auto / dark) persisted in `localStorage` under `blm.theme`; `auto` follows
+`prefers-color-scheme` live. An inline script in `<head>` resolves the theme onto
+`documentElement.dataset.theme` **before first paint**, so there's no flash — keep it there.
+Colours are CSS custom properties on `:root` (light) and `:root[data-theme="dark"]`; add new colours
+as tokens, never as literal hex in a rule. Fonts are local-only on purpose (Inter if installed, else
+system; mono falls back to Noto/DejaVu) — no Google Fonts link, so the UI still renders offline.
+Two traps: the footer must NOT uppercase `#ft-dir` (filesystem paths are case-sensitive), and
+`md()`'s code-block sentinel is the six-character escape `\u0000` in the source, not a raw NUL byte — a literal NUL makes the
+file binary to grep and is invalid in HTML source.
+
 There is also an **embeddable chat widget** (`webui/widget.js`, served at `/widget.js`): a
 self-contained, Shadow-DOM-isolated floating chat bubble that any other page on the LAN can add with
 `<script src="http://<host>:8081/widget.js"></script>`. It auto-discovers this server as its API base
 from its own script URL (CORS is already open) and streams from `/v1/chat/completions`. Config via
-`data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `system`, `open`, `attach`); runtime
+`data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `system`, `open`, `attach`,
+`theme`); runtime
 handle `window.BrowserLLMWidget` (`open`/`close`/`reset`/`config`). The Status tab shows a copy-paste
-embed snippet + a "Preview widget on this page" button.
+embed snippet + a "Preview widget on this page" button. The widget is themed with the same palette
+via `--w-*` tokens inside its shadow root; `data-theme` defaults to **auto**, which follows the HOST
+page's `prefers-color-scheme` (it used to be hardcoded dark, which looked broken on a light site).
 
 Two providers, selected per-request by the OpenAI **`model`** field:
 

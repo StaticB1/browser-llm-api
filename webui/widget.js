@@ -13,7 +13,10 @@
  * Optional config via data-* attributes on the <script> tag:
  *   data-provider  "gemini-browser" | "chatgpt-browser"   (default: server default)
  *   data-title     header text                            (default: "Ask AI")
- *   data-accent    CSS color for the bubble/buttons       (default: #6ea8fe)
+ *   data-accent    CSS color for the bubble/buttons       (default: #2E8BFF)
+ *   data-theme     "auto" | "light" | "dark"              (default: auto — follows
+ *                  the host page's prefers-color-scheme, so the bubble never lands
+ *                  dark-on-light)
  *   data-position  "br" | "bl"                            (default: br)
  *   data-greeting  first assistant line                   (default: friendly hi)
  *   data-system    a system prompt sent with every turn   (default: none)
@@ -51,7 +54,8 @@
     base: base,
     provider: attr("provider", ""),          // "" → let the server pick its default
     title: attr("title", "Ask AI"),
-    accent: attr("accent", "#6ea8fe"),
+    accent: attr("accent", "#2E8BFF"),
+    theme: attr("theme", "auto"),
     position: attr("position", "br"),
     greeting: attr("greeting", "Hi! Ask me anything."),
     system: attr("system", ""),
@@ -76,15 +80,31 @@
 
   var sideProp = cfg.position === "bl" ? "left" : "right";
 
+  /* Theme tokens. Light is the base; dark is applied either explicitly
+     (data-theme="dark") or, in auto mode, from the HOST page's colour scheme —
+     a dark bubble on a light site was the old default and looked broken. */
+  var DARK_TOKENS =
+    "--w-surface:#181B1F;--w-surface2:#20242A;--w-border:#343A42;--w-hairline:#272C33;" +
+    "--w-text:#EEF2F5;--w-muted:#A0AAB5;--w-code:#14181D;--w-user:#1A3F6A;" +
+    "--w-user-border:#2E8BFF;--w-err:#E55C63;--w-ink:#F8FBFF;" +
+    "--w-shadow:0 18px 50px rgba(0,0,0,.55)";
+
   var style = document.createElement("style");
   style.textContent = [
     ":host{all:initial}",
     "*{box-sizing:border-box}",
+    // ---- tokens: light base ----
     ".wrap{position:fixed;bottom:20px;" + sideProp + ":20px;",
-    "  font:14px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}",
+    "  --w-surface:#FDFCF8;--w-surface2:#F1EFE9;--w-border:#C7C1B6;--w-hairline:#E2DDD3;",
+    "  --w-text:#1D232B;--w-muted:#5F6974;--w-code:#F2F0EA;--w-user:#E8F2FF;",
+    "  --w-user-border:#7DB7FF;--w-err:#C83F49;--w-ink:#FFFFFF;",
+    "  --w-shadow:0 18px 50px rgba(20,24,28,.18);",
+    "  font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}",
+    ".wrap[data-t='dark']{" + DARK_TOKENS + "}",
+    "@media (prefers-color-scheme: dark){.wrap[data-t='auto']{" + DARK_TOKENS + "}}",
     // launcher bubble
     ".fab{width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;",
-    "  background:var(--accent);color:#fff;font-size:26px;line-height:1;",
+    "  background:var(--accent);color:var(--w-ink);font-size:26px;line-height:1;",
     "  box-shadow:0 6px 22px rgba(0,0,0,.28);display:flex;align-items:center;",
     "  justify-content:center;transition:transform .15s ease}",
     ".fab:hover{transform:scale(1.06)}",
@@ -92,52 +112,60 @@
     // panel
     ".panel{position:absolute;bottom:70px;" + sideProp + ":0;width:370px;max-width:calc(100vw - 32px);",
     "  height:520px;max-height:calc(100vh - 120px);display:none;flex-direction:column;",
-    "  background:#171a21;color:#e6e9ef;border:1px solid #2a2f3a;border-radius:16px;",
-    "  overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.45)}",
+    "  background:var(--w-surface);color:var(--w-text);border:1px solid var(--w-border);",
+    "  border-radius:12px;overflow:hidden;box-shadow:var(--w-shadow)}",
     ".panel.open{display:flex}",
-    ".hd{display:flex;align-items:center;gap:8px;padding:12px 14px;background:#1d212b;",
-    "  border-bottom:1px solid #2a2f3a}",
-    ".hd b{font-weight:650;font-size:14.5px}",
+    ".hd{display:flex;align-items:center;gap:8px;padding:11px 13px;background:var(--w-surface2);",
+    "  border-bottom:1px solid var(--w-border)}",
+    ".hd b{font-weight:600;font-size:13px;letter-spacing:.04em;text-transform:uppercase;",
+    "  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
     ".hd .sp{flex:1}",
-    ".hd select{background:#171a21;color:#8b93a7;border:1px solid #2a2f3a;border-radius:7px;",
-    "  padding:3px 6px;font-size:11.5px;max-width:120px}",
-    ".hd button{background:none;border:none;color:#8b93a7;cursor:pointer;font-size:20px;",
+    ".hd select{background:var(--w-surface);color:var(--w-muted);border:1px solid var(--w-border);",
+    "  border-radius:6px;padding:3px 6px;font-size:11px;max-width:120px;",
+    "  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
+    ".hd button{background:none;border:none;color:var(--w-muted);cursor:pointer;font-size:20px;",
     "  line-height:1;padding:2px 4px;border-radius:6px}",
-    ".hd button:hover{color:#e6e9ef;background:#262b36}",
+    ".hd button:hover{color:var(--w-text);background:var(--w-hairline)}",
     ".log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}",
-    ".msg{max-width:88%;padding:9px 12px;border-radius:12px;border:1px solid #2a2f3a;",
+    ".msg{max-width:88%;padding:9px 12px;border-radius:8px;border:1px solid var(--w-border);",
     "  overflow-wrap:anywhere;white-space:normal}",
-    ".msg.user{align-self:flex-end;background:#20304d;border-color:#2c4066}",
-    ".msg.bot{align-self:flex-start;background:#12151b}",
-    ".msg.err{border-color:#f47067;color:#f47067}",
-    ".msg pre{background:#0c0e12;border:1px solid #2a2f3a;border-radius:8px;padding:9px 11px;",
-    "  overflow-x:auto;font-size:12.5px;margin:6px 0}",
+    ".msg.user{align-self:flex-end;background:var(--w-user);border-color:var(--w-user-border)}",
+    ".msg.bot{align-self:flex-start;background:var(--w-surface2)}",
+    ".msg.err{border-color:var(--w-err);color:var(--w-err)}",
+    ".msg pre{background:var(--w-code);border:1px solid var(--w-hairline);border-radius:6px;",
+    "  padding:9px 11px;overflow-x:auto;font-size:12.5px;margin:6px 0}",
     ".msg code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
-    ".msg :not(pre)>code{background:#0c0e12;border:1px solid #2a2f3a;border-radius:5px;padding:1px 5px;font-size:12.5px}",
-    ".msg img{max-width:100%;border-radius:8px;margin-top:6px;display:block}",
+    ".msg :not(pre)>code{background:var(--w-code);border:1px solid var(--w-hairline);",
+    "  border-radius:4px;padding:1px 5px;font-size:12.5px}",
+    ".msg img{max-width:100%;border-radius:6px;margin-top:6px;display:block}",
     ".msg a{color:var(--accent)}",
-    ".hint{color:#8b93a7;font-size:12px}",
-    ".cmp{display:flex;gap:8px;align-items:flex-end;padding:10px;border-top:1px solid #2a2f3a;background:#1d212b}",
+    ".hint{color:var(--w-muted);font-size:12px}",
+    ".cmp{display:flex;gap:8px;align-items:flex-end;padding:10px;",
+    "  border-top:1px solid var(--w-border);background:var(--w-surface2)}",
     ".cmp.drag textarea{border-color:var(--accent)}",
-    ".clip{background:#171a21!important;color:#8b93a7!important;border:1px solid #2a2f3a!important;",
-    "  border-radius:9px!important;width:36px;height:36px;padding:0!important;font-size:16px;cursor:pointer}",
+    ".clip{background:var(--w-surface)!important;color:var(--w-muted)!important;",
+    "  border:1px solid var(--w-border)!important;",
+    "  border-radius:6px!important;width:36px;height:36px;padding:0!important;font-size:16px;cursor:pointer}",
     ".clip:hover,.clip.on{color:var(--accent)!important;border-color:var(--accent)!important}",
-    ".atts{display:flex;gap:6px;flex-wrap:wrap;padding:8px 10px 0;background:#1d212b}",
+    ".atts{display:flex;gap:6px;flex-wrap:wrap;padding:8px 10px 0;background:var(--w-surface2)}",
     ".atts:empty{display:none}",
-    ".att{position:relative;width:48px;height:48px;border-radius:8px;overflow:hidden;",
-    "  border:1px solid #2a2f3a;flex:none}",
+    ".att{position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;",
+    "  border:1px solid var(--w-border);flex:none}",
     ".att img{width:100%;height:100%;object-fit:cover;display:block;margin:0}",
     ".att button{position:absolute;top:0;right:0;width:16px;height:16px;padding:0;border:none;",
     "  border-radius:0 0 0 6px;background:rgba(10,12,16,.85);color:#fff;font-size:11px;",
     "  line-height:16px;cursor:pointer}",
     ".msg .atts{padding:0 0 6px;background:none}",
-    ".cmp textarea{flex:1;background:#171a21;color:#e6e9ef;border:1px solid #2a2f3a;border-radius:9px;",
+    ".cmp textarea{flex:1;background:var(--w-surface);color:var(--w-text);",
+    "  border:1px solid var(--w-border);border-radius:6px;",
     "  padding:8px 10px;font:inherit;resize:none;outline:none;max-height:120px;min-height:20px}",
     ".cmp textarea:focus{border-color:var(--accent)}",
-    ".cmp button{background:var(--accent);color:#0b1020;border:none;border-radius:9px;",
-    "  padding:8px 15px;font-weight:650;cursor:pointer;flex:none}",
+    ".cmp button{background:var(--accent);color:var(--w-ink);border:none;border-radius:6px;",
+    "  padding:9px 15px;font-weight:600;font-size:11.5px;letter-spacing:.06em;",
+    "  text-transform:uppercase;cursor:pointer;flex:none;",
+    "  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
     ".cmp button:disabled{opacity:.45;cursor:default}",
-    ".spin{display:inline-block;width:12px;height:12px;border:2px solid #2a2f3a;",
+    ".spin{display:inline-block;width:12px;height:12px;border:2px solid var(--w-hairline);",
     "  border-top-color:var(--accent);border-radius:50%;animation:blmrot .8s linear infinite;",
     "  vertical-align:-1px;margin-right:6px}",
     "@keyframes blmrot{to{transform:rotate(360deg)}}",
@@ -147,6 +175,7 @@
   var wrap = document.createElement("div");
   wrap.className = "wrap";
   wrap.style.setProperty("--accent", cfg.accent);
+  wrap.setAttribute("data-t", /^(light|dark|auto)$/.test(cfg.theme) ? cfg.theme : "auto");
   wrap.innerHTML =
     '<div class="panel" part="panel">' +
       '<div class="hd">' +
@@ -402,6 +431,9 @@
       if (o.system !== undefined) cfg.system = o.system;
       if (o.title !== undefined) { cfg.title = o.title; el.title.textContent = o.title; }
       if (o.accent !== undefined) { cfg.accent = o.accent; wrap.style.setProperty("--accent", o.accent); }
+      if (o.theme !== undefined && /^(light|dark|auto)$/.test(o.theme)) {
+        cfg.theme = o.theme; wrap.setAttribute("data-t", o.theme);
+      }
     },
   };
 })();
