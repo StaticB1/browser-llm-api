@@ -68,6 +68,55 @@ class TestKeyMatches(unittest.TestCase):
         self.assertFalse(authz.key_matches("", ""))
 
 
+class TestOriginIsTrusted(unittest.TestCase):
+    """Guards the file-path attachment rule: a page on another site can make the
+    operator's browser POST here, and it arrives over loopback like any local
+    client. Verified live before this existed — `Origin: https://evil.example`
+    plus a local path got the file uploaded and described back."""
+
+    def test_no_origin_is_trusted(self):
+        # curl, the CLI, the desktop app, a proxying server: only browsers set it.
+        self.assertTrue(authz.origin_is_trusted(None, "localhost:8081"))
+        self.assertTrue(authz.origin_is_trusted("", "localhost:8081"))
+        self.assertTrue(authz.origin_is_trusted("   ", "localhost:8081"))
+        self.assertTrue(authz.origin_is_trusted("null", "localhost:8081"))
+
+    def test_same_origin_trusted(self):
+        self.assertTrue(authz.origin_is_trusted("http://localhost:8081", "localhost:8081"))
+        self.assertTrue(authz.origin_is_trusted("http://127.0.0.1:8081", "127.0.0.1:8081"))
+        self.assertTrue(authz.origin_is_trusted("http://192.168.1.34:8081", "192.168.1.34:8081"))
+
+    def test_loopback_spellings_are_the_same_server(self):
+        self.assertTrue(authz.origin_is_trusted("http://localhost:8081", "127.0.0.1:8081"))
+        self.assertTrue(authz.origin_is_trusted("http://127.0.0.1:8081", "localhost:8081"))
+        self.assertTrue(authz.origin_is_trusted("http://[::1]:8081", "localhost:8081"))
+
+    def test_cross_site_origin_rejected(self):
+        self.assertFalse(authz.origin_is_trusted("https://evil.example", "localhost:8081"))
+        self.assertFalse(authz.origin_is_trusted("http://evil.example:8081", "localhost:8081"))
+        # a page served from another host on the LAN (e.g. the embedded widget)
+        self.assertFalse(authz.origin_is_trusted("http://192.168.1.99", "192.168.1.34:8081"))
+
+    def test_port_mismatch_rejected(self):
+        self.assertFalse(authz.origin_is_trusted("http://localhost:3000", "localhost:8081"))
+
+    def test_missing_or_malformed_origin_host(self):
+        self.assertFalse(authz.origin_is_trusted("not-a-url", "localhost:8081"))
+        self.assertFalse(authz.origin_is_trusted("https://evil.example", None))
+
+    def test_hostname_matches_when_host_header_omits_the_port(self):
+        self.assertTrue(authz.origin_is_trusted("http://localhost", "localhost"))
+        self.assertTrue(authz.origin_is_trusted("http://box.lan:8081", "box.lan"))
+
+
+class TestSplitHostport(unittest.TestCase):
+    def test_plain_and_ipv6(self):
+        self.assertEqual(authz._split_hostport("localhost:8081"), ("localhost", "8081"))
+        self.assertEqual(authz._split_hostport("localhost"), ("localhost", ""))
+        self.assertEqual(authz._split_hostport("[::1]:8081"), ("[::1]", "8081"))
+        self.assertEqual(authz._split_hostport("[::1]"), ("[::1]", ""))
+
+
 class TestParseRemoteProviders(unittest.TestCase):
     def test_single(self):
         self.assertEqual(

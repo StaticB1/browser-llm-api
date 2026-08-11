@@ -54,6 +54,27 @@ Unknown/absent `model` → `DEFAULT_PROVIDER` (env, default `gemini-browser`).
 This is inherently **fragile**: each provider depends on its site's live DOM/selectors, and ChatGPT
 additionally sits behind Cloudflare/anti-bot. A UI change can silently break extraction or submission.
 
+## Where the clone lives (2026-08-11)
+
+```
+/home/eben/Downloads/Ebenworks (EW)/Open Source Projects/browser-llm-api   ← real directory
+/home/eben/Downloads/browser llm api                                       ← symlink to it
+```
+
+Filed with the other Ebenworks MIT repos. The symlink at the old path is **permanent, not a
+migration leftover**: this repo is the image-asset tool every Claude Code session on the box uses, so
+its old path is quoted in other repos' scripts, in skill files and in conversation memories that
+nothing will ever rewrite. Deleting the symlink breaks those silently. Everything that could be
+repointed *was* — the systemd unit, the desktop launcher, the `design-with-chatgpt` skill,
+`statosports/scripts/generate-assets.sh`, `fsms_algorithm2, 3/docs/analysis/scripts/gen_figs*.sh`,
+`gpt_slides.py` — plus the Claude Code project key
+(`-home-eben-Downloads-Ebenworks--EW--Open-Source-Projects-browser-llm-api`, with the old key
+symlinked to it so transcripts and memories stayed in one place).
+
+Both paths contain a space, so **quote every path** in scripts and unit files, and note that a plain
+`#!` shebang cannot hold one: the venv's console scripts (`venv/bin/pip`, `uvicorn`, …) use pip's
+`#!/bin/sh` + `'''exec'` wrapper form instead. Don't "simplify" them back to a bare shebang.
+
 ## Layout
 
 ```
@@ -71,7 +92,7 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
 LICENSE              # MIT.
 README.md            # project overview / usage.
 QUICKSTART.md        # fast-path setup guide.
-authz.py             # stdlib-only access control + remote-upstream config: loopback detection,
+authz.py             # stdlib-only access control + remote-upstream config: loopback + origin trust,
                      #   API-key gating rules (which paths need the key), REMOTE_PROVIDERS parsing.
                      #   Separate from server.py so tests import it without server's side effects.
 client.py            # tiny stdlib-only CLI/importable client (no deps): `./client.py "prompt"`
@@ -109,8 +130,9 @@ desktop/               # NATIVE Linux desktop app + tray widget (GTK3), a thin c
 tests/               # unit tests (no browser needed):
                      #   ./venv/bin/python -m unittest discover -s tests
                      #   test_completion_tracker.py (done-decision incl. status
-                     #   placeholders), test_authz.py, test_attachments.py
-                     #   (attachment specs/limits/local-path policy/remote inlining)
+                     #   placeholders), test_authz.py (key gating, origin trust,
+                     #   remote parsing), test_attachments.py (attachment specs/
+                     #   limits/local-path + origin policy/remote inlining)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
@@ -191,8 +213,10 @@ files, and the provider uploads them through the site's own file picker before s
   `file://`, or a local path. `_attachment_files()` is an async context manager that writes temps
   (sniffing the real extension from magic bytes) and deletes them after the drive; caller-supplied
   paths are used in place and never deleted. `MAX_ATTACHMENTS` (6), `MAX_ATTACHMENT_MB` (20).
-- **Local paths are loopback-only** (`_client_may_send_paths`): a keyed LAN client could otherwise
-  make the server upload any file off this box to ChatGPT. `ALLOW_REMOTE_FILE_PATHS=1` opts out.
+- **Local paths need a loopback *and* same-origin caller** (`_client_may_send_paths`): a keyed LAN
+  client could otherwise make the server upload any file off this box to ChatGPT — and so could any
+  website open in the operator's browser, since CORS is wide open and a drive-by POST arrives from
+  127.0.0.1 (see the origin gotcha below). `ALLOW_REMOTE_FILE_PATHS=1` opts out of both checks.
   Proxied requests inline local paths as `data:` URLs (`_inline_paths_for_remote`) — a path is
   meaningless on the upstream's filesystem.
 - **`_build_prompt` now returns `(prompt, specs)`** and annotates multi-turn text with
@@ -247,7 +271,9 @@ files, and the provider uploads them through the site's own file picker before s
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | Recycle a provider's browser after this many image gens (renderer bloats and times out otherwise). |
 | `MAX_ATTACHMENTS` | `6` | Most input images one request may attach. |
 | `MAX_ATTACHMENT_MB` | `20` | Per-attachment size ceiling (data URLs, downloads and local files alike). |
-| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | Let **non-loopback** clients attach server-side file paths. Off by default — it's a file-read primitive. |
+| `BROWSER_LLM_HOST` | `127.0.0.1` | Interface to bind. Localhost-only by default (2026-08-11) — the server drives logged-in accounts, so LAN exposure is opt-in. This box's systemd override sets `0.0.0.0` explicitly, so the service is unaffected. |
+| `BROWSER_LLM_PORT` | `8081` | Port to bind. |
+| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | Let **non-loopback or cross-origin** clients attach server-side file paths. Off by default — it's a file-read primitive. |
 | `BROWSER_LLM_API_KEY` | *(unset)* | When set, **non-loopback** clients must send it (`Authorization: Bearer …` or `X-Api-Key`) on `/v1/*` and `/api/*`. Localhost stays open; pages/assets (`/`, `/widget.js`, `/images/*`, …) stay public. Makes binding to `0.0.0.0` sane. |
 | `REMOTE_PROVIDERS` | *(unset)* | `model=url[,model=url…]` — proxy those models to **another browser-llm-api instance** instead of a local browser (overrides the local provider of the same name). E.g. a second install without a ChatGPT login sets `chatgpt-browser=http://<host-with-login>:8081`. |
 | `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`). |
@@ -316,6 +342,18 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 
 ## Gotchas & conventions
 
+- **Loopback is NOT the same as trusted (fixed 2026-08-11).** CORS is `allow_origins=["*"]` on
+  purpose — the widget is embedded on other pages — so any website open in the operator's browser can
+  make it POST here, and that request arrives from `127.0.0.1` and passes every loopback check.
+  Reproduced live before the fix: `Origin: https://evil.example` plus a local file path got the server
+  to read that file, upload it to ChatGPT and return the model's description of it, i.e. a file-read
+  primitive for any path a page can guess (no image check — `_resolve_local_attachment` only tests
+  existence and size, and `DOM.setFileInputFiles` ignores the input's `accept`). Fix:
+  `authz.origin_is_trusted(origin, host)` — trust no `Origin` (curl/CLI/desktop app; a browser cannot
+  omit it cross-origin) or one matching the addressed host, and gate `_client_may_send_paths` on it.
+  All three attachment endpoints share that helper. Unit-tested in `tests/test_authz.py` +
+  `tests/test_attachments.py`; verified live in three states (drive-by 400, same-origin UI passes,
+  keyed LAN client still refused). **Don't "simplify" the path policy back to a loopback check.**
 - **The per-provider lock is taken INSIDE the SSE generator** in `chat_completions`
   (`server.py`). FastAPI runs the generator *after* the handler returns, so an `async with`
   around `return StreamingResponse(...)` releases the lock before the first poll and lets
@@ -323,7 +361,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz and attachments have unit tests** — `./venv/bin/python -m unittest
-  discover -s tests` (70 tests, no browser). If you change the done-decision logic in
+  discover -s tests` (83 tests, no browser). If you change the done-decision logic in
   `providers/base.py` or the attachment layer in `server.py`, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
   to swallow `KeyError` from unknown CDP events (e.g. `DOM.adoptedStyleSheetsModified`). Called at
@@ -414,8 +452,9 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/browser-llm`
   (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
-- **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; the systemd unit clears
-  both profiles' locks in `ExecStartPre`. Running by hand? delete `*_profile/Singleton*`.
+- **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; `serve.sh` clears both
+  profiles' locks on every start, so the service and a foreground run are both covered. Running
+  `server.py` directly, without `serve.sh`? delete `*_profile/Singleton*` yourself.
 - **Logs**: `server.py` writes `server.log` (mode `w`, wiped each start) + stderr; under systemd the
   journal is the real log. `gemini_bot.py` writes `gemini_session.log`.
 - **Dead browser/CDP connection used to wedge a provider until restart (fixed 2026-07-10):**

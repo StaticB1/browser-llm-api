@@ -283,12 +283,29 @@ before forwarding, so remote providers work the same way (both ends need ≥ 0.2
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | base URL used to build returned image links |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | recycle a provider's browser after this many image gens |
 | `BROWSER_LLM_API` | `http://localhost:8081` | server URL the desktop app / `client.py` connect to |
+| `BROWSER_LLM_HOST` | `127.0.0.1` | interface the server binds. It drives your logged-in accounts, so it stays off the network until you set `0.0.0.0` (do that with `BROWSER_LLM_API_KEY`) |
+| `BROWSER_LLM_PORT` | `8081` | port the server binds |
 | `BROWSER_LLM_API_KEY` | *(unset)* | require this key (`Authorization: Bearer …` or `X-Api-Key`) from **non-localhost** clients on `/v1/*` and `/api/*`; localhost stays open |
 | `REMOTE_PROVIDERS` | *(unset)* | `model=url[,…]` — proxy those models to another browser-llm-api instance instead of a local browser |
 | `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`) |
 | `MAX_ATTACHMENTS` | `6` | most input images one request may attach |
 | `MAX_ATTACHMENT_MB` | `20` | per-attachment size ceiling |
-| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | let non-localhost clients attach **server-side file paths** (off by default) |
+| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | let non-localhost (and cross-origin) clients attach **server-side file paths** (off by default) |
+
+### Who can call it
+
+CORS is deliberately open, because the embeddable widget has to work from any page on your network.
+That has a consequence worth knowing: **while the server is running, any website open in your browser
+can POST to it** — the request comes from `127.0.0.1` like any local client — and use your logged-in
+session. So:
+
+- Treat the port as local trust. Keep the default `127.0.0.1` bind unless you mean to share it, and
+  set `BROWSER_LLM_API_KEY` when you do.
+- **File-path attachments require a local *and* same-origin caller.** A path makes the browser upload
+  that file, so a cross-origin page naming `~/.ssh/config` would otherwise be a file-read primitive —
+  it gets a 400 instead. Requests with no `Origin` at all (curl, `client.py`, the desktop app) are
+  local clients and keep working. `ALLOW_REMOTE_FILE_PATHS=1` opts out of the whole check.
+- Stop the service when you are not using it if you would rather not have the endpoint live at all.
 
 ## Sharing a provider with another machine
 
@@ -335,22 +352,24 @@ else changes.
 - **Image input rides the same selectors.** ChatGPT's upload path is verified end-to-end; Gemini's uses the generic file-chooser mechanism with best-guess menu labels (its "Upload & tools" button is verified) — if Gemini stops receiving attachments, check `attach_click_path` in `providers/gemini.py` first. Attachments are capped by `MAX_ATTACHMENTS` / `MAX_ATTACHMENT_MB`, and a multi-turn conversation re-uploads its images on every request (each request drives a fresh chat), so long image conversations get slower.
 - **One request at a time per provider** (per-provider lock); Gemini and ChatGPT run concurrently, callers to the same provider queue.
 - **`usage` token counts are approximate** (word-split, not a real tokenizer).
-- A hard crash can leave a stale `<profile>/SingletonLock`; the unit clears both providers' locks on start (`ExecStartPre`).
+- A hard crash can leave a stale `<profile>/SingletonLock`; `serve.sh` clears both providers' locks on start, so the service and a foreground run are both covered.
 
 ## Tests
 
 The tricky pure logic is unit-tested and needs no browser: the completion decision (when is a
 streamed answer / image done, including transient "Analyzing image"-style placeholders) in
-`providers/base.py`, the API-key/loopback rules in `authz.py`, and the attachment layer (spec forms,
-size/count limits, the loopback-only path policy, remote inlining) in `server.py`.
+`providers/base.py`, the API-key / loopback / origin-trust rules in `authz.py`, and the attachment
+layer (spec forms, size/count limits, the local-and-same-origin path policy, remote inlining) in
+`server.py`.
 
 ```bash
 ./venv/bin/python -m unittest discover -s tests -v     # tests/test_completion_tracker.py,
                                                        # tests/test_authz.py, tests/test_attachments.py
 ```
 
-## Contributors
+## Authors & acknowledgments
 
+- **browser-llm-api** — **Statotech Systems**, in partnership with **[Ebenworks](https://ebenworks.co/)**.
 - **[staticB1](https://github.com/StaticB1)**
 - **Ebenezer "Ebstar" Tarubinga**
 
@@ -363,3 +382,7 @@ Contributions welcome — open an issue or pull request.
 ## Disclaimer
 
 This tool automates logged-in sessions on third-party sites (gemini.google.com, chatgpt.com) that have **no official API for this use**. It may violate those services' Terms of Service, it is **inherently fragile** (a site UI change can break extraction at any time), and it uses your own account/session. Use it for personal/experimental purposes, at your own risk, and review each provider's ToS. The authors provide no warranty (see [LICENSE](LICENSE)).
+
+<p align="center">
+  Made by <a href="https://ebenworks.co/">Ebenworks</a>
+</p>

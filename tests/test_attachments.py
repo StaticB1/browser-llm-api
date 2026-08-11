@@ -21,7 +21,8 @@ import server  # noqa: E402
 from server import (  # noqa: E402
     ChatCompletionRequest, ContentPart, ImageGenRequest, Message,
     _attachment_files, _build_prompt, _decode_data_spec, _image_payload,
-    _inline_paths_for_remote, _message_pieces, _ref_specs, _sniff_ext,
+    _client_may_send_paths, _inline_paths_for_remote, _message_pieces,
+    _ref_specs, _sniff_ext,
     _spec_kind, _spec_to_data_url,
 )
 
@@ -239,7 +240,8 @@ class MaterializeTest(unittest.IsolatedAsyncioTestCase):
             async with _attachment_files(["/etc/hostname"], allow_local_paths=False):
                 pass
         self.assertEqual(cm.exception.status_code, 400)
-        self.assertIn("localhost", cm.exception.detail)
+        self.assertIn("same-origin", cm.exception.detail)
+        self.assertIn("data:", cm.exception.detail)
 
     async def test_missing_file_is_a_clear_400(self):
         with self.assertRaises(HTTPException) as cm:
@@ -327,6 +329,45 @@ class ImagePayloadTest(unittest.TestCase):
     def test_data_url_fallback_when_unsaved(self):
         out = _image_payload([{"b64": "QQ==", "mime": "image/png"}], "url")
         self.assertEqual(out["data"][0]["url"], "data:image/png;base64,QQ==")
+
+
+class _FakeRequest:
+    """Just the two things _client_may_send_paths reads."""
+
+    def __init__(self, client_host, headers=None):
+        self.client = type("Client", (), {"host": client_host})() if client_host else None
+        self.headers = headers or {}
+
+
+class ClientMaySendPathsTest(unittest.TestCase):
+    """Who may name a server-side file path. Loopback is not enough: a page on
+    another site drives the operator's own browser, so the request arrives from
+    127.0.0.1 (verified live — a cross-site Origin plus a local path got the file
+    uploaded and described back before the origin check existed)."""
+
+    def test_local_cli_or_desktop_app_allowed(self):
+        self.assertTrue(_client_may_send_paths(_FakeRequest("127.0.0.1")))
+
+    def test_local_web_ui_allowed(self):
+        req = _FakeRequest("127.0.0.1", {"origin": "http://localhost:8081",
+                                         "host": "localhost:8081"})
+        self.assertTrue(_client_may_send_paths(req))
+
+    def test_drive_by_from_another_site_refused(self):
+        req = _FakeRequest("127.0.0.1", {"origin": "https://evil.example",
+                                         "host": "localhost:8081"})
+        self.assertFalse(_client_may_send_paths(req))
+
+    def test_lan_client_refused(self):
+        self.assertFalse(_client_may_send_paths(_FakeRequest("192.168.1.99")))
+
+    def test_operator_opt_in_overrides(self):
+        orig = server._ALLOW_REMOTE_FILE_PATHS
+        server._ALLOW_REMOTE_FILE_PATHS = True
+        try:
+            self.assertTrue(_client_may_send_paths(_FakeRequest("192.168.1.99")))
+        finally:
+            server._ALLOW_REMOTE_FILE_PATHS = orig
 
 
 if __name__ == "__main__":

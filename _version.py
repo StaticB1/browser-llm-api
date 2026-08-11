@@ -5,4 +5,4 @@ web UI / widget footer) and read by ``pyproject.toml`` (dynamic version). Bump
 here on every release and tag the repo to match (e.g. ``git tag v0.1.0``).
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

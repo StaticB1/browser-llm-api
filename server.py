@@ -234,8 +234,9 @@ def _resolve_local_attachment(spec: str, *, allow_local_paths: bool) -> Path:
     if not allow_local_paths:
         raise HTTPException(
             status_code=400,
-            detail="file-path attachments are only accepted from localhost; send the "
-                   "image as a data: URL (or set ALLOW_REMOTE_FILE_PATHS=1 on the server)")
+            detail="file-path attachments are only accepted from a local, same-origin "
+                   "caller; send the image as a data: URL (or set "
+                   "ALLOW_REMOTE_FILE_PATHS=1 on the server)")
     raw = spec.strip()
     if raw[:7].lower() == "file://":
         from urllib.parse import unquote, urlparse
@@ -1220,11 +1221,19 @@ def _client_may_send_paths(request: Request) -> bool:
     """Local-path attachments are a file-read primitive, so only loopback callers
     get them by default (the web UI, desktop app and CLI on this box). A LAN
     client with the API key must send bytes instead — unless the operator opts in
-    with ALLOW_REMOTE_FILE_PATHS=1."""
+    with ALLOW_REMOTE_FILE_PATHS=1.
+
+    Loopback is necessary but not sufficient: CORS is open so the widget can be
+    embedded anywhere, which means a page on ANY site can make the operator's
+    browser POST here, arriving from 127.0.0.1. Without the origin check that
+    drive-by could name any path on this box and read back what the model saw."""
     if _ALLOW_REMOTE_FILE_PATHS:
         return True
     client = request.client.host if request.client else None
-    return authz.is_loopback(client)
+    if not authz.is_loopback(client):
+        return False
+    return authz.origin_is_trusted(request.headers.get("origin"),
+                                   request.headers.get("host"))
 
 
 @app.post("/v1/chat/completions")
@@ -1478,11 +1487,13 @@ async def images_edits(request: Request):
 # ---------------------------------------------------------------------------
 def main():
     """Console entry point (``browser-llm``). Host/port via ``BROWSER_LLM_HOST``
-    / ``BROWSER_LLM_PORT`` (defaults 0.0.0.0:8081). Note: the sites need a
-    non-headless Chrome — on a headless box launch via ``serve.sh`` (Xvfb) rather
-    than calling this directly."""
+    / ``BROWSER_LLM_PORT`` (defaults 127.0.0.1:8081 — this server drives your
+    logged-in accounts, so it stays off the network until you ask for it; set
+    ``BROWSER_LLM_HOST=0.0.0.0`` plus ``BROWSER_LLM_API_KEY`` to share it).
+    Note: the sites need a non-headless Chrome — on a headless box launch via
+    ``serve.sh`` (Xvfb) rather than calling this directly."""
     import uvicorn
-    host = os.environ.get("BROWSER_LLM_HOST", "0.0.0.0")
+    host = os.environ.get("BROWSER_LLM_HOST", "127.0.0.1")
     port = int(os.environ.get("BROWSER_LLM_PORT", "8081"))
     logger.info(f"Browser LLM API v{__version__} → http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)
