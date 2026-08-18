@@ -4,7 +4,7 @@
 
 Browser LLM API drives a real, logged-in **ChatGPT** and **Gemini** session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and re-exposes it as the same HTTP API your tools already speak. Point any OpenAI SDK, script, or app at `http://localhost:8081/v1` and get **streaming chat, vision (send images *in*), and image generation + editing** — powered by your existing subscription (or free tier), running entirely on your own machine.
 
-[![CI](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml/badge.svg)](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml) ![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
+![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
 
 ```python
 # It's the OpenAI SDK you already know — just change the base URL.

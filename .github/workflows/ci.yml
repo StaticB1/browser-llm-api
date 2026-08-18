@@ -1,3 +1,9 @@
+# Runs on GitHub-hosted runners, which need the account's Actions billing to be in
+# good standing — as of 2026-08-18 it is not, and every run is refused before it
+# starts ("job was not started because your account is locked due to a billing
+# issue"). Nothing below is wrong; each step was verified locally. Once billing is
+# sorted, put the badge back at the top of README.md:
+#   [![CI](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml/badge.svg)](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml)
 name: CI
 
 on:
