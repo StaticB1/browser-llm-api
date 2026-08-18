@@ -161,6 +161,45 @@ def knockout_bg(img, tol=28):
     return img
 
 
+def render(prompt, out, model=None, refs=None, timeout=440, width=None, height=None,
+           square_size=None, fit="cover", fmt=None, favicon=False, knockout=False,
+           quality=88):
+    """Generate → shape → write, and return the output path.
+
+    The whole wrapper as one call, so callers other than the CLI (the MCP server)
+    don't have to reimplement the shaping order: crop/resize first, knockout
+    after, format last."""
+    what = f"editing {len(refs)} ref(s)" if refs else "generating"
+    print(f"[gen_asset] {what} ({model or 'default'}): {prompt[:70]}…", file=sys.stderr)
+    img = generate(prompt, model=model, timeout=timeout, refs=refs)
+
+    if square_size:
+        img = square(img, square_size)
+    elif width and height:
+        img = resize_cover(img, width, height) if fit == "cover" \
+            else resize_contain(img, width, height)
+
+    if knockout:
+        img = knockout_bg(img)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    fmt = (fmt or out.rsplit(".", 1)[-1]).lower()
+
+    if favicon or fmt == "ico":
+        icon = img if img.mode == "RGBA" else img.convert("RGBA")
+        icon = square(icon, 256)
+        icon.save(out, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+    elif fmt in ("jpg", "jpeg"):
+        img.convert("RGB").save(out, quality=quality)
+    elif fmt == "webp":
+        img.save(out, quality=quality, method=6)
+    else:  # png and anything else
+        img.save(out)
+
+    print(f"[gen_asset] wrote {out}  ({img.size[0]}x{img.size[1]}, {fmt})", file=sys.stderr)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="Generate a website image asset via the browser-LLM image API.")
     ap.add_argument("--prompt", required=True)
@@ -184,35 +223,12 @@ def main():
     ap.add_argument("--quality", type=int, default=88)
     args = ap.parse_args()
 
-    what = f"editing {len(args.refs)} ref(s)" if args.refs else "generating"
-    print(f"[gen_asset] {what} ({args.model or 'default'}): {args.prompt[:70]}…", file=sys.stderr)
-    img = generate(args.prompt, model=args.model, timeout=args.timeout, refs=args.refs)
-
-    if args.square:
-        img = square(img, args.square)
-    elif args.width and args.height:
-        img = resize_cover(img, args.width, args.height) if args.fit == "cover" \
-            else resize_contain(img, args.width, args.height)
-
-    if args.knockout:
-        img = knockout_bg(img)
-
-    out = args.out
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    fmt = (args.format or out.rsplit(".", 1)[-1]).lower()
-
-    if args.favicon or fmt == "ico":
-        icon = img if img.mode == "RGBA" else img.convert("RGBA")
-        icon = square(icon, 256)
-        icon.save(out, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
-    elif fmt in ("jpg", "jpeg"):
-        img.convert("RGB").save(out, quality=args.quality)
-    elif fmt == "webp":
-        img.save(out, quality=args.quality, method=6)
-    else:  # png and anything else
-        img.save(out)
-
-    print(f"[gen_asset] wrote {out}  ({img.size[0]}x{img.size[1]}, {fmt})", file=sys.stderr)
+    out = render(
+        prompt=args.prompt, out=args.out, model=args.model, refs=args.refs,
+        timeout=args.timeout, width=args.width, height=args.height,
+        square_size=args.square, fit=args.fit, fmt=args.format,
+        favicon=args.favicon, knockout=args.knockout, quality=args.quality,
+    )
     print(out)
 
 

@@ -38,6 +38,7 @@ assets = ["Pillow>=10"]
 
 [project.scripts]
 browser-llm = "server:main"
+browser-llm-mcp = "mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/StaticB1/browser-llm-api"
@@ -48,7 +49,7 @@ Issues = "https://github.com/StaticB1/browser-llm-api/issues"
 # in webui/ are resolved relative to server.py at runtime, so install editable
 # from a clone (`pip install -e .`) — that keeps the source (and webui/) in place.
 [tool.setuptools]
-py-modules = ["server", "authz", "client", "login", "gen_asset", "gemini_bot", "_version"]
+py-modules = ["server", "authz", "client", "login", "gen_asset", "mcp_server", "gemini_bot", "_version"]
 
 [tool.setuptools.packages.find]
 include = ["providers*"]

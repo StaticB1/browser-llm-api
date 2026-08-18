@@ -333,6 +333,41 @@ image input). All other models still run in their own local browser. Different n
 [Tailscale](https://tailscale.com) tailnet and use the tailnet IP instead of the LAN IP — nothing
 else changes.
 
+## MCP server
+
+Any MCP client can drive the logged-in sessions as native tools, instead of shelling
+out to `client.py` and passing files around:
+
+```bash
+claude mcp add browser-llm -- "$PWD/venv/bin/python" "$PWD/mcp_server.py"
+```
+
+Or, in a client that reads a JSON config (Claude Desktop, Cursor, Zed):
+
+```json
+{
+  "mcpServers": {
+    "browser-llm": {
+      "command": "/path/to/browser-llm-api/venv/bin/python",
+      "args": ["/path/to/browser-llm-api/mcp_server.py"]
+    }
+  }
+}
+```
+
+| tool | does |
+|------|------|
+| `ask` | prompt (+ `images`, `system`, `model`) → the reply. `out` writes it to a file and returns the path, which keeps a large HTML answer out of the agent's context; `strip_fences` drops ``` lines. |
+| `generate_image` | prompt (+ `refs` for image-to-image) → a written asset, with the same resize/crop/favicon/knockout shaping as `gen_asset.py`. |
+| `list_models` | the provider ids this server can drive. |
+| `health` | reachable? which providers are logged in? a request in flight? |
+
+Stdio JSON-RPC, no dependencies beyond the server's own. Tool calls run on worker
+threads, so a four-minute image generation never blocks a ping or a second call —
+requests still serialise per provider upstream, which is where the browser lock is.
+Point it at another host with `BROWSER_LLM_API`, and set `BROWSER_LLM_API_KEY` if
+that host has one.
+
 ## Project layout
 
 - **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, `/images/<provider>/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo`). Also owns the attachment layer: turning whatever a client sent (data URL, base64, http URL, multipart bytes, local path) into files for the browser, and the loopback-only path policy. `main()` is the `browser-llm` console entry point.
@@ -341,6 +376,7 @@ else changes.
 - **`desktop/`** — native Linux desktop app + tray widget (GTK3). See [`desktop/README.md`](desktop/README.md).
 - **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt`.
 - **`client.py`** — tiny stdlib CLI/import client for the API (`./client.py "prompt"`, `--image FILE` to send images, or `from client import ask`).
+- **`mcp_server.py`** — MCP (Model Context Protocol) stdio server, stdlib only: exposes `ask`, `generate_image`, `list_models` and `health` as native tools to Claude Code, Claude Desktop, Cursor or Zed. `main()` is the `browser-llm-mcp` console entry point.
 - **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow); `--ref FILE` restyles an existing asset instead of generating from scratch.
 - **`serve.sh`** / **`install-service.sh`** / **`mode.sh`** / **`browser-llm-api.service.template`** — run the server and manage it as a background `systemd --user` service (generated for this clone).
 - **`gemini_bot.py`** — standalone single-prompt Gemini prototype.

@@ -132,7 +132,9 @@ tests/               # unit tests (no browser needed):
                      #   test_completion_tracker.py (done-decision incl. status
                      #   placeholders), test_authz.py (key gating, origin trust,
                      #   remote parsing), test_attachments.py (attachment specs/
-                     #   limits/local-path + origin policy/remote inlining)
+                     #   limits/local-path + origin policy/remote inlining),
+                     #   test_mcp.py (JSON-RPC framing, tools/list contract, error
+                     #   mapping, off-the-read-loop dispatch)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
@@ -144,9 +146,20 @@ providers/
                      #   upload via the hidden upload-photos-input; excludes INPUT images
                      #   from generated-image scans; shimmer-aware text/generating reads
 login.py             # generic re-auth helper:  python login.py gemini|chatgpt
+mcp_server.py        # MCP stdio server (JSON-RPC 2.0, stdlib only, no `mcp` package):
+                     #   tools ask / generate_image / list_models / health. Thin client of
+                     #   the HTTP API — imports client.ask and gen_asset.render rather than
+                     #   reimplementing them. tools/call runs on a worker thread and main()
+                     #   joins in-flight threads on EOF (a dropped stdin must not lose a
+                     #   reply mid-image-gen). stdout carries protocol frames ONLY — every
+                     #   log line goes to stderr or the client sees corrupt JSON.
+                     #   Console entry point `browser-llm-mcp`. Tests: tests/test_mcp.py.
 gen_asset.py         # CLI wrapper: POST /v1/images/generations (no model → DEFAULT_PROVIDER),
                      #   or /v1/images/edits with `--ref FILE` (image-to-image restyle),
-                     #   then Pillow post-process (resize/crop/favicon/knockout) → asset file
+                     #   then Pillow post-process (resize/crop/favicon/knockout) → asset file.
+                     #   `render()` is the whole wrapper as one call (generate → shape →
+                     #   write → return path); main() is just argparse over it, and
+                     #   mcp_server calls the same function. Keep them sharing it.
 AGENT_IMAGE_GUIDE.md # instructions to hand an AI agent for generating site image assets
 gemini_bot.py        # standalone single-prompt prototype (Gemini only). UNCHANGED, not part of the server.
 serve.sh             # run the server: venv python + display auto-detect (real $DISPLAY else Xvfb)
@@ -361,7 +374,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz and attachments have unit tests** — `./venv/bin/python -m unittest
-  discover -s tests` (83 tests, no browser). If you change the done-decision logic in
+  discover -s tests` (97 tests, no browser). If you change the done-decision logic in
   `providers/base.py` or the attachment layer in `server.py`, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
   to swallow `KeyError` from unknown CDP events (e.g. `DOM.adoptedStyleSheetsModified`). Called at
@@ -451,6 +464,35 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `serve.sh` (venv python +
   display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/browser-llm`
   (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
+- **Two tabs in one Chrome cannot drive two ChatGPT conversations (tried and reverted
+  2026-08-18).** A per-provider tab pool replacing the `asyncio.Lock` *looks* like the obvious way
+  to run requests in parallel, and mechanically it works: two tabs navigate and submit 0.2s apart,
+  confirmed in the logs across three runs. But only ONE answer ever completes — the other reads
+  **0 chars for the full 421s deadline** and times out. Chrome's background-tab throttling was the
+  obvious suspect and is NOT the cause: `--disable-background-timer-throttling`,
+  `--disable-backgrounding-occluded-windows` and `--disable-renderer-backgrounding` changed
+  nothing. The remaining explanation is that ChatGPT's SPA does not tolerate two live
+  conversations in one profile (it multiplexes one WebSocket, `ws.chatgpt.com`), so the second
+  tab never renders an assistant turn for `get_response_text` to read. **Real concurrency needs
+  one browser per slot — a separate profile per tab — not a tab pool.** That is a much bigger
+  change: profile cloning, a login per profile, and roughly a Chrome's worth of RAM each. Don't
+  re-attempt the tab-pool version; the per-provider lock stays.
+- **Gemini image generation is dead on this box (2026-08-18).** Gemini *text* works, but any
+  image request comes back in ~15s with no image and `/v1/images/generations` answers 502
+  `"gemini-browser did not return an image"`. Asked in words, Gemini says: *"I can search for
+  images, but can't create any for you at the moment. You might be signed out or image creation
+  may not be available in your location yet."* Account/region, not a code bug — reproduced with
+  raw curl against the endpoint. It matters because `DEFAULT_PROVIDER=gemini-browser`, so every
+  image call that omits `model` fails: **pass `--model chatgpt-browser` / `"model":
+  "chatgpt-browser"` for assets** until Gemini is re-authed on a real display.
+- **ChatGPT image gen DID work under the Xvfb display `:98` on 2026-08-18** — a 512×512 knockout
+  PNG in ~90s via the service as installed. That contradicts the "requires a real display" note
+  below, which was written before the SwiftShader flags landed in `CHROME_ARGS`. One dated
+  observation, not a refutation: if canvas gen stalls again, a real display is still the fix.
+- **ChatGPT does NOT honour a `?model=` URL parameter** (probed live 2026-08-18 against the
+  logged-in profile: `chatgpt.com/?model=gpt-5-thinking` and `?model=gpt-5-instant` both redirect
+  to bare `chatgpt.com/`). Per-request model selection would have to click the model switcher in
+  the DOM. Don't add a `?model=` shortcut believing it works.
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
 - **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; `serve.sh` clears both
   profiles' locks on every start, so the service and a foreground run are both covered. Running
