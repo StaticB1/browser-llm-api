@@ -145,9 +145,11 @@ def knockout_bg(img, tol=28):
     seen = bytearray(w * h)
     dq = collections.deque()
     for x in range(w):
-        dq.append((x, 0)); dq.append((x, h - 1))
+        dq.append((x, 0))
+        dq.append((x, h - 1))
     for y in range(h):
-        dq.append((0, y)); dq.append((w - 1, y))
+        dq.append((0, y))
+        dq.append((w - 1, y))
     while dq:
         x, y = dq.popleft()
         if x < 0 or y < 0 or x >= w or y >= h or seen[y * w + x]:

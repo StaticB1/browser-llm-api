@@ -87,8 +87,18 @@ server.py            # FastAPI app, port 8081. Model→provider router, the gene
                      #   _metrics + _record_request) + /api/gallery, and
                      #   /v1/images/edits (multipart or JSON).
 _version.py          # single source of truth for __version__ (read by pyproject + server).
-pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` entry point.
+pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` +
+                     #   `browser-llm-mcp` entry points, and the ruff config.
                      #   Flat layout — install editable from a clone (`pip install -e .`).
+                     #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
+                     #   exception handlers in server.py for no behaviour change. The repo
+                     #   is clean at that setting — keep it that way, CI fails otherwise.
+.github/workflows/ci.yml  # lint + the 97 unit tests + an editable install + a live MCP
+                     #   handshake, on every push and PR. No browser, no network, no secrets,
+                     #   so a green build means the pure logic holds, NOT that the sites still
+                     #   scrape. Nothing here can catch a DOM change; only a real request can.
+SECURITY.md          # threat model + how to report. The origin-trust hole (2026-08-11) is
+                     #   written up there as well as in the gotchas below.
 LICENSE              # MIT.
 README.md            # project overview / usage.
 QUICKSTART.md        # fast-path setup guide.

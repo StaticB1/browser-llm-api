@@ -58,6 +58,14 @@ existing asset instead of starting from scratch):
   --out hero.webp --width 1600 --height 900
 ```
 
+**From a coding agent** (MCP — the agent gets real tools instead of a shell command):
+```bash
+claude mcp add browser-llm -- "$PWD/venv/bin/python" "$PWD/mcp_server.py"
+```
+Then ask it to look at a screenshot or make an asset: `ask` takes images and can write its answer
+straight to a file, `generate_image` writes the asset and returns the path. Same config shape works
+in Claude Desktop, Cursor and Zed — see the README.
+
 **From any Python project** (standard OpenAI SDK — no code changes, just the base URL):
 ```python
 from openai import OpenAI
@@ -72,7 +80,9 @@ key `local`, model `chatgpt-browser` or `gemini-browser`.
 
 - **`model`** picks the backend: `gemini-browser` or `chatgpt-browser`. Default is `gemini-browser` (override with `DEFAULT_PROVIDER`).
 - **ChatGPT image gen needs a real display.** The service runs headless by default; `./mode.sh visible` switches it to the real display (enables ChatGPT images), `./mode.sh headless` switches back. Gemini and all text work headless.
-- **One request at a time per provider** — calls queue, they don't run in parallel. Latency is real:
+- **One request at a time per provider** — calls queue, they don't run in parallel. ChatGPT and
+  Gemini do run concurrently with each other. Two conversations inside one provider is not
+  something browser automation can do: it was tried and the second one never completes. Latency is real:
   text ~10–40s, images ~30s–4 min. Set generous client timeouts (the bundled client defaults to 440s).
 - **Empty replies?** the session expired → re-run `login.py <provider>` (see above).
 - **Verify generated code/HTML.** The answer is scraped from the rendered page, so long code

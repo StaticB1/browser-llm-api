@@ -269,7 +269,7 @@ async def main():
             logger.error("Input box not found.")
             await page.save_screenshot('error_no_input.png')
             return
-        
+
 
         # --- Type prompt ---
         prompt = (

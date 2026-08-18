@@ -4,7 +4,7 @@
 
 Browser LLM API drives a real, logged-in **ChatGPT** and **Gemini** session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and re-exposes it as the same HTTP API your tools already speak. Point any OpenAI SDK, script, or app at `http://localhost:8081/v1` and get **streaming chat, vision (send images *in*), and image generation + editing** — powered by your existing subscription (or free tier), running entirely on your own machine.
 
-![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
+[![CI](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml/badge.svg)](https://github.com/StaticB1/browser-llm-api/actions/workflows/ci.yml) ![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Providers: ChatGPT · Gemini](https://img.shields.io/badge/providers-ChatGPT%20%C2%B7%20Gemini-8b5cf6)
 
 ```python
 # It's the OpenAI SDK you already know — just change the base URL.
@@ -24,7 +24,8 @@ client.chat.completions.create(
 - 🎨 **Chat *and* images — both directions.** Generate images from a prompt (returned as a link **and** a saved file), and **send images in**: vision questions and image-to-image editing, by uploading into the provider's own composer.
 - 🧩 **Two providers, one field.** Switch between ChatGPT and Gemini per request via the `model` field. Run both at once — they're independent.
 - 🏠 **Local & private to your LAN.** Everything runs on your box; nothing goes to a third-party API broker.
-- 🖥️ **Use it four ways** (below): REST API, a web dashboard, an embeddable chat widget, or a **native Linux desktop app**.
+- 🤖 **Native tools for coding agents.** A built-in MCP server hands `ask`, `generate_image`, `list_models` and `health` to Claude Code, Claude Desktop, Cursor or Zed, so an agent sends a screenshot and gets back a written file instead of shelling out to a CLI.
+- 🖥️ **Use it five ways** (below): REST API, MCP, a web dashboard, an embeddable chat widget, or a **native Linux desktop app**.
 
 > **The honest catch:** this automates logged-in sessions on sites that have **no official API for this** — so it's inherently fragile (a site UI change can break it), may conflict with each provider's Terms of Service, and is meant for **personal / experimental** use on your own account. See the [Disclaimer](#disclaimer).
 
@@ -33,6 +34,7 @@ client.chat.completions.create(
 | Surface | What it is | Where |
 |---------|-----------|-------|
 | 🔌 **OpenAI-compatible API** | `/v1/chat/completions` (text + vision) + `/v1/images/generations` + `/v1/images/edits` + `/v1/models` | `http://localhost:8081/v1` |
+| 🤖 **MCP server** | `ask` / `generate_image` / `list_models` / `health` over stdio JSON-RPC, for Claude Code, Claude Desktop, Cursor, Zed | `mcp_server.py` |
 | 🖥️ **Web dashboard** | Streaming chat with image attachments, image generation & editing, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
 | 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble (with 📎 image attach) onto any page on your network | `/widget.js` (demo at `/demo`) |
 | 🐧 **Native desktop app** | GTK tray widget that generates/edits images for your active **VS Code project**, + a full Chat / Images / Gallery / Status window (Linux) | [`desktop/`](desktop/README.md) |
@@ -398,10 +400,17 @@ streamed answer / image done, including transient "Analyzing image"-style placeh
 layer (spec forms, size/count limits, the local-and-same-origin path policy, remote inlining) in
 `server.py`.
 
+The MCP layer is covered too: protocol framing, the `tools/list` contract, error mapping and the
+off-the-read-loop dispatch that keeps a four-minute image generation from stalling a ping.
+
 ```bash
-./venv/bin/python -m unittest discover -s tests -v     # tests/test_completion_tracker.py,
-                                                       # tests/test_authz.py, tests/test_attachments.py
+./venv/bin/python -m unittest discover -s tests -v     # 97 tests, ~0.02s
+ruff check .                                           # lint, config in pyproject.toml
 ```
+
+Both run in CI on every push and pull request, along with an editable install and a live MCP
+handshake — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml). No browser is involved in
+any of it, so a green build says the pure logic is sound, not that the sites still scrape.
 
 ## Authors & acknowledgments
 

@@ -56,3 +56,19 @@ include = ["providers*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "_version.__version__" }
+
+[tool.ruff]
+line-length = 110
+exclude = ["venv", "build", "dist", "graphify-out", "*_profile"]
+
+[tool.ruff.lint]
+# pycodestyle + pyflakes + warnings. Deliberately NOT bugbear: its B904
+# ("raise ... from err") would mean touching eight exception handlers in
+# server.py, which is the most fragile file here, for no behaviour change.
+select = ["E", "F", "W"]
+ignore = ["E501"]   # length is enforced by line-length above, not as an error
+
+[tool.ruff.lint.per-file-ignores]
+# PyGObject requires gi.require_version() to run BEFORE the gi.repository
+# imports, so module-level imports genuinely cannot all sit at the top.
+"desktop/browser_llm_desktop.py" = ["E402"]

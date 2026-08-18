@@ -179,7 +179,8 @@ def tool_ask(args):
         images=args.get("images") or None,
     )
     if args.get("strip_fences"):
-        text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("```"))
+        text = "\n".join(ln for ln in text.splitlines()
+                         if not ln.lstrip().startswith("```"))
     out = args.get("out")
     if out:
         out = os.path.abspath(os.path.expanduser(out))

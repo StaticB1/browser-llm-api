@@ -24,7 +24,7 @@ import sys
 
 import nodriver as uc
 
-from providers import PROVIDERS, get_provider, patch_cdp, CHROME_ARGS
+from providers import PROVIDERS, patch_cdp, CHROME_ARGS
 
 patch_cdp()
 

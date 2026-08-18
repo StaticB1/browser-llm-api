@@ -6,9 +6,7 @@ base64, http(s) URL, local path, multipart bytes) into files on disk for the
 provider's file picker, plus multimodal message flattening and the local-path
 policy that keeps a LAN client from reading files off this box.
 """
-import asyncio
 import base64
-import os
 import sys
 import unittest
 from pathlib import Path

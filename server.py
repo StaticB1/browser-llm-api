@@ -50,7 +50,7 @@ import uuid
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional, Union
+from typing import AsyncGenerator, Optional, Union
 
 import nodriver as uc
 import websockets.exceptions

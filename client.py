@@ -114,7 +114,8 @@ def main():
                timeout=a.timeout, stream=a.stream, on_delta=emit, images=a.images)
 
     if a.strip_fences:
-        text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("```"))
+        text = "\n".join(ln for ln in text.splitlines()
+                     if not ln.lstrip().startswith("```"))
 
     if a.out:
         with open(a.out, "w") as f:
