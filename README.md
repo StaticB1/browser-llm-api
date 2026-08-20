@@ -100,8 +100,10 @@ rounded composer.
 - **Create image** — one-line prompt to image, with an elapsed timer, since free-tier generation
   takes 30s to 4min. Attach reference images to switch to **image-to-image** (the request goes to
   `/v1/images/edits`).
-- **Gallery** — every image saved under `GEMINI_IMAGE_DIR`, newest first, filterable by provider,
-  with multi-select delete.
+- **Gallery** — every image saved under `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
+  Select, then tick tiles or take the whole page with "Select all shown", and delete. The gallery is
+  the server's own image folder, not a view of the chats: an imported conversation's pictures live
+  on the provider's site, so deleting that chat cannot remove anything here.
 - **Server** — per-provider telemetry (requests, errors, average and last latency, images until
   recycle), server info (version, uptime, display, image directory), and a copy-paste **embed
   snippet** with a Preview button.

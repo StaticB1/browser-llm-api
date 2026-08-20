@@ -575,6 +575,7 @@
             </select>
             <button class="bt" id="galrefresh">Refresh</button>
             <button class="bt" id="galselect">Select</button>
+            <button class="bt" id="galall" hidden>Select all shown</button>
             <button class="bt dangersolid" id="galdel" hidden>Delete selected</button>
           </div>
           <div class="grid" id="galgrid"></div>
@@ -1862,7 +1863,11 @@ const TICK_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" st
 
 function paintGalBar(){
   const n = galPicked.size;
+  const tiles = $$("#galgrid a");
   $("#galselect").textContent = galPicking ? "Done" : "Select";
+  $("#galall").hidden = !galPicking;
+  $("#galall").textContent = tiles.length && tiles.every(a => galPicked.has(a.dataset.url))
+    ? "Clear selection" : "Select all shown";
   $("#galdel").hidden = !galPicking;
   $("#galdel").disabled = !n;
   $("#galdel").textContent = n ? "Delete " + n : "Delete selected";
@@ -1884,15 +1889,24 @@ async function loadGallery(){
         esc(im.provider) + "</span>" +
         (galPicking ? '<span class="pick">' + (on ? TICK_SVG : "") + "</span>" : "") + "</a>";
     }).join("");
+    /* Toggle the tile in place. Repainting the whole grid per click meant a
+       fresh /api/gallery fetch and 120 <img> elements rebuilt for every tick,
+       which made selecting more than a handful too slow to bother with. */
     $$("#galgrid a").forEach(a => a.onclick = e => {
       if (!galPicking) return;
       e.preventDefault();
-      const u = a.dataset.url;
-      if (galPicked.has(u)) galPicked.delete(u); else galPicked.add(u);
-      loadGallery();
+      paintTile(a, !galPicked.has(a.dataset.url));
+      paintGalBar();
     });
     paintGalBar();
   }catch(e){ $("#galinfo").textContent = "The gallery is unavailable: " + e; }
+}
+function paintTile(a, on){
+  const u = a.dataset.url;
+  if (on) galPicked.add(u); else galPicked.delete(u);
+  a.classList.toggle("picked", on);
+  const pick = a.querySelector(".pick");
+  if (pick) pick.innerHTML = on ? TICK_SVG : "";
 }
 $("#galrefresh").onclick = loadGallery;
 $("#galfilter").onchange = loadGallery;
@@ -1900,6 +1914,12 @@ $("#galselect").onclick = () => {
   galPicking = !galPicking;
   if (!galPicking) galPicked.clear();
   loadGallery();
+};
+$("#galall").onclick = () => {
+  const tiles = $$("#galgrid a");
+  const on = !tiles.every(a => galPicked.has(a.dataset.url));
+  tiles.forEach(a => paintTile(a, on));
+  paintGalBar();
 };
 $("#galdel").onclick = () => {
   const files = [...galPicked];
