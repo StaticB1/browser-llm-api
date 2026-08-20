@@ -35,8 +35,8 @@ client.chat.completions.create(
 |---------|-----------|-------|
 | 🔌 **OpenAI-compatible API** | `/v1/chat/completions` (text + vision) + `/v1/images/generations` + `/v1/images/edits` + `/v1/models` | `http://localhost:8081/v1` |
 | 🤖 **MCP server** | `ask` / `generate_image` / `list_models` / `health` over stdio JSON-RPC, for Claude Code, Claude Desktop, Cursor, Zed | `mcp_server.py` |
-| 🖥️ **Web dashboard** | Streaming chat with image attachments, image generation & editing, a gallery, and a live status tab — single file, no build step | `http://localhost:8081/` |
-| 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble (with 📎 image attach) onto any page on your network | `/widget.js` (demo at `/demo`) |
+| 🖥️ **Web dashboard** | Chat with saved history you can search, rename and delete, image attachments, image generation and editing, a gallery, live telemetry. Single file, no build step | `http://localhost:8081/` |
+| 💬 **Embeddable widget** | One `<script>` tag drops a floating chat bubble onto any page on your network, with image attach and a remembered thread | `/widget.js` (demo at `/demo`) |
 | 🐧 **Native desktop app** | GTK tray widget that generates/edits images for your active **VS Code project**, + a full Chat / Images / Gallery / Status window (Linux) | [`desktop/`](desktop/README.md) |
 
 | `model` | Backend | Images out | Images in |
@@ -65,7 +65,7 @@ curl http://localhost:8081/v1/chat/completions \
   -d '{"model":"chatgpt-browser","messages":[{"role":"user","content":"hello!"}]}'
 ```
 
-Then open **`http://localhost:8081/`** for the web dashboard, or run the [native desktop app](#native-desktop-app). You need **Google Chrome** and **Python 3.12** installed; on a headless box also install the system `xvfb` package.
+Then open **`http://localhost:8081/`** for the dashboard, or run the [native desktop app](#native-desktop-app). You need **Google Chrome** and **Python 3.12** installed; on a headless box also install the system `xvfb` package.
 
 > First answer empty, or you hit a sign-in / "verify you're human" wall? That provider's session just needs a fresh login — see [Authentication](#authentication).
 
@@ -75,16 +75,32 @@ The server keeps **one persistent Chrome per provider** (profile in `gemini_prof
 
 > **Note on ChatGPT:** the ChatGPT selectors are best-guess against the live UI (which changes often and sits behind Cloudflare/anti-bot) and may need tweaking. Automating chatgpt.com may also conflict with OpenAI's ToS — use accordingly.
 
-## Web UI
+## Web dashboard
 
-Open **`http://localhost:8081/`** in a browser. Four tabs:
+Open **`http://localhost:8081/`**. It is shaped like the chat app you already use: a history
+sidebar on the left, one centred reading column, plain assistant prose, grey user bubbles, a
+rounded composer.
 
-- **Chat** — pick a provider, chat with streaming replies and multi-turn context; optional system prompt; generated images render inline. Attach images with **📎** (or paste / drag-drop them onto the composer) to ask about a screenshot or photo — thumbnails show in your message and stay in the conversation, so follow-up questions still see them. Enter sends, Shift+Enter for a newline.
-- **Image** — one-line prompt → image, with an elapsed-time indicator (free-tier image gen takes 30s–4min). Attach reference image(s) with **📎** to switch to **image-to-image** (the request goes to `/v1/images/edits`).
-- **Gallery** — every image saved to `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
-- **Status** — live per-provider telemetry (requests, errors, avg + last latency, images-until-recycle countdown), server info (version, uptime, display, image dir), and a copy-paste **embed snippet** with a "Preview widget on this page" button.
+- **Chat** — streaming replies with multi-turn context, Enter to send, Shift+Enter for a newline.
+  The send button becomes a **stop** button while an answer streams. Attach images with the plus
+  button, or paste, or drag-drop them onto the composer; thumbnails stay in the conversation so
+  follow-up questions still see them. Code comes back as a card with a language label and a Copy
+  button. Hover a turn to copy it, or retry the last answer.
+- **Chat history** — every conversation is kept in this browser (`localStorage`), grouped by day,
+  searchable by title and body. Rename or delete one from its row, delete all from the top-bar
+  menu, export one as JSON. New chat is `Ctrl+Shift+O`.
+- **Create image** — one-line prompt to image, with an elapsed timer, since free-tier generation
+  takes 30s to 4min. Attach reference images to switch to **image-to-image** (the request goes to
+  `/v1/images/edits`).
+- **Gallery** — every image saved under `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
+- **Server** — per-provider telemetry (requests, errors, average and last latency, images until
+  recycle), server info (version, uptime, display, image directory), and a copy-paste **embed
+  snippet** with a Preview button.
 
-The header shows each provider's live state (off / idle / busy — click the pills to jump to Status), and the footer shows the version, server uptime, and where images are being saved. The UI talks to the same JSON API documented below (`/api/status` and `/api/gallery` back the status bar and gallery).
+The model picker sits in the top bar and shows each provider's live state; the pill beside it says
+whether the current provider is ready or busy. The theme switch in the sidebar footer has three
+states, light, auto and dark, and auto follows the system setting live. `/api/status` and
+`/api/gallery` back the status readouts and the gallery.
 
 ## Embeddable widget
 
@@ -94,7 +110,7 @@ Drop a floating chat bubble onto **any** page on your network with one line — 
 <script src="http://localhost:8081/widget.js"></script>
 ```
 
-The widget is self-contained and **Shadow-DOM isolated** (host-page CSS can't leak in or out). It can attach images too — 📎, paste, or drag-drop onto the composer. It auto-discovers the API base from its own script URL, so the host page can be on any origin/port — the server already sends open CORS headers. See a live demo at **`http://localhost:8081/demo`**.
+The widget is self-contained and **Shadow-DOM isolated** (host-page CSS can't leak in or out). It carries the same look as the dashboard: grey user bubbles, plain assistant prose, code cards with Copy, a stop button mid-answer, and full-screen sizing on a phone. The thread survives a page reload, and the pencil in its header starts a fresh one. It can attach images too, through the plus button, paste, or drag-drop onto the composer. It auto-discovers the API base from its own script URL, so the host page can be on any origin/port — the server already sends open CORS headers. See a live demo at **`http://localhost:8081/demo`**.
 
 Configure with `data-*` attributes on the script tag:
 
@@ -102,11 +118,13 @@ Configure with `data-*` attributes on the script tag:
 |-----------|---------|---------|
 | `data-provider` | server default | `gemini-browser` / `chatgpt-browser` |
 | `data-title` | `Ask AI` | header text |
-| `data-accent` | `#6ea8fe` | accent color |
+| `data-accent` | theme colour | pins one colour for the bubble and send button in both themes |
 | `data-position` | `br` | `br` (bottom-right) / `bl` (bottom-left) |
 | `data-greeting` | friendly hi | first assistant line |
 | `data-system` | — | a system prompt sent with every turn |
 | `data-open` | — | `1` to start expanded |
+| `data-persist` | `1` | `0` forgets the thread on reload |
+| `data-theme` | `auto` | `light` / `dark` / `auto`, which follows the host page |
 | `data-attach` | `1` | `0` hides the 📎 image-attach button |
 
 Runtime handle: `window.BrowserLLMWidget.{open, close, reset, config}` — e.g. `BrowserLLMWidget.config({accent:'#9b8cfb', provider:'chatgpt-browser'})`. Press `Esc` to close.

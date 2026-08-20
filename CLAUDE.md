@@ -12,35 +12,49 @@ web session stored in a local Chrome profile. Prompts are typed into the page, i
 uploaded through the site's own file picker, and answers (text and generated images) are scraped
 back out of the DOM.
 
-A **mini web UI** (`webui/index.html`, single file, no build step) is served at
-`http://localhost:8081/` — streaming chat (with 📎 image attachments), image generation and
-image-to-image, gallery of saved images, a live per-provider status bar, and a **Status tab** with live telemetry (requests / errors / avg+last
-latency / last-error / recycle countdown per provider), backed by `/api/status` + `/api/gallery`.
+A **web dashboard** (`webui/index.html`, single file, no build step) is served at
+`http://localhost:8081/`. Layout and colour follow the conventions people know from ChatGPT: a
+chat-history sidebar, one centred reading column, plain assistant prose, grey user bubbles and a
+rounded composer. Four views, switched from the sidebar: Chat, Create image (generation and
+image-to-image), Gallery, and Server (per-provider telemetry, backed by `/api/status` +
+`/api/gallery`).
 
-**Theming (added 2026-08-04).** The UI is a "precision instrument" design — warm-paper light theme,
-graphite dark theme, borders (not shadows) carrying the structure, mono for every label/metric, a
-faint 24px drafting grid, dot-matrix provider readouts, and a scan line across the answer while it
-streams. Both themes are real designs, not inversions. The header has a 3-state switch
-(light / auto / dark) persisted in `localStorage` under `blm.theme`; `auto` follows
-`prefers-color-scheme` live. An inline script in `<head>` resolves the theme onto
-`documentElement.dataset.theme` **before first paint**, so there's no flash — keep it there.
-Colours are CSS custom properties on `:root` (light) and `:root[data-theme="dark"]`; add new colours
-as tokens, never as literal hex in a rule. Fonts are local-only on purpose (Inter if installed, else
-system; mono falls back to Noto/DejaVu) — no Google Fonts link, so the UI still renders offline.
-Two traps: the footer must NOT uppercase `#ft-dir` (filesystem paths are case-sensitive), and
-`md()`'s code-block sentinel is the six-character escape `\u0000` in the source, not a raw NUL byte — a literal NUL makes the
-file binary to grep and is invalid in HTML source.
+**Chat history lives in `localStorage`** under `blm.chats`, newest first, one object per
+conversation (`{id, title, model, system, msgs, created, updated}`). The sidebar groups it by
+day (Today / Yesterday / Previous 7 days / Previous 30 days / month), searches title and body,
+and offers rename plus delete per row and delete-all from the top-bar kebab. A new chat is a
+draft: it only enters the list on its first turn. Image attachments are data URLs, so `saveChats()`
+handles a quota overflow by shedding image data from the oldest turns first, then whole old chats,
+never conversation text. Other keys: `blm.cur` (last open chat), `blm.model`, `blm.theme`,
+`blm.sidebar`, `blm.system` (default system prompt), `browserLlmApiKey`.
+
+Other things worth knowing before editing the file. The theme switch is 3-state
+(light / auto / dark) in the sidebar footer, persisted under `blm.theme`, and an inline script in
+`<head>` resolves it onto `documentElement.dataset.theme` **before first paint**, so keep that
+script where it is. Colours are CSS custom properties on `:root` (light) and
+`:root[data-theme="dark"]`; add new colours as tokens, never as literal hex in a rule. Fonts are
+local-only on purpose, Inter if installed else system, so the UI still renders offline. `md()` is a
+small block grammar (headings, lists, tables, quotes, fenced code cards with Copy) that escapes
+first and uses the plain text marker `@@BLMCODE<n>@@` for fences, never a NUL sentinel, which would
+make the file binary to grep and is invalid in HTML source. A rule sets
+`[hidden]{display:none!important}` because `.sq{display:grid}` otherwise beats the `hidden`
+attribute and the top-bar buttons stay visible with the sidebar open. Streaming uses an
+`AbortController`, so the send button becomes a stop button mid-answer.
 
 There is also an **embeddable chat widget** (`webui/widget.js`, served at `/widget.js`): a
 self-contained, Shadow-DOM-isolated floating chat bubble that any other page on the LAN can add with
 `<script src="http://<host>:8081/widget.js"></script>`. It auto-discovers this server as its API base
 from its own script URL (CORS is already open) and streams from `/v1/chat/completions`. Config via
 `data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `system`, `open`, `attach`,
-`theme`); runtime
-handle `window.BrowserLLMWidget` (`open`/`close`/`reset`/`config`). The Status tab shows a copy-paste
-embed snippet + a "Preview widget on this page" button. The widget is themed with the same palette
-via `--w-*` tokens inside its shadow root; `data-theme` defaults to **auto**, which follows the HOST
-page's `prefers-color-scheme` (it used to be hardcoded dark, which looked broken on a light site).
+`theme`, `persist`, `key`); runtime handle `window.BrowserLLMWidget`
+(`open`/`close`/`reset`/`config`). The Server view shows a copy-paste embed snippet and a
+"Preview widget" button. The panel carries the same palette as the dashboard via `--w-*` tokens
+inside its shadow root, its own `md()` with code cards, a stop button, and full-screen sizing under
+520px. `data-theme` defaults to auto, which follows the HOST page's `prefers-color-scheme`, so it
+never lands dark-on-light. The thread is remembered in `localStorage` under
+`blm.widget.<api base>` and survives a reload; the header pencil clears it, and
+`data-persist="0"` turns that off. `data-accent` is unset by default so the send button and bubble
+follow the theme, black on light and white on dark; setting it pins one colour for both themes.
 
 Two providers, selected per-request by the OpenAI **`model`** field:
 
@@ -111,13 +125,15 @@ client.py            # tiny stdlib-only CLI/importable client (no deps): `./clie
                      #   BROWSER_LLM_API_KEY.
 mode.sh              # toggle the systemd service's Chrome visibility (headless/visible) via a
                      #   drop-in override: `./mode.sh headless|visible`; `./mode.sh` shows current mode.
-webui/index.html     # mini web UI (single file, no build step): streaming chat with
-                     #   image attachments (click/paste/drop), image gen + image-to-image
-                     #   with elapsed timer, gallery, live provider status,
-                     #   Status tab (telemetry + embed snippet + version in footer).
+webui/index.html     # web dashboard (single file, no build step): ChatGPT-shaped shell with
+                     #   a localStorage chat history sidebar (search, rename, delete,
+                     #   delete-all, export), streaming chat with a stop button and image
+                     #   attachments (click/paste/drop), image gen + image-to-image with
+                     #   elapsed timer, gallery, Server view (telemetry + embed snippet).
 webui/widget.js      # embeddable floating chat bubble (Shadow-DOM isolated, no build step);
                      #   served at /widget.js; auto-discovers API base from its own <script src>.
-                     #   Has 📎 image attach (click/paste/drop); data-attach="0" hides it.
+                     #   Image attach (click/paste/drop), data-attach="0" hides it; thread
+                     #   remembered per API base, data-persist="0" turns that off.
 webui/widget-demo.html # standalone demo page (served at /demo) embedding the widget.
 desktop/               # NATIVE Linux desktop app + tray widget (GTK3), a thin client of the
                        #   HTTP API — NOT browser automation. Runs on SYSTEM python3 (has

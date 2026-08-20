@@ -184,6 +184,26 @@ class ChatGPTProvider(Provider):
                         }
                         return card;
                     }
+                    // The language pill sometimes sits in a header ABOVE the first
+                    // ancestor that holds a button, so findCard stopped short: the fence
+                    // came out with no language and the bare label ("Bash") stayed behind
+                    // in the prose. Climb while the only extra text is that one short
+                    // label line, so the fence swallows it.
+                    function widen(card){
+                        var node=card, n=0;
+                        while(node.parentElement && n<3){
+                            var p=node.parentElement;
+                            var inner=(node.innerText||'').replace(/\s+$/,'');
+                            var outer=(p.innerText||'').replace(/\s+$/,'');
+                            if(!inner || !outer) break;
+                            if(outer===inner){ node=p; n++; continue; }
+                            if(outer.slice(-inner.length)!==inner) break;
+                            var extra=outer.slice(0,outer.length-inner.length).trim();
+                            if(/^[a-z0-9+#.\-]{1,15}$/i.test(extra)) return p;
+                            break;
+                        }
+                        return card;
+                    }
                     // Language pill is toolbar text (no language-* class on cm <code>).
                     function langOf(card){
                         try{
@@ -219,7 +239,7 @@ class ChatGPTProvider(Provider):
                         var seen=[];
                         for(var e=0;e<editors.length;e++){
                             var editor=editors[e];
-                            var card=findCard(editor);
+                            var card=widen(findCard(editor));
                             if(seen.indexOf(card)>=0) continue; seen.push(card);
                             var clean=codeText(editor).replace(/\s+$/,'');
                             if(!clean) continue;
