@@ -309,6 +309,39 @@ class ChatGPTProvider(Provider):
             logger.warning(f"[{self.name}] image extraction failed: {e}")
         return []
 
+    # chatgpt.com's own "Delete" menu item is a soft delete: PATCH the
+    # conversation with is_visible=false. Driving the menu would be slower and
+    # would break on every sidebar redesign; the id is in the URL the drive
+    # landed on, and the page's own session cookie authorises the call.
+    _DISCARD_JS = """
+    (async () => {
+      const m = location.pathname.match(/\\/c\\/([0-9a-f-]{36})/i);
+      if (!m) return 'no conversation in the URL';
+      const s = await (await fetch('/api/auth/session', {cache: 'no-store'})).json();
+      if (!s || !s.accessToken) return 'no access token';
+      const r = await fetch('/backend-api/conversation/' + m[1], {
+        method: 'PATCH',
+        headers: {Authorization: 'Bearer ' + s.accessToken,
+                  'Content-Type': 'application/json'},
+        body: JSON.stringify({is_visible: false}),
+      });
+      return r.ok ? 'ok' : 'HTTP ' + r.status;
+    })()
+    """
+
+    async def discard_conversation(self, page) -> bool:
+        try:
+            v = await page.evaluate(self._DISCARD_JS, await_promise=True,
+                                    return_by_value=True)
+        except Exception as e:
+            logger.warning(f"[{self.name}] could not delete the conversation: {e}")
+            return False
+        if v == "ok":
+            logger.info(f"[{self.name}] conversation deleted (ephemeral request)")
+            return True
+        logger.warning(f"[{self.name}] could not delete the conversation: {v}")
+        return False
+
     async def logged_in(self, page) -> bool:
         # ChatGPT's logged-OUT page is deceptive: it renders a full sidebar and
         # an account-ish button, and lets you type in a composer. The reliable

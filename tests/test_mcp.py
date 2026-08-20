@@ -157,3 +157,23 @@ class MCPProtocolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskEphemeralTest(unittest.TestCase):
+    """The account's chat history belongs to the person, not the agent: `ask`
+    must ask for the conversation to be deleted unless it was told otherwise."""
+
+    def _call(self, args):
+        with mock.patch.object(mcp_server, "_ask", return_value="hi") as m:
+            mcp_server.tool_ask({"prompt": "p", **args})
+        return m.call_args.kwargs
+
+    def test_default_is_ephemeral(self):
+        self.assertTrue(self._call({})["ephemeral"])
+
+    def test_keep_chat_opts_out(self):
+        self.assertFalse(self._call({"keep_chat": True})["ephemeral"])
+
+    def test_keep_chat_is_advertised(self):
+        ask = next(t for t in mcp_server.TOOLS if t["name"] == "ask")
+        self.assertIn("keep_chat", ask["inputSchema"]["properties"])

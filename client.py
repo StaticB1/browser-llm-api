@@ -48,11 +48,13 @@ def _image_spec(path_or_url):
 
 
 def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=None,
-        images=None):
+        images=None, ephemeral=False):
     """Send a chat completion and return the assistant text.
     If stream=True, on_delta(str) is called for each chunk as it arrives.
     ``images`` (paths, data: URLs or http URLs) are uploaded into the provider's
-    chat alongside the prompt."""
+    chat alongside the prompt.
+    ``ephemeral`` deletes the conversation from the account once the answer is
+    back, for prompts that are tooling rather than conversation."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -64,6 +66,8 @@ def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=Non
     else:
         messages.append({"role": "user", "content": prompt})
     payload = {"model": model or DEFAULT_MODEL, "messages": messages, "stream": stream}
+    if ephemeral:
+        payload["ephemeral"] = True
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"

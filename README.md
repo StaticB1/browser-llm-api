@@ -276,6 +276,29 @@ before forwarding, so remote providers work the same way (both ends need ≥ 0.2
 > Gemini's is built on the generic file-chooser mechanism with best-guess menu labels (its "Upload &
 > tools" button is verified) — if a Gemini upload stops landing, that's the first thing to check.
 
+## Ephemeral requests
+
+The sessions are signed in as a person, so every call a tool makes lands in that
+person's real chat history. Send `"ephemeral": true` with a chat completion and the
+server deletes the conversation as soon as the answer has been read:
+
+```bash
+curl -s localhost:8081/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "chatgpt-browser",
+  "ephemeral": true,
+  "messages": [{"role": "user", "content": "Judge this copy: ..."}]
+}'
+```
+
+It is the same soft delete the sidebar's own "Delete" performs, on the conversation
+that request created and no other. Deletion failing never fails the request: the
+answer is already in hand, and the server logs the reason. ChatGPT implements it;
+providers that keep no reachable history ignore the flag. Image generation is not
+covered: an asset you keep usually comes with a thread you want to go back to.
+
+The MCP `ask` tool sets it by default, since an agent's question is tooling rather
+than conversation; pass `keep_chat: true` when the person asked to see the thread.
+
 ## Configuration
 
 | env var | default | meaning |
@@ -293,6 +316,7 @@ before forwarding, so remote providers work the same way (both ends need ≥ 0.2
 | `MAX_ATTACHMENTS` | `6` | most input images one request may attach |
 | `MAX_ATTACHMENT_MB` | `20` | per-attachment size ceiling |
 | `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | let non-localhost (and cross-origin) clients attach **server-side file paths** (off by default) |
+| `BROWSER_LLM_EPHEMERAL` | `0` | delete the conversation after every chat completion that doesn't say otherwise (see [Ephemeral requests](#ephemeral-requests)) |
 
 ### Who can call it
 
@@ -359,7 +383,7 @@ Or, in a client that reads a JSON config (Claude Desktop, Cursor, Zed):
 
 | tool | does |
 |------|------|
-| `ask` | prompt (+ `images`, `system`, `model`) → the reply. `out` writes it to a file and returns the path, which keeps a large HTML answer out of the agent's context; `strip_fences` drops ``` lines. |
+| `ask` | prompt (+ `images`, `system`, `model`) → the reply. `out` writes it to a file and returns the path, which keeps a large HTML answer out of the agent's context; `strip_fences` drops ``` lines. The conversation is deleted afterwards unless `keep_chat` is set. |
 | `generate_image` | prompt (+ `refs` for image-to-image) → a written asset, with the same resize/crop/favicon/knockout shaping as `gen_asset.py`. |
 | `list_models` | the provider ids this server can drive. |
 | `health` | reachable? which providers are logged in? a request in flight? |

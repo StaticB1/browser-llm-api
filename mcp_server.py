@@ -105,6 +105,13 @@ TOOLS = [
                                    "keeps a large HTML page out of the conversation.",
                 },
                 "timeout": {"type": "integer", "description": "Seconds to wait (default 440)."},
+                "keep_chat": {
+                    "type": "boolean",
+                    "description": "Leave the conversation in the account's history. "
+                                   "By default it is deleted once the reply is back, "
+                                   "since the history belongs to the person, not the "
+                                   "agent. Set this only when they asked to see it.",
+                },
             },
             "required": ["prompt"],
         },
@@ -177,6 +184,9 @@ def tool_ask(args):
         system=args.get("system"),
         timeout=int(args.get("timeout") or DEFAULT_TIMEOUT),
         images=args.get("images") or None,
+        # An agent's question is tooling, not conversation: it has no business
+        # sitting in the account's chat history afterwards.
+        ephemeral=not args.get("keep_chat"),
     )
     if args.get("strip_fences"):
         text = "\n".join(ln for ln in text.splitlines()

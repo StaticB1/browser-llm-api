@@ -364,6 +364,12 @@ class ChatCompletionRequest(BaseModel):
     # without building content parts. Each item is a data: URL, an http(s) URL,
     # bare base64, or a local file path (localhost callers only).
     images: Optional[list[str]] = None
+    # Not OpenAI: delete the conversation from the account once the answer has
+    # been read. For callers whose prompts are tooling — a linter, a judge, an
+    # agent's scratch question — and have no business in the user's history.
+    # Unset means "whatever BROWSER_LLM_EPHEMERAL says", so an install can make
+    # it the default for clients that predate the field.
+    ephemeral: Optional[bool] = None
 
 
 class ImageGenRequest(BaseModel):
@@ -388,6 +394,14 @@ _locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in PROVIDERS}
 # (heavy canvas/blobs + growing SPA DOM) and starts timing out; a fresh browser
 # resets it. Recycle a provider's browser once it has done this many image gens.
 _RECYCLE_AFTER_IMAGES = int(os.environ.get("BROWSER_RECYCLE_AFTER_IMAGES", "3"))
+
+# Whether a chat completion that says nothing about it should have its
+# conversation deleted afterwards. Off by default: the sessions are a
+# person's own account, and silently binning their history would be worse
+# than leaving a thread behind. Turn it on for an install whose callers are
+# all tooling; a request can still override it either way.
+_EPHEMERAL_DEFAULT = os.environ.get("BROWSER_LLM_EPHEMERAL", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
 _img_gen_count: dict[str, int] = {name: 0 for name in PROVIDERS}
 
 
@@ -750,11 +764,31 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
             return
 
 
+def _ephemeral(req: "ChatCompletionRequest") -> bool:
+    """Whether to delete this request's conversation: what it asked for, or the
+    install's default when it did not ask."""
+    return _EPHEMERAL_DEFAULT if req.ephemeral is None else bool(req.ephemeral)
+
+
+async def _discard(provider, page) -> None:
+    """Delete the conversation an ephemeral request just created. Never raises:
+    the answer has already been read, and losing the cleanup is a tidier failure
+    than losing the response."""
+    try:
+        await provider.discard_conversation(page)
+    except Exception as e:
+        logger.warning(f"[{provider.name}] discard_conversation failed: {e}")
+
+
 async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
                    raw_uploads: Optional[list] = None,
-                   allow_local_paths: bool = True) -> AsyncGenerator[str, None]:
+                   allow_local_paths: bool = True,
+                   ephemeral: bool = False) -> AsyncGenerator[str, None]:
     """Open the provider's chat, attach any input images, send the prompt, stream
-    text deltas, then append any generated images as markdown links."""
+    text deltas, then append any generated images as markdown links.
+
+    ``ephemeral`` deletes the conversation from the account once the answer has
+    been read, for callers whose prompts are tooling rather than conversation."""
     browser = await get_browser(provider)
     try:
         async with _attachment_files(attachments, raw_uploads,
@@ -772,6 +806,8 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
                 yield _img_markdown(im)
             if n:
                 _note_image_gen(provider)  # count toward browser recycle
+            if ephemeral:
+                await _discard(provider, page)
     except Exception as e:
         await _evict_dead_browser(provider, e)
         raise
@@ -781,7 +817,8 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
 
 async def drive_once(provider, prompt: str, attachments: Optional[list] = None, *,
                      raw_uploads: Optional[list] = None,
-                     allow_local_paths: bool = True) -> tuple[str, list[dict]]:
+                     allow_local_paths: bool = True,
+                     ephemeral: bool = False) -> tuple[str, list[dict]]:
     """Non-streaming drive used by non-streaming chat and the images endpoints:
     returns (text, images)."""
     browser = await get_browser(provider)
@@ -795,6 +832,8 @@ async def drive_once(provider, prompt: str, attachments: Optional[list] = None, 
             imgs = [_persist(im, provider) for im in await provider.get_images(page)]
             if imgs:
                 _note_image_gen(provider)  # count toward browser recycle
+            if ephemeral:
+                await _discard(provider, page)
             return text, imgs
     except Exception as e:
         await _evict_dead_browser(provider, e)
@@ -1286,7 +1325,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 async with _locks[provider.name]:
                     started = time.monotonic()  # reset: exclude queue-wait
                     async for chunk in run_chat(provider, prompt, specs,
-                                                allow_local_paths=allow_paths):
+                                                allow_local_paths=allow_paths,
+                                                ephemeral=_ephemeral(req)):
                         yield _chunk(chunk, None)
             except Exception as e:
                 # Surface the failure in-band; a raised exception here would
@@ -1306,7 +1346,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         started = time.monotonic()
         try:
             text, imgs = await drive_once(provider, prompt, specs,
-                                          allow_local_paths=allow_paths)
+                                          allow_local_paths=allow_paths,
+                                          ephemeral=_ephemeral(req))
         except HTTPException:
             _record_request(provider.name, started, RuntimeError("bad request"))
             raise

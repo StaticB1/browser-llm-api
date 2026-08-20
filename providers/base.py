@@ -632,6 +632,17 @@ class Provider(ABC):
         response. Default: none."""
         return []
 
+    async def discard_conversation(self, page) -> bool:
+        """Delete the conversation this drive just created.
+
+        An ephemeral request is scratch work: the caller wanted an answer, not a
+        thread in the account's history. Called after the answer (and any images)
+        have been read, never before. Failure is not fatal — the answer is
+        already in hand — so implementations should log and return False rather
+        than raise. Default: the provider keeps no history we can remove.
+        """
+        return False
+
     @abstractmethod
     async def logged_in(self, page) -> bool:
         """True if a usable, signed-in session is present (used by login.py)."""

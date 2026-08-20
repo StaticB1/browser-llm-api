@@ -284,6 +284,27 @@ files, and the provider uploads them through the site's own file picker before s
 - **In chat**: `_compose()` returns image-only markdown when `image_text_is_caption` is False (Gemini — its image-prompt prose is internal thinking), or text + images when True (ChatGPT — real caption).
 - **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?}]}`. `n`/`size` accepted but ignored. **501** if the provider doesn't support images, **502** if it returned none.
 
+## Ephemeral conversations (added 2026-08-20)
+
+`"ephemeral": true` on a chat completion deletes the conversation once the answer has been read, for
+callers whose prompts are tooling rather than someone's own chat. Unset falls back to
+`BROWSER_LLM_EPHEMERAL` (`_EPHEMERAL_DEFAULT`, off), so an install can flip the default for clients
+that predate the field.
+
+- `Provider.discard_conversation(page)` returns False in `base.py`; a provider that can reach its own
+  history overrides it. It runs after `get_images()`, on the same page, before the drive returns.
+- **ChatGPT does it over the site's own backend API, not the sidebar menu** — read the conversation id
+  out of `location.pathname` (`/c/<uuid>`), take the access token from `/api/auth/session`, then
+  `PATCH /backend-api/conversation/<id>` with `{"is_visible": false}`. That is exactly what the
+  sidebar's own Delete does (a soft delete), and it survives a sidebar redesign. Verified live
+  2026-08-20: the journal logged `conversation deleted (ephemeral request)`.
+- **A failed delete never fails the request** (`_discard` logs and swallows) — the answer is already
+  in hand, and throwing it away because a cleanup call 404'd would be the worse trade.
+- Image generation is deliberately **not** covered: an asset you keep usually comes with a thread you
+  want to go back to.
+- The MCP `ask` tool sets it by default and takes `keep_chat: true` to opt out; `client.ask()` takes
+  `ephemeral=`. Tests: `AskEphemeralTest` in `tests/test_mcp.py`.
+
 ## Configuration (env vars)
 
 | Var | Default | Meaning |
@@ -300,6 +321,7 @@ files, and the provider uploads them through the site's own file picker before s
 | `BROWSER_LLM_API_KEY` | *(unset)* | When set, **non-loopback** clients must send it (`Authorization: Bearer …` or `X-Api-Key`) on `/v1/*` and `/api/*`. Localhost stays open; pages/assets (`/`, `/widget.js`, `/images/*`, …) stay public. Makes binding to `0.0.0.0` sane. |
 | `REMOTE_PROVIDERS` | *(unset)* | `model=url[,model=url…]` — proxy those models to **another browser-llm-api instance** instead of a local browser (overrides the local provider of the same name). E.g. a second install without a ChatGPT login sets `chatgpt-browser=http://<host-with-login>:8081`. |
 | `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`). |
+| `BROWSER_LLM_EPHEMERAL` | `0` | Delete the conversation after any chat completion that doesn't set `ephemeral` itself. |
 
 ## Running
 
