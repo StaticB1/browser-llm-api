@@ -573,7 +573,22 @@ def _provider_slug(provider) -> str:
     return slug or "provider"
 
 
-def _persist(im: dict, provider) -> dict:
+def _conv_stamp(conv_id: Optional[str]) -> str:
+    """The conversation's fingerprint as it appears in a saved image's filename.
+
+    Deleting a chat has to take that chat's pictures with it, and the client's
+    copy of the conversation is not a reliable place to look for them: a chat
+    imported from the account carries the site's own image URLs, so a delete
+    driven off the message text finds nothing and the files stay behind for
+    good. The filename is the one record that survives every route in, so the
+    conversation is written into it. Twelve hex characters, which is short
+    enough to read and long enough that two conversations here won't collide.
+    """
+    hexes = re.sub(r"[^0-9a-f]", "", (conv_id or "").lower())
+    return hexes[:12]
+
+
+def _persist(im: dict, provider, conv_id: Optional[str] = None) -> dict:
     """Write an extracted image (if it has inline base64) into a per-provider
     subfolder of IMAGE_DIR, adding 'path' and 'url'. Images that are remote-only
     (e.g. CORS-blocked) keep their 'src' and are left untouched."""
@@ -584,7 +599,9 @@ def _persist(im: dict, provider) -> dict:
         ext = _EXT.get(im.get("mime", "image/jpeg"), "jpg")
         subdir = _image_dir / slug
         subdir.mkdir(parents=True, exist_ok=True)
-        fname = f"{slug}_{int(time.time())}_{uuid.uuid4().hex[:8]}.{ext}"
+        stamp = _conv_stamp(conv_id)
+        mark = f"c{stamp}_" if stamp else ""
+        fname = f"{slug}_{int(time.time())}_{mark}{uuid.uuid4().hex[:8]}.{ext}"
         fpath = subdir / fname
         fpath.write_bytes(base64.b64decode(im["b64"]))
         im["path"] = str(fpath)
@@ -798,18 +815,21 @@ async def _discard(provider, page) -> None:
         logger.warning(f"[{provider.name}] discard_conversation failed: {e}")
 
 
-async def _note_conversation(provider, page, meta: Optional[dict]) -> None:
-    """Record which account-side conversation this drive landed in, so a client
-    keeping its own copy of the chat can delete the real thread later. Best
-    effort: a missing id costs the client a cascade, not the answer."""
-    if meta is None:
-        return
+async def _read_conversation_id(provider, page) -> str:
+    """Which account-side conversation this drive landed in, or "". Read before
+    the images are saved, because the id goes into their filenames."""
     try:
-        conv_id = await provider.conversation_id(page)
+        return await provider.conversation_id(page) or ""
     except Exception as e:
         logger.debug(f"[{provider.name}] conversation id unavailable: {e}")
-        return
-    if conv_id:
+        return ""
+
+
+def _note_conversation(meta: Optional[dict], conv_id: str) -> None:
+    """Hand the id to the client, so a client keeping its own copy of the chat
+    can delete the real thread later. Best effort: a missing id costs the client
+    a cascade, not the answer."""
+    if meta is not None and conv_id:
         meta["conversation_id"] = conv_id
 
 
@@ -832,9 +852,11 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
             async for delta in _stream_completion(provider, page, monitor):
                 yield delta
 
+            # Before the images, not after: the id becomes part of their names.
+            conv_id = "" if ephemeral else await _read_conversation_id(provider, page)
             n = 0
             for im in await provider.get_images(page):
-                _persist(im, provider)
+                _persist(im, provider, conv_id)
                 n += 1
                 logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
                 yield _img_markdown(im)
@@ -843,7 +865,7 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
             if ephemeral:
                 await _discard(provider, page)
             else:
-                await _note_conversation(provider, page, meta)
+                _note_conversation(meta, conv_id)
     except Exception as e:
         await _evict_dead_browser(provider, e)
         raise
@@ -866,13 +888,15 @@ async def drive_once(provider, prompt: str, attachments: Optional[list] = None, 
             text = ""
             async for delta in _stream_completion(provider, page, monitor):
                 text += delta
-            imgs = [_persist(im, provider) for im in await provider.get_images(page)]
+            conv_id = "" if ephemeral else await _read_conversation_id(provider, page)
+            imgs = [_persist(im, provider, conv_id)
+                    for im in await provider.get_images(page)]
             if imgs:
                 _note_image_gen(provider)  # count toward browser recycle
             if ephemeral:
                 await _discard(provider, page)
             else:
-                await _note_conversation(provider, page, meta)
+                _note_conversation(meta, conv_id)
             return text, imgs
     except Exception as e:
         await _evict_dead_browser(provider, e)
@@ -1406,9 +1430,44 @@ async def api_conversations_delete(req: ConversationDeleteRequest, request: Requ
             await _evict_dead_browser(provider, e)
             logger.error(f"[{provider.name}] conversation delete failed: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail=str(e))
-    logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s)")
+    # The pictures go with the chat. The client can only name the files it saw
+    # itself, which for an imported conversation is none of them, so the sweep
+    # happens here where the filenames are.
+    images: list[str] = []
+    for path in _conversation_images(ids):
+        try:
+            path.unlink()
+            images.append(path.name)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"could not delete {path}: {e}")
+    logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s) "
+                f"and {len(images)} of their image(s)")
     return {"model": provider.name, "deleted": deleted,
-            "failed": list(why), "why": why}
+            "failed": list(why), "why": why, "images_deleted": images}
+
+
+def _conversation_images(ids: list) -> list[Path]:
+    """The saved image files that belong to these conversations.
+
+    Matched on the stamp in the filename (see _conv_stamp), so it works for a
+    chat this server never had a local copy of — an imported one, or one from a
+    client that kept no record. Images saved before stamping existed carry no
+    conversation and are never matched: nothing links them, and guessing from
+    timestamps would delete the wrong picture.
+    """
+    stamps = {s for s in (_conv_stamp(i) for i in ids) if s}
+    if not stamps or not _image_dir.exists():
+        return []
+    exts = {"." + e for e in set(_EXT.values())}
+    out = []
+    for path in _image_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in exts:
+            continue
+        if any(f"_c{s}_" in path.name for s in stamps):
+            out.append(path)
+    return out
 
 
 def _gallery_target(ref: str) -> Optional[Path]:

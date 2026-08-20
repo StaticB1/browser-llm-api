@@ -95,8 +95,10 @@ rounded composer.
   open it, one at a time, because reading a whole account up front is what makes the site start
   answering 429. Only ChatGPT exposes a conversation list this server can read.
 - **Delete that means delete** — deleting a chat also deletes the images it generated from disk and
-  the real conversation from the provider's account, and says which of the three it did. Select
-  several at once from the menu's "Select chats", or several images from the gallery's "Select".
+  the real conversation from the provider's account, and says which of the three it did. Each saved
+  image records the conversation it came from in its filename, so this works for an imported chat
+  too, whose text only ever held the provider's own image links. Select several at once from the
+  menu's "Select chats", or several images from the gallery's "Select".
 - **Create image** — one-line prompt to image, with an elapsed timer, since free-tier generation
   takes 30s to 4min. Attach reference images to switch to **image-to-image** (the request goes to
   `/v1/images/edits`).

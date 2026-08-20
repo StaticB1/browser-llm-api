@@ -850,6 +850,7 @@ function cascadeSentence(list){
   const bits = [];
   if (imgs) bits.push(imgs + (imgs === 1 ? " generated image is deleted from the server"
                                          : " generated images are deleted from the server"));
+  else if (threads) bits.push("any images those conversations generated here go with them");
   if (threads) bits.push(threads + (threads === 1 ? " conversation is deleted from the provider account"
                                                   : " conversations are deleted from the provider account"));
   return bits.length ? " " + bits.join(", and ") + "." : "";
@@ -870,6 +871,7 @@ async function cascade(list){
     }
   }
   const trouble = [];
+  let swept = 0;               // images the server matched to these conversations
   const post = async (url, body) => {
     const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
                                body: JSON.stringify(body)});
@@ -894,11 +896,15 @@ async function cascade(list){
       try{
         const j = await post("/api/conversations/delete", {model, ids: slice});
         done += (j.deleted || []).length;
+        /* The server sweeps the images stamped with these conversations. That
+           covers an imported chat, whose text carries the site's own image
+           URLs and so names no local file at all. */
+        swept += (j.images_deleted || []).length;
         if ((j.failed || []).length) trouble.push(j.failed.length + " conversation(s) on " + model);
       }catch(e){ trouble.push(model + ": " + e.message); }
     }
   }
-  return trouble;
+  return {trouble, swept};
 }
 
 async function deleteChats(ids){
@@ -906,11 +912,12 @@ async function deleteChats(ids){
   chats = chats.filter(c => !ids.includes(c.id));
   saveChats();
   if (cur && ids.includes(cur.id)) newChat(); else renderList();
-  const trouble = await cascade(list);
+  const {trouble, swept} = await cascade(list);
   const {imgs, threads} = cascadeCounts(list);
+  const pics = imgs + swept;
   if (trouble.length) toast("Deleted locally, but the server kept some: " + trouble.join("; "));
-  else if (imgs || threads)
-    toast("Deleted " + list.length + " chat(s), " + imgs + " image(s) and " +
+  else if (pics || threads)
+    toast("Deleted " + list.length + " chat(s), " + pics + " image(s) and " +
           threads + " account conversation(s).");
 }
 function deleteChat(id){ return deleteChats([id]); }

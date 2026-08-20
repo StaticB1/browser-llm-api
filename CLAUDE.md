@@ -365,6 +365,15 @@ generated and the thread on the site.
   files (`/api/gallery/delete`, matched out of the message text by the `/images/<provider>/<file>`
   paths) and the account's conversation (`/api/conversations/delete`). The confirm dialog names all
   three counts before it does any of it.
+- **A saved image carries its conversation in the filename** (`_conv_stamp`, 2026-08-20):
+  `chatgpt_<ts>_c<12 hex of the conversation id>_<rand>.png`. Matching images out of the message
+  text only works for a chat this dashboard ran itself — an **imported** chat holds the site's own
+  image URLs and names no local file, so deleting it left the pictures on disk with nothing left to
+  ever link them. `/api/conversations/delete` now sweeps by stamp (`_conversation_images`) and
+  returns `images_deleted`, so the delete works with no help from the client. The id is therefore
+  read **before** `_persist`, not after (`_read_conversation_id`); `_note_conversation` is now just
+  the handoff to the client. Images saved before this are unstamped and unmatchable — guessing from
+  timestamps would delete the wrong picture, so they are only reachable from the gallery.
 - **Bulk delete is ONE page call, not one per id** (`delete_conversations`, 2026-08-20). The naive
   per-id shape cost ~4.2s each — a CDP round trip plus its own `/api/auth/session` read — so a real
   196-chat clear-out ran for 13 minutes, and the browser's `fetch` gave up long before the end: the

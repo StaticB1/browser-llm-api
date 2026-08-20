@@ -156,6 +156,76 @@ class GalleryTargetTest(unittest.TestCase):
                          (self.base / "chatgpt" / "gone.png").resolve())
 
 
+class ConversationStampTest(unittest.TestCase):
+    """A saved image carries the conversation it came from in its filename.
+
+    The client's copy of a chat is not a reliable index of its pictures: a chat
+    imported from the account holds the site's own image URLs and so names no
+    local file, which left the files behind for good when the chat was deleted.
+    """
+
+    def test_the_stamp_is_short_stable_hex(self):
+        cid = "6a86a126-baf4-83ee-975b-91bfaeb4f376"
+        self.assertEqual(server._conv_stamp(cid), "6a86a126baf4")
+        self.assertEqual(server._conv_stamp(cid.upper()), "6a86a126baf4")
+        self.assertEqual(server._conv_stamp("6a86a126baf483ee975b91bfaeb4f376"),
+                         "6a86a126baf4")
+
+    def test_no_id_means_no_stamp(self):
+        for cid in (None, "", "   ", "zzz"):
+            self.assertEqual(server._conv_stamp(cid), "")
+
+    def test_two_conversations_do_not_share_a_stamp(self):
+        a = server._conv_stamp("6a86a126-baf4-83ee-975b-91bfaeb4f376")
+        b = server._conv_stamp("6a86a127-baf4-83ee-975b-91bfaeb4f376")
+        self.assertNotEqual(a, b)
+
+
+class ConversationImagesTest(unittest.TestCase):
+    CID = "6a86a126-baf4-83ee-975b-91bfaeb4f376"
+    OTHER = "7b97b237-cba5-94ff-a86c-a2cfbc5a4e87"
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name) / "images"
+        (self.base / "chatgpt").mkdir(parents=True)
+        self.mine = self.base / "chatgpt" / "chatgpt_1787208010_c6a86a126baf4_15d9feed.png"
+        self.theirs = self.base / "chatgpt" / "chatgpt_1787208011_c7b97b237cba5_2a3b4c5d.png"
+        self.orphan = self.base / "chatgpt" / "chatgpt_1787207000_abcdef12.png"
+        for f in (self.mine, self.theirs, self.orphan):
+            f.write_bytes(b"x")
+        self._saved = server._image_dir
+        server._image_dir = self.base
+
+    def tearDown(self):
+        server._image_dir = self._saved
+        self._tmp.cleanup()
+
+    def test_finds_only_this_conversations_images(self):
+        self.assertEqual(server._conversation_images([self.CID]), [self.mine])
+
+    def test_several_conversations_at_once(self):
+        got = set(server._conversation_images([self.CID, self.OTHER]))
+        self.assertEqual(got, {self.mine, self.theirs})
+
+    def test_an_unstamped_image_is_never_matched(self):
+        # Saved before stamping existed. Nothing links it to a conversation, and
+        # guessing from timestamps would delete the wrong picture.
+        for got in (server._conversation_images([self.CID]),
+                    server._conversation_images(["deadbeefdead"])):
+            self.assertNotIn(self.orphan, got)
+
+    def test_no_ids_touches_nothing(self):
+        self.assertEqual(server._conversation_images([]), [])
+        self.assertEqual(server._conversation_images(["", None]), [])
+
+    def test_a_non_image_file_is_ignored(self):
+        note = self.base / "chatgpt" / "chatgpt_1787208010_c6a86a126baf4_notes.txt"
+        note.write_bytes(b"x")
+        self.assertEqual(server._conversation_images([self.CID]), [self.mine])
+
+
 class ConversationIdTest(unittest.TestCase):
     def test_only_a_uuid_shaped_id_is_sent_to_the_site(self):
         ok = "6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e1234"
