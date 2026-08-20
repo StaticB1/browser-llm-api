@@ -83,9 +83,18 @@ def origin_is_trusted(origin: Optional[str], host: Optional[str]) -> bool:
 
     No Origin at all (curl, the CLI, the desktop app, a proxying server) is
     trusted: only browsers set it, and a browser cannot omit it cross-origin.
+
+    ``Origin: null`` is NOT trusted, and that distinction is load-bearing. A
+    page on any site can put a ``<iframe sandbox="allow-scripts" srcdoc>`` on
+    itself, which runs with an opaque origin and therefore sends ``null``;
+    with CORS at ``*`` the frame reads the reply and postMessages it out.
+    Reproduced live 2026-08-20 from http://localhost:3000: the direct fetch was
+    refused 403, the sandboxed one got 200 and the account's chat titles. The
+    cost is that a page opened from ``file://`` cannot use the gated endpoints,
+    which is the right trade.
     """
     o = (origin or "").strip()
-    if not o or o.lower() == "null":
+    if not o:
         return True
     from urllib.parse import urlsplit
     o_host = urlsplit(o).netloc.lower()

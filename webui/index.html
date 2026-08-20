@@ -113,6 +113,29 @@
   .ci input.rename{flex:1;min-width:0;font-size:14px;padding:3px 6px;border-radius:6px;
     border:1px solid var(--text3);background:var(--elev);outline:none}
   .empty-hist{color:var(--text3);font-size:13.5px;padding:12px 10px}
+  .empty-hist .lk{display:block;margin-top:8px;color:var(--text);text-decoration:underline;
+    text-underline-offset:2px;font-size:13px}
+  .ci .cbx{flex:none;width:15px;height:15px;margin:0 2px 0 0;accent-color:var(--btn)}
+  .ci.picked{background:var(--active)}
+  .selbar{display:flex;align-items:center;gap:7px;margin:0 8px 6px;padding:7px 9px;
+    border:1px solid var(--line);border-radius:10px;background:var(--elev);font-size:13px}
+  .selbar .n{flex:1;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .selbar button{padding:4px 8px;border-radius:7px;font-size:12.5px;color:var(--text2)}
+  .selbar button:hover{background:var(--hover);color:var(--text)}
+  .selbar button.d{color:var(--err)}
+  .selbar button:disabled{opacity:.45}
+  .grid a.picked{border-color:var(--btn)}
+  .grid a.picked img{opacity:.72}
+  .grid .pick{position:absolute;right:7px;top:7px;width:21px;height:21px;border-radius:7px;
+    border:1.5px solid rgba(255,255,255,.9);background:rgba(13,13,13,.45);
+    display:grid;place-items:center;color:#fff}
+  .grid a.picked .pick{background:var(--btn);border-color:var(--btn);color:var(--btn-ink)}
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:90;
+    max-width:min(90vw,520px);background:var(--btn);color:var(--btn-ink);
+    padding:9px 15px;border-radius:10px;font-size:13.5px;line-height:1.45;
+    box-shadow:0 8px 26px rgba(0,0,0,.24);opacity:0;pointer-events:none;
+    transition:opacity .18s ease}
+  #toast.on{opacity:1}
   .sbft{padding:6px 8px 10px;border-top:1px solid var(--line)}
   .navbtn{display:flex;align-items:center;gap:11px;width:100%;padding:8px 10px;
     border-radius:9px;font-size:14px;color:var(--text2);text-align:left}
@@ -385,6 +408,12 @@
       <input type="search" id="histsearch" placeholder="Search chats" autocomplete="off">
     </div>
 
+    <div class="selbar" id="selbar" hidden>
+      <span class="n" id="selcount">Nothing selected</span>
+      <button id="selall">All</button>
+      <button class="d" id="seldel">Delete</button>
+      <button id="seldone">Done</button>
+    </div>
     <div class="chatlist" id="chatlist"></div>
 
     <div class="sbft">
@@ -545,6 +574,8 @@
               <option value="chatgpt">chatgpt</option>
             </select>
             <button class="bt" id="galrefresh">Refresh</button>
+            <button class="bt" id="galselect">Select</button>
+            <button class="bt dangersolid" id="galdel" hidden>Delete selected</button>
           </div>
           <div class="grid" id="galgrid"></div>
         </div>
@@ -594,6 +625,14 @@
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5l4.5 4.5 4.5-4.5M5 19h14"/></svg>
     Export chat
   </button>
+  <button class="mi" data-act="import">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V8M7.5 12.5 12 8l4.5 4.5M5 5h14"/></svg>
+    Import from the account
+  </button>
+  <button class="mi" data-act="select">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>
+    Select chats
+  </button>
   <div class="msep"></div>
   <button class="mi danger" data-act="delete">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13M10 11v6M14 11v6"/></svg>
@@ -614,6 +653,8 @@
     Delete
   </button>
 </div>
+
+<div id="toast" role="status" aria-live="polite"></div>
 
 <dialog id="confirmdlg">
   <form class="dlg" method="dialog">
@@ -760,6 +801,7 @@ function openChat(id){
   localStorage.setItem("blm.cur", id);
   if (c.model) setModel(c.model);
   showView("chat"); renderLog(); renderList();
+  if (c.stub) loadStub(c);
 }
 function commitChat(){                 /* first turn of a draft lands in history */
   if (!chats.some(c => c.id === cur.id)) chats.unshift(cur);
@@ -768,11 +810,99 @@ function commitChat(){                 /* first turn of a draft lands in history
   localStorage.setItem("blm.cur", cur.id);
   saveChats(); renderList();
 }
-function deleteChat(id){
-  chats = chats.filter(c => c.id !== id);
-  saveChats();
-  if (cur && cur.id === id) newChat(); else renderList();
+
+let toastT = null;
+function toast(msg){
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("on");
+  clearTimeout(toastT);
+  toastT = setTimeout(() => t.classList.remove("on"), 4200);
 }
+
+/* Images this chat generated, as the paths the server serves them from. They
+   are files on the server, not copies in this browser, so deleting the chat
+   has to ask the server to delete them too. */
+const IMG_PATH_RE = /\/images\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif)/g;
+function chatImages(c){
+  const out = new Set();
+  for (const m of (c.msgs || [])){
+    const src = String(m.content || "");
+    let hit;
+    IMG_PATH_RE.lastIndex = 0;
+    while ((hit = IMG_PATH_RE.exec(src))) out.add(hit[0]);
+  }
+  return [...out];
+}
+function chatThread(c){
+  return c.conv ? {model: c.convModel || c.model || currentModel(), id: c.conv} : null;
+}
+
+/* What deleting these chats reaches beyond this browser. */
+function cascadeCounts(list){
+  let imgs = 0, threads = 0;
+  for (const c of list){ imgs += chatImages(c).length; if (chatThread(c)) threads++; }
+  return {imgs, threads};
+}
+function cascadeSentence(list){
+  const {imgs, threads} = cascadeCounts(list);
+  const bits = [];
+  if (imgs) bits.push(imgs + (imgs === 1 ? " generated image is deleted from the server"
+                                         : " generated images are deleted from the server"));
+  if (threads) bits.push(threads + (threads === 1 ? " conversation is deleted from the provider account"
+                                                  : " conversations are deleted from the provider account"));
+  return bits.length ? " " + bits.join(", and ") + "." : "";
+}
+
+/* Delete the server-side traces of these chats: saved image files, and the
+   real conversation in the provider account. Failures are reported and never
+   block the local delete — the chat is going either way. */
+async function cascade(list){
+  const files = [];
+  const byModel = new Map();
+  for (const c of list){
+    for (const f of chatImages(c)) files.push(f);
+    const th = chatThread(c);
+    if (th){
+      if (!byModel.has(th.model)) byModel.set(th.model, []);
+      byModel.get(th.model).push(th.id);
+    }
+  }
+  const trouble = [];
+  const post = async (url, body) => {
+    const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify(body)});
+    if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,160));
+    return r.json();
+  };
+  if (files.length){
+    try{
+      const j = await post("/api/gallery/delete", {files: files.slice(0, 200)});
+      if ((j.refused || []).length) trouble.push((j.refused.length) + " image(s) refused");
+    }catch(e){ trouble.push("images: " + e.message); }
+  }
+  for (const [model, ids] of byModel){
+    try{
+      const j = await post("/api/conversations/delete", {model, ids: ids.slice(0, 200)});
+      if ((j.failed || []).length) trouble.push(j.failed.length + " conversation(s) on " + model);
+    }catch(e){ trouble.push(model + ": " + e.message); }
+  }
+  return trouble;
+}
+
+async function deleteChats(ids){
+  const list = chats.filter(c => ids.includes(c.id));
+  chats = chats.filter(c => !ids.includes(c.id));
+  saveChats();
+  if (cur && ids.includes(cur.id)) newChat(); else renderList();
+  const trouble = await cascade(list);
+  const {imgs, threads} = cascadeCounts(list);
+  if (trouble.length) toast("Deleted locally, but the server kept some: " + trouble.join("; "));
+  else if (imgs || threads)
+    toast("Deleted " + list.length + " chat(s), " + imgs + " image(s) and " +
+          threads + " account conversation(s).");
+}
+function deleteChat(id){ return deleteChats([id]); }
 function titleFor(c){
   if (c.title) return c.title;
   const first = (c.msgs || []).find(m => m.role === "user");
@@ -791,6 +921,21 @@ function bucket(ts){
   if (diff <= 30) return "Previous 30 days";
   return new Date(ts).toLocaleDateString(undefined, {month:"long", year:"numeric"});
 }
+let picking = false;              /* multi-select mode in the sidebar */
+const picked = new Set();
+
+function setPicking(on){
+  picking = on;
+  if (!on) picked.clear();
+  $("#selbar").hidden = !on;
+  renderList();
+}
+function paintSelbar(){
+  const n = picked.size;
+  $("#selcount").textContent = n ? n + " selected" : "Select chats to delete";
+  $("#seldel").disabled = !n;
+}
+
 function renderList(){
   const q = $("#histsearch").value.trim().toLowerCase();
   const shown = chats.filter(c => {
@@ -799,9 +944,14 @@ function renderList(){
     return (c.msgs||[]).some(m => String(m.content||"").toLowerCase().includes(q));
   });
   const list = $("#chatlist");
+  if (picking) paintSelbar();
   if (!shown.length){
     list.innerHTML = '<div class="empty-hist">' +
-      (chats.length ? "No chat matches that." : "No chats yet.") + "</div>";
+      (chats.length ? "No chat matches that."
+                    : 'No chats yet.<button class="lk" id="importlink">Import from the account</button>') +
+      "</div>";
+    const lk = $("#importlink");
+    if (lk) lk.onclick = () => askImport();
     return;
   }
   let html = "", group = "";
@@ -809,14 +959,26 @@ function renderList(){
     const b = bucket(c.updated || c.created || Date.now());
     if (b !== group){ group = b; html += '<div class="grouphd">' + esc(b) + "</div>"; }
     const t = esc(titleFor(c));
-    html += '<div class="ci' + (cur && cur.id === c.id ? " on" : "") + '" data-id="' + c.id +
-      '" title="' + t + '"><span class="t">' + t + '</span>' +
-      '<button class="k" data-kebab="' + c.id + '" aria-label="Chat options" aria-haspopup="menu">' +
-      '<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5.5" r="1.6"/>' +
-      '<circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="18.5" r="1.6"/></svg></button></div>';
+    const on = picking ? (picked.has(c.id) ? " picked" : "") : (cur && cur.id === c.id ? " on" : "");
+    html += '<div class="ci' + on + '" data-id="' + c.id + '" title="' + t + '">' +
+      (picking ? '<input type="checkbox" class="cbx" tabindex="-1"' +
+                 (picked.has(c.id) ? " checked" : "") + ">" : "") +
+      '<span class="t">' + t + "</span>" +
+      (picking ? "" :
+        '<button class="k" data-kebab="' + c.id + '" aria-label="Chat options" aria-haspopup="menu">' +
+        '<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5.5" r="1.6"/>' +
+        '<circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="18.5" r="1.6"/></svg></button>') +
+      "</div>";
   }
   list.innerHTML = html;
   list.querySelectorAll(".ci").forEach(el => el.onclick = e => {
+    if (picking){
+      e.preventDefault();
+      const id = el.dataset.id;
+      if (picked.has(id)) picked.delete(id); else picked.add(id);
+      renderList();
+      return;
+    }
     if (e.target.closest("[data-kebab]") || e.target.tagName === "INPUT") return;
     openChat(el.dataset.id);
   });
@@ -824,6 +986,25 @@ function renderList(){
     e.stopPropagation(); openMenu($("#citemmenu"), b, {chat: b.dataset.kebab});
   });
 }
+
+$("#seldone").onclick = () => setPicking(false);
+$("#selall").onclick = () => {
+  const q = $("#histsearch").value.trim().toLowerCase();
+  const shown = chats.filter(c => !q || titleFor(c).toLowerCase().includes(q) ||
+    (c.msgs||[]).some(m => String(m.content||"").toLowerCase().includes(q)));
+  const all = shown.every(c => picked.has(c.id));
+  shown.forEach(c => all ? picked.delete(c.id) : picked.add(c.id));
+  renderList();
+};
+$("#seldel").onclick = () => {
+  const ids = [...picked];
+  if (!ids.length) return;
+  const list = chats.filter(c => ids.includes(c.id));
+  confirmDlg("Delete " + ids.length + " chat" + (ids.length === 1 ? "" : "s") + "?",
+    "They are removed from this browser for good." + cascadeSentence(list),
+    "Delete " + ids.length,
+    () => { setPicking(false); deleteChats(ids); });
+};
 $("#histsearch").addEventListener("input", renderList);
 $("#newchat").onclick  = () => { newChat(); showView("chat"); };
 $("#newchat2").onclick = () => { newChat(); showView("chat"); };
@@ -846,6 +1027,118 @@ function startRename(id){
     if (e.key === "Enter"){ e.preventDefault(); inp.blur(); }
     if (e.key === "Escape"){ inp.onblur = null; done(false); }
   };
+}
+
+/* ============================================================
+   Importing the account's own history.
+
+   The chats in this sidebar live in this browser, so a conversation held by
+   the provider account — one from before this dashboard existed, or one you
+   had in another browser — is invisible here until it is pulled across.
+   /api/history reads it through the signed-in session.
+   ============================================================ */
+const IMPORT_PAGE = 200;     /* titles per request */
+const IMPORT_PAGES = 10;     /* at most this many, so a huge account still ends */
+
+function historyModels(){
+  const ps = (lastStatus && lastStatus.providers) || {};
+  return Object.keys(ps).filter(k => ps[k].supports_history);
+}
+function importModel(){
+  const avail = historyModels();
+  if (!avail.length) return null;
+  const m = currentModel();
+  return avail.includes(m) ? m : avail[0];
+}
+function askImport(){
+  const model = importModel();
+  if (!model)
+    return confirmDlg("Nothing to import from",
+      "No provider on this server exposes a conversation list it can read. ChatGPT does; Gemini does not.",
+      "OK", null);
+  confirmDlg("Import chat history?",
+    "Reads the conversation list from the " + model + " account and adds the ones " +
+    "this browser does not have yet, newest first. Messages load when you open a " +
+    "chat. Nothing is deleted.",
+    "Import", () => runImport(model));
+}
+async function runImport(model){
+  const have = new Set(chats.map(c => c.conv).filter(Boolean));
+  let offset = 0, added = 0, already = 0, more = true, page = 0, failure = null;
+
+  while (more && page < IMPORT_PAGES){
+    toast(added ? "Imported " + added + " so far…" : "Reading the account's history…");
+    let j;
+    try{
+      const r = await fetch("/api/history?model=" + encodeURIComponent(model) +
+                            "&limit=" + IMPORT_PAGE + "&offset=" + offset);
+      if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,200));
+      j = await r.json();
+    }catch(e){ failure = String(e.message || e); break; }
+
+    const got = j.conversations || [];
+    for (const conv of got){
+      if (have.has(conv.id)){ already++; continue; }
+      have.add(conv.id);
+      /* A stub: title and dates now, messages the first time it is opened. The
+         site rate-limits per-thread reads, so pulling every body up front gets
+         most of them refused. */
+      chats.push({id: uid(), conv: conv.id, convModel: model, imported: true,
+                  stub: true, title: String(conv.title || "").slice(0,120),
+                  model, system: "", msgs: [],
+                  created: conv.created || conv.updated || Date.now(),
+                  updated: conv.updated || conv.created || Date.now()});
+      added++;
+    }
+    offset += got.length;
+    more = !!j.has_more && got.length > 0;
+    page++;
+  }
+
+  chats.sort((a,b) => (b.updated||0) - (a.updated||0));
+  const stored = saveChats();
+  renderList();
+
+  if (failure && !added) return toast("Import failed: " + failure);
+  if (!added)
+    return toast(already ? "Nothing new: all " + already + " are already here"
+                         : "That account has no conversations to import");
+  toast("Imported " + added + " conversation" + (added === 1 ? "" : "s") +
+        (already ? ", " + already + " already here" : "") +
+        ". Open one to load its messages." +
+        (more ? " The account holds more than " + (IMPORT_PAGE * IMPORT_PAGES) +
+                " conversations, so the oldest were left out." : "") +
+        (stored ? "" : " This browser's storage filled up, so the oldest were dropped.") +
+        (failure ? " The last page failed: " + failure : ""));
+}
+
+/* Fill in an imported chat the first time it is opened. */
+async function loadStub(c){
+  if (!c.stub || !c.conv || c.loading) return;
+  c.loading = true;
+  renderLog();
+  try{
+    const r = await fetch("/api/conversation/" + encodeURIComponent(c.conv) +
+                          "?model=" + encodeURIComponent(c.convModel || c.model || ""));
+    if (!r.ok){
+      let detail = "";
+      try{ detail = (await r.json()).detail || ""; }catch(_){}
+      throw new Error(detail || "HTTP " + r.status);
+    }
+    const conv = (await r.json()).conversation || {};
+    c.msgs = (conv.messages || []).map(m => ({
+      role: m.role, content: m.content, ts: m.ts || c.updated}));
+    if (conv.title && !c.title) c.title = String(conv.title).slice(0,120);
+    delete c.stub;
+    saveChats();
+  }catch(e){
+    c.loadError = String(e.message || e);
+    toast("Could not load that conversation: " + c.loadError);
+  }finally{
+    delete c.loading;
+    if (cur && cur.id === c.id) renderLog();
+    renderList();
+  }
 }
 
 /* ============================================================
@@ -1064,22 +1357,36 @@ $("#kebabmenu").querySelectorAll(".mi").forEach(b => b.onclick = () => {
     return startRename(id);
   }
   if (act === "export") return exportChat();
+  if (act === "import") return askImport();
+  if (act === "select"){
+    if (!chats.length)
+      return confirmDlg("No chats yet", "There is nothing to select.", "OK", null);
+    return setPicking(true);
+  }
   if (act === "delete"){
-    if (!chats.some(c => c.id === id)){ newChat(); return; }
-    return confirmDlg("Delete this chat?", "It is removed from this browser for good.", "Delete",
+    const chat = chats.find(c => c.id === id);
+    if (!chat){ newChat(); return; }
+    return confirmDlg("Delete this chat?",
+      "It is removed from this browser for good." + cascadeSentence([chat]), "Delete",
       () => deleteChat(id));
   }
   if (act === "clearall")
-    return confirmDlg("Delete all chats?", chats.length + " conversation(s) are removed from this browser for good.",
-      "Delete all", () => { chats = []; saveChats(); newChat(); });
+    return confirmDlg("Delete all chats?",
+      chats.length + " conversation(s) are removed from this browser for good." +
+      cascadeSentence(chats),
+      "Delete all", () => deleteChats(chats.map(c => c.id)));
 });
 $("#citemmenu").querySelectorAll(".mi").forEach(b => b.onclick = () => {
   const act = b.dataset.act, id = menuCtx.chat;
   closeMenus();
   if (act === "rename") return startRename(id);
-  if (act === "delete") return confirmDlg("Delete this chat?",
-    "“" + titleFor(chats.find(c => c.id === id) || {}) + "” is removed from this browser for good.",
-    "Delete", () => deleteChat(id));
+  if (act === "delete"){
+    const chat = chats.find(c => c.id === id) || {};
+    return confirmDlg("Delete this chat?",
+      "“" + titleFor(chat) + "” is removed from this browser for good." +
+      cascadeSentence([chat]),
+      "Delete", () => deleteChat(id));
+  }
 });
 
 function exportChat(){
@@ -1267,14 +1574,31 @@ function turnHtml(m, i, lastAssistant){
   return '<div class="turn assistant" data-i="' + i + '"><div class="body prose">' + body +
     "</div>" + acts + "</div>";
 }
+/* An imported chat whose messages have not been fetched yet. */
+function stubHtml(){
+  if (cur.loading)
+    return '<div class="turn assistant"><div class="body prose"><div class="thinking">' +
+      '<span class="orb"></span><span>Loading this conversation from the account</span>' +
+      "</div></div></div>";
+  return '<div class="turn assistant"><div class="body prose"><p>' +
+    (cur.loadError
+      ? esc(cur.loadError)
+      : "This conversation is in the account. Its messages are not in this browser yet.") +
+    '</p><p><button class="bt" id="stubload">Load messages</button></p></div></div>';
+}
+
 function renderLog(){
   const msgs = (cur && cur.msgs) || [];
+  const stub = !!(cur && cur.stub);
   let lastAssistant = -1;
   msgs.forEach((m,i) => { if (m.role === "assistant" && !m.error) lastAssistant = i; });
-  $("#chatlog").innerHTML = msgs.map((m,i) => turnHtml(m, i, lastAssistant)).join("");
-  $("#view-chat").classList.toggle("empty", msgs.length === 0);
+  $("#chatlog").innerHTML = msgs.map((m,i) => turnHtml(m, i, lastAssistant)).join("")
+    + (stub ? stubHtml() : "");
+  $("#view-chat").classList.toggle("empty", msgs.length === 0 && !stub);
   $("#sysbtn").classList.toggle("on", !!(cur && cur.system));
   wireTurnActions();
+  const sl = $("#stubload");
+  if (sl) sl.onclick = () => { delete cur.loadError; loadStub(cur); };
   pinned = true; scrollDown();
   updateSendBtn();
 }
@@ -1388,12 +1712,15 @@ async function drive(){
   };
 
   ac = new AbortController();
-  let failed = null, stopped = false;
+  let failed = null, stopped = false, convId = null;
   try{
     const res = await fetch("/v1/chat/completions", {
       method:"POST", headers:{"Content-Type":"application/json"},
       signal: ac.signal,
-      body: JSON.stringify({model, stream:true, messages: apiMessages()}),
+      /* ephemeral:false on purpose: this is a person's own conversation, not an
+         agent's scratch question, so it stays in the account (and stays
+         deletable from here). An install can default the other way. */
+      body: JSON.stringify({model, stream:true, ephemeral:false, messages: apiMessages()}),
     });
     if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0,300));
     const reader = res.body.getReader(), dec = new TextDecoder();
@@ -1410,7 +1737,11 @@ async function drive(){
           const data = line.slice(5).trim();
           if (data === "[DONE]") continue;
           try{
-            const delta = JSON.parse(data).choices[0].delta.content || "";
+            const o = JSON.parse(data);
+            /* the closing chunk names the account-side conversation this
+               answer landed in, so deleting the chat can delete it too */
+            if (o.conversation_id) convId = o.conversation_id;
+            const delta = o.choices[0].delta.content || "";
             if (delta){ full += delta; paintSoon(); }
           }catch(_){}
         }
@@ -1428,6 +1759,7 @@ async function drive(){
        empty bubble that reads like a broken provider */
     if (failed) cur.msgs.push({role:"assistant", content: failed, error:true, ts: Date.now()});
     else if (!(stopped && !full)) cur.msgs.push({role:"assistant", content: full, ts: Date.now()});
+    if (convId){ cur.conv = convId; cur.convModel = model; }
     cur.updated = Date.now();
     chats.sort((a,b) => (b.updated||0) - (a.updated||0));
     saveChats(); renderList(); renderLog();
@@ -1514,6 +1846,18 @@ $("#imgprompt").addEventListener("keydown", e => { if (e.key === "Enter") $("#im
 /* ============================================================
    Gallery.
    ============================================================ */
+let galPicking = false;
+const galPicked = new Set();
+const TICK_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>';
+
+function paintGalBar(){
+  const n = galPicked.size;
+  $("#galselect").textContent = galPicking ? "Done" : "Select";
+  $("#galdel").hidden = !galPicking;
+  $("#galdel").disabled = !n;
+  $("#galdel").textContent = n ? "Delete " + n : "Delete selected";
+}
+
 async function loadGallery(){
   try{
     const p = $("#galfilter").value;
@@ -1523,14 +1867,52 @@ async function loadGallery(){
       : "No saved images yet.";
     $("#galgrid").innerHTML = j.images.map(im => {
       const when = new Date(im.mtime*1000).toLocaleString();
-      return '<a href="' + esc(im.url) + '" target="_blank" title="' + esc(im.file) + " · " + esc(when) +
+      const on = galPicked.has(im.url) ? " picked" : "";
+      return '<a class="' + on.trim() + '" href="' + esc(im.url) + '" target="_blank" data-url="' +
+        esc(im.url) + '" title="' + esc(im.file) + " · " + esc(when) +
         '"><img src="' + esc(im.url) + '" loading="lazy" alt=""><span class="tag">' +
-        esc(im.provider) + "</span></a>";
+        esc(im.provider) + "</span>" +
+        (galPicking ? '<span class="pick">' + (on ? TICK_SVG : "") + "</span>" : "") + "</a>";
     }).join("");
+    $$("#galgrid a").forEach(a => a.onclick = e => {
+      if (!galPicking) return;
+      e.preventDefault();
+      const u = a.dataset.url;
+      if (galPicked.has(u)) galPicked.delete(u); else galPicked.add(u);
+      loadGallery();
+    });
+    paintGalBar();
   }catch(e){ $("#galinfo").textContent = "The gallery is unavailable: " + e; }
 }
 $("#galrefresh").onclick = loadGallery;
 $("#galfilter").onchange = loadGallery;
+$("#galselect").onclick = () => {
+  galPicking = !galPicking;
+  if (!galPicking) galPicked.clear();
+  loadGallery();
+};
+$("#galdel").onclick = () => {
+  const files = [...galPicked];
+  if (!files.length) return;
+  confirmDlg("Delete " + files.length + " image" + (files.length === 1 ? "" : "s") + "?",
+    "The file" + (files.length === 1 ? " is" : "s are") +
+    " removed from this server's image folder for good. A chat that shows " +
+    (files.length === 1 ? "it" : "them") + " will show a broken image.",
+    "Delete " + files.length, async () => {
+      try{
+        const r = await fetch("/api/gallery/delete", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({files})});
+        if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,160));
+        const j = await r.json();
+        const bad = (j.refused || []).length + (j.missing || []).length;
+        toast("Deleted " + (j.deleted || []).length + " image(s)" +
+              (bad ? ", " + bad + " could not be removed" : ""));
+      }catch(e){ toast("Delete failed: " + (e.message || e)); }
+      galPicked.clear(); galPicking = false;
+      loadGallery();
+    });
+};
 
 /* ============================================================
    Boot.

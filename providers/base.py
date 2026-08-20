@@ -19,6 +19,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger("gemini_server")
 
@@ -32,6 +33,12 @@ CHROME_ARGS = [
     "--enable-unsafe-swiftshader",
     "--ignore-gpu-blocklist",
 ]
+
+
+class RateLimited(RuntimeError):
+    """The site refused a read because we asked too often. Distinct from a
+    failure: the same call works again after a pause, so callers surface it as
+    "try again shortly" rather than "broken"."""
 
 
 def patch_cdp() -> None:
@@ -392,6 +399,15 @@ class Provider(ABC):
     # buffer. Incremental (False) is fine for providers whose text only grows.
     buffered_stream: bool = False
 
+    # --- account-side history (optional) ---
+    # True when the provider can read and delete its own conversation list.
+    # The history endpoints and the dashboard's import button turn themselves
+    # off for a provider that leaves this False.
+    supports_history: bool = False
+    # Origin the history calls run against, so a page carrying the signed-in
+    # session can be found among the browser's open tabs.
+    site_origin: str = ""
+
     # --- image input (upload) ---
     # True when this provider can accept attached files (images) with a prompt.
     supports_upload: bool = False
@@ -631,6 +647,81 @@ class Provider(ABC):
         """Return [{mime, b64|src, alt}] for generated images in the last
         response. Default: none."""
         return []
+
+    @asynccontextmanager
+    async def session_tab(self, browser):
+        """Yield a page on the site's own origin, for calls that need the
+        signed-in session but no drive (reading or deleting the conversation
+        list).
+
+        Reuses a tab that is already on the site: these calls are fetches
+        against the site's own API and never navigate, so they cannot disturb a
+        conversation sitting there. When no such tab exists it navigates the
+        browser's FIRST tab — the very tab a drive uses (``browser.get`` without
+        ``new_tab`` always takes ``targets[0]``), so the profile still has
+        exactly one page and looks no different from a normal drive.
+
+        **Never open a second tab here.** ChatGPT multiplexes one WebSocket per
+        profile: with two live tabs on the site, one conversation gets the
+        stream and the other reads 0 chars until the deadline. That is the same
+        wall 2026-08-18's tab-pool attempt hit, and opening a session tab
+        alongside the drive's reproduced it on 2026-08-20.
+        """
+        origin = self.site_origin or self.chat_url
+        for tab in list(getattr(browser, "tabs", None) or []):
+            url = getattr(getattr(tab, "target", None), "url", "") or ""
+            if origin and url.startswith(origin):
+                yield tab
+                return
+
+        page = await browser.get(self.chat_url)
+        # A tab mid-navigation answers about:blank for a moment, and a relative
+        # fetch there has no origin to resolve against.
+        for _ in range(40):
+            try:
+                here = await page.evaluate("location.origin")
+            except Exception:
+                here = ""
+            if isinstance(here, str) and here and origin.startswith(here):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(f"[{self.name}] could not reach {origin}")
+        yield page
+
+    async def conversation_id(self, page) -> str:
+        """Id of the conversation the current drive landed on, "" if unknown.
+
+        Returned to the caller so a client that keeps its own copy of a chat can
+        later delete the account-side thread that belongs to it.
+        """
+        return ""
+
+    async def list_conversations(self, page, limit: int = 200,
+                                 offset: int = 0) -> dict:
+        """The account's conversation titles, newest first:
+        ``{"conversations": [{id, title, created, updated}], "has_more": bool}``.
+
+        Titles only, deliberately. Reading every thread's messages up front is
+        what trips a site's rate limiter, so a body is fetched one at a time by
+        ``fetch_conversation`` when someone actually opens it — the same way the
+        site's own sidebar behaves. Default: no readable history.
+        """
+        return {"conversations": [], "has_more": False}
+
+    async def fetch_conversation(self, page, conv_id: str) -> dict:
+        """One conversation with its messages:
+        ``{id, title, created, updated, messages: [{role, content, ts}]}``.
+
+        Raises ``RateLimited`` when the site refuses for asking too often, so a
+        caller can say "try again shortly" instead of reporting a fault.
+        """
+        raise NotImplementedError(f"[{self.name}] cannot read a conversation")
+
+    async def delete_conversation(self, page, conv_id: str) -> bool:
+        """Delete one conversation by id. This is the account's own thread, not
+        a local copy, so it is as destructive as the site's own Delete."""
+        return False
 
     async def discard_conversation(self, page) -> bool:
         """Delete the conversation this drive just created.

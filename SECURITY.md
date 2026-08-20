@@ -20,11 +20,14 @@ There is no bounty and this is a personal project, so expect a reply in days rat
 | `/v1/*`, `/api/*` | Open from loopback. From anywhere else, `BROWSER_LLM_API_KEY` is required (`Authorization: Bearer` or `X-Api-Key`) when it's set. |
 | Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. |
 | Local file paths as attachments | Loopback and same-origin only. `ALLOW_REMOTE_FILE_PATHS=1` opts out. |
+| Reading and deleting account history (`/api/history`, `/api/conversation/*`, `/api/conversations/delete`) | Same-origin only. These read and delete someone's real chat threads on the provider's site. |
+| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside `IMAGE_DIR` after symlinks, with a saved-image extension. |
 | Attachment size and count | `MAX_ATTACHMENT_MB` (20), `MAX_ATTACHMENTS` (6). |
+| Bulk delete size | 200 ids or files per call, so a slip in a client can't turn into thousands of site calls. |
 | Bind address | `127.0.0.1` by default. LAN exposure is opt-in via `BROWSER_LLM_HOST`. |
 
 The decision logic lives in `authz.py`, on its own so it can be unit-tested without starting the
-server: `tests/test_authz.py` and `tests/test_attachments.py`.
+server: `tests/test_authz.py`, `tests/test_attachments.py` and `tests/test_history.py`.
 
 ## Loopback is not the same as trusted
 
@@ -38,7 +41,15 @@ ChatGPT, and read the model's description of it back: a file-read primitive for 
 could guess. `authz.origin_is_trusted()` now requires either no `Origin` header (a CLI or the
 desktop app; a browser cannot omit it cross-origin) or one that matches the host being addressed.
 
-If you're changing that path policy: don't simplify it back to a loopback check.
+`Origin: null` counts as another site, which is the part that is easy to get wrong. A page can hand
+itself an opaque origin with `<iframe sandbox="allow-scripts" srcdoc>`, and the frame's `fetch`
+then carries `null` instead of the page's own origin. Reproduced live on 2026-08-20 from a page on
+`http://localhost:3000`: its direct call to `/api/history` was refused, while the sandboxed one
+returned 200 and the account's chat titles, which the frame passed back out with `postMessage`.
+Trusting `null` reopens every endpoint the origin check protects.
+
+If you're changing that path policy: don't simplify it back to a loopback check, and don't treat a
+missing origin and an opaque one as the same thing.
 
 ## Running it safely
 

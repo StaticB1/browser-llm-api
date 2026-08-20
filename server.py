@@ -67,7 +67,7 @@ except ImportError:  # older venv without httpx: local providers still work
 
 from providers import (
     PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS,
-    CompletionTracker,
+    CompletionTracker, RateLimited,
 )
 import authz
 from _version import __version__
@@ -372,6 +372,19 @@ class ChatCompletionRequest(BaseModel):
     ephemeral: Optional[bool] = None
 
 
+class ConversationDeleteRequest(BaseModel):
+    """Delete these conversations from the provider's account. Destructive on
+    someone's real history, hence the same-origin gate on the endpoint."""
+    model: Optional[str] = None
+    ids: list[str] = []
+
+
+class GalleryDeleteRequest(BaseModel):
+    """Delete saved image files. Each entry is a served path
+    ('/images/chatgpt/x.png'), a full URL, or 'provider/file'."""
+    files: list[str] = []
+
+
 class ImageGenRequest(BaseModel):
     prompt: str
     model: str = DEFAULT_PROVIDER
@@ -394,6 +407,11 @@ _locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in PROVIDERS}
 # (heavy canvas/blobs + growing SPA DOM) and starts timing out; a fresh browser
 # resets it. Recycle a provider's browser once it has done this many image gens.
 _RECYCLE_AFTER_IMAGES = int(os.environ.get("BROWSER_RECYCLE_AFTER_IMAGES", "3"))
+
+# Most conversations or image files one delete call may name. A multi-select in
+# the UI is a handful of rows; a request for thousands is a mistake or a script
+# with a bug, and either way it should not run to completion.
+_MAX_BULK_DELETE = 200
 
 # Whether a chat completion that says nothing about it should have its
 # conversation deleted afterwards. Off by default: the sessions are a
@@ -780,10 +798,26 @@ async def _discard(provider, page) -> None:
         logger.warning(f"[{provider.name}] discard_conversation failed: {e}")
 
 
+async def _note_conversation(provider, page, meta: Optional[dict]) -> None:
+    """Record which account-side conversation this drive landed in, so a client
+    keeping its own copy of the chat can delete the real thread later. Best
+    effort: a missing id costs the client a cascade, not the answer."""
+    if meta is None:
+        return
+    try:
+        conv_id = await provider.conversation_id(page)
+    except Exception as e:
+        logger.debug(f"[{provider.name}] conversation id unavailable: {e}")
+        return
+    if conv_id:
+        meta["conversation_id"] = conv_id
+
+
 async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
                    raw_uploads: Optional[list] = None,
                    allow_local_paths: bool = True,
-                   ephemeral: bool = False) -> AsyncGenerator[str, None]:
+                   ephemeral: bool = False,
+                   meta: Optional[dict] = None) -> AsyncGenerator[str, None]:
     """Open the provider's chat, attach any input images, send the prompt, stream
     text deltas, then append any generated images as markdown links.
 
@@ -808,6 +842,8 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
                 _note_image_gen(provider)  # count toward browser recycle
             if ephemeral:
                 await _discard(provider, page)
+            else:
+                await _note_conversation(provider, page, meta)
     except Exception as e:
         await _evict_dead_browser(provider, e)
         raise
@@ -818,7 +854,8 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
 async def drive_once(provider, prompt: str, attachments: Optional[list] = None, *,
                      raw_uploads: Optional[list] = None,
                      allow_local_paths: bool = True,
-                     ephemeral: bool = False) -> tuple[str, list[dict]]:
+                     ephemeral: bool = False,
+                     meta: Optional[dict] = None) -> tuple[str, list[dict]]:
     """Non-streaming drive used by non-streaming chat and the images endpoints:
     returns (text, images)."""
     browser = await get_browser(provider)
@@ -834,6 +871,8 @@ async def drive_once(provider, prompt: str, attachments: Optional[list] = None, 
                 _note_image_gen(provider)  # count toward browser recycle
             if ephemeral:
                 await _discard(provider, page)
+            else:
+                await _note_conversation(provider, page, meta)
             return text, imgs
     except Exception as e:
         await _evict_dead_browser(provider, e)
@@ -1153,6 +1192,9 @@ async def api_status():
             "busy": _locks[name].locked(),
             "supports_images": p.supports_images,
             "supports_upload": getattr(p, "supports_upload", False),
+            # can its account-side conversation list be read and deleted?
+            # (the dashboard's import button and cascading delete key off this)
+            "supports_history": getattr(p, "supports_history", False),
             "images_since_recycle": _img_gen_count.get(name, 0),
             "recycle_after_images": _RECYCLE_AFTER_IMAGES,
             "default": name == DEFAULT_PROVIDER,
@@ -1179,6 +1221,7 @@ async def api_status():
             "busy": False,
             "supports_images": True,
             "supports_upload": True,  # upstream decides; assume it can
+            "supports_history": False,  # history stays where the browser is
             "images_since_recycle": 0,
             "recycle_after_images": _RECYCLE_AFTER_IMAGES,
             "default": name == DEFAULT_PROVIDER,
@@ -1237,6 +1280,202 @@ async def api_gallery(provider: Optional[str] = None, limit: int = 60):
     items.sort(key=lambda x: x["mtime"], reverse=True)
     limit = max(1, min(int(limit or 60), 500))
     return {"images": items[:limit], "total": len(items), "image_dir": str(_image_dir)}
+
+
+def _trusted_caller(request: Request) -> bool:
+    """True when this request did not come from a page on another site.
+
+    CORS is wide open here (the widget embeds anywhere), so any site the
+    operator visits can make their browser call this server from 127.0.0.1 and
+    read the answer. That is survivable for "ask the model a question"; it is
+    not survivable for reading the whole of someone's chat history or deleting
+    it, so those endpoints require an Origin that matches the host they were
+    addressed to — or no Origin at all (curl, the CLI, the desktop app; a
+    browser cannot omit it cross-origin). A keyed LAN client still passes: the
+    API-key middleware has already checked its key by this point.
+    """
+    return authz.origin_is_trusted(request.headers.get("origin"),
+                                   request.headers.get("host"))
+
+
+def _require_trusted(request: Request, what: str) -> None:
+    if not _trusted_caller(request):
+        origin = request.headers.get("origin") or "an unknown origin"
+        logger.warning(f"refused {what} from cross-origin caller {origin}")
+        raise HTTPException(
+            status_code=403,
+            detail=f"{what} is refused for a cross-origin caller ({origin}). "
+                   f"Open the dashboard on this server's own address instead.")
+
+
+def _history_provider(model: Optional[str]):
+    """The provider whose account history we are about to touch, or a 4xx/501
+    explaining why we can't."""
+    name = _resolve_model(model)
+    if name in REMOTES:
+        raise HTTPException(
+            status_code=501,
+            detail=f"{name} is proxied to {REMOTES[name]}; its history lives on "
+                   f"that machine. Import from that install's dashboard.")
+    provider = get_provider(model)
+    if not getattr(provider, "supports_history", False):
+        raise HTTPException(
+            status_code=501,
+            detail=f"{provider.name} exposes no conversation list this server can read")
+    return provider
+
+
+@app.get("/api/history")
+async def api_history(request: Request, model: Optional[str] = None,
+                      limit: int = 200, offset: int = 0):
+    """The provider account's conversation titles, newest first — what the
+    dashboard imports so a chat that predates it, or was held in another
+    browser, is visible here too.
+
+    Titles only. The bodies come one at a time from /api/conversation/{id},
+    because reading every thread up front is exactly what makes the site start
+    answering 429. Reads the signed-in session, so it is same-origin only.
+    """
+    _require_trusted(request, "reading the account's chat history")
+    provider = _history_provider(model)
+    limit = max(1, min(int(limit or 200), 1000))
+    offset = max(0, int(offset or 0))
+    async with _locks[provider.name]:
+        try:
+            browser = await get_browser(provider)
+            async with provider.session_tab(browser) as page:
+                data = await provider.list_conversations(page, limit=limit,
+                                                        offset=offset)
+        except Exception as e:
+            await _evict_dead_browser(provider, e)
+            logger.error(f"[{provider.name}] history read failed: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail=str(e))
+    return {"model": provider.name, "limit": limit, "offset": offset, **data}
+
+
+@app.get("/api/conversation/{conv_id}")
+async def api_conversation(conv_id: str, request: Request,
+                           model: Optional[str] = None):
+    """One conversation's messages, read from the account. The dashboard calls
+    this when an imported chat is opened, so a whole account's history is never
+    pulled at once."""
+    _require_trusted(request, "reading a conversation from the account")
+    provider = _history_provider(model)
+    async with _locks[provider.name]:
+        try:
+            browser = await get_browser(provider)
+            async with provider.session_tab(browser) as page:
+                conv = await provider.fetch_conversation(page, conv_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except RateLimited as e:
+            # Not a fault: the same call works after a pause, and the client
+            # should say so rather than reporting the history as broken.
+            raise HTTPException(status_code=429, detail=str(e))
+        except Exception as e:
+            await _evict_dead_browser(provider, e)
+            logger.error(f"[{provider.name}] conversation read failed: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail=str(e))
+    return {"model": provider.name, "conversation": conv}
+
+
+@app.post("/api/conversations/delete")
+async def api_conversations_delete(req: ConversationDeleteRequest, request: Request):
+    """Delete conversations from the provider's account by id. This is the
+    site's own Delete, on someone's real history: same-origin only."""
+    _require_trusted(request, "deleting conversations from the account")
+    ids = [i.strip() for i in (req.ids or []) if isinstance(i, str) and i.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids is empty")
+    if len(ids) > _MAX_BULK_DELETE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many ids ({len(ids)}); delete at most {_MAX_BULK_DELETE} at a time")
+    provider = _history_provider(req.model)
+    deleted: list[str] = []
+    failed: list[str] = []
+    async with _locks[provider.name]:
+        try:
+            browser = await get_browser(provider)
+            async with provider.session_tab(browser) as page:
+                for conv_id in ids:
+                    ok = await provider.delete_conversation(page, conv_id)
+                    (deleted if ok else failed).append(conv_id)
+        except Exception as e:
+            await _evict_dead_browser(provider, e)
+            logger.error(f"[{provider.name}] conversation delete failed: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail=str(e))
+    logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s)")
+    return {"model": provider.name, "deleted": deleted, "failed": failed}
+
+
+def _gallery_target(ref: str) -> Optional[Path]:
+    """Resolve a gallery reference to a real file inside IMAGE_DIR, or None.
+
+    This deletes files, so the reference is not trusted: symlinks are resolved
+    first, the result must still sit inside the image dir, and it must carry a
+    saved-image extension. '..', absolute paths and anything outside get None.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    from urllib.parse import unquote, urlsplit
+    if "://" in ref:
+        ref = urlsplit(ref).path
+    ref = ref.split("?", 1)[0].split("#", 1)[0]
+    # Decode before the '..' check, not after: a reference lifted from a URL
+    # can spell the traversal as %2E%2E%2F, and saved filenames are provider
+    # slug + timestamp + hex, so there is never a literal '%' to protect.
+    ref = unquote(ref)
+    if ref.startswith("/images/"):
+        ref = ref[len("/images/"):]
+    ref = ref.lstrip("/")
+    if not ref or ".." in ref.split("/"):
+        return None
+    base = _image_dir.resolve()
+    try:
+        target = (base / ref).resolve()
+    except Exception:
+        return None
+    if target == base or not target.is_relative_to(base):
+        return None
+    if target.suffix.lstrip(".").lower() not in set(_EXT.values()):
+        return None
+    return target
+
+
+@app.post("/api/gallery/delete")
+async def api_gallery_delete(req: GalleryDeleteRequest, request: Request):
+    """Delete saved images from disk — what the gallery's own delete calls, and
+    what a chat delete calls for the images that chat generated."""
+    _require_trusted(request, "deleting saved images")
+    refs = [f for f in (req.files or []) if isinstance(f, str) and f.strip()]
+    if not refs:
+        raise HTTPException(status_code=400, detail="files is empty")
+    if len(refs) > _MAX_BULK_DELETE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many files ({len(refs)}); delete at most {_MAX_BULK_DELETE} at a time")
+    deleted: list[str] = []
+    missing: list[str] = []
+    refused: list[str] = []
+    for ref in refs:
+        target = _gallery_target(ref)
+        if target is None:
+            refused.append(ref)
+            continue
+        try:
+            target.unlink()
+            deleted.append(ref)
+        except FileNotFoundError:
+            missing.append(ref)
+        except Exception as e:
+            logger.warning(f"could not delete {target}: {e}")
+            refused.append(ref)
+    if refused:
+        logger.warning(f"gallery delete refused {len(refused)} reference(s)")
+    logger.info(f"gallery delete: {len(deleted)} removed, {len(missing)} already gone")
+    return {"deleted": deleted, "missing": missing, "refused": refused}
 
 
 @app.get("/v1/models")
@@ -1301,7 +1540,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         # generator after this handler returns, so a lock around the
         # `return StreamingResponse(...)` would be released before the first
         # poll and let concurrent requests fight over one browser tab.
-        def _chunk(content: Optional[str], finish: Optional[str]) -> str:
+        def _chunk(content: Optional[str], finish: Optional[str],
+                   extra: Optional[dict] = None) -> str:
             data = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1316,17 +1556,23 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     }
                 ],
             }
+            if extra:
+                data.update(extra)
             return f"data: {json.dumps(data)}\n\n"
 
         async def event_stream():
             started = time.monotonic()
             err: Optional[BaseException] = None
+            # Filled by the drive with the account-side conversation id, which
+            # rides out on the closing chunk (see _note_conversation).
+            meta: dict = {}
             try:
                 async with _locks[provider.name]:
                     started = time.monotonic()  # reset: exclude queue-wait
                     async for chunk in run_chat(provider, prompt, specs,
                                                 allow_local_paths=allow_paths,
-                                                ephemeral=_ephemeral(req)):
+                                                ephemeral=_ephemeral(req),
+                                                meta=meta):
                         yield _chunk(chunk, None)
             except Exception as e:
                 # Surface the failure in-band; a raised exception here would
@@ -1336,18 +1582,22 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 yield _chunk(f"\n\n[browser-llm error: {e}]", None)
             finally:
                 _record_request(provider.name, started, err)
-            yield _chunk(None, "stop")
+            conv_id = meta.get("conversation_id")
+            yield _chunk(None, "stop",
+                         {"conversation_id": conv_id} if conv_id else None)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # --- Non-streaming ---
+    meta: dict = {}
     async with _locks[provider.name]:
         started = time.monotonic()
         try:
             text, imgs = await drive_once(provider, prompt, specs,
                                           allow_local_paths=allow_paths,
-                                          ephemeral=_ephemeral(req))
+                                          ephemeral=_ephemeral(req),
+                                          meta=meta)
         except HTTPException:
             _record_request(provider.name, started, RuntimeError("bad request"))
             raise
@@ -1359,7 +1609,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     full_text = _compose(text, imgs, provider)
 
     prompt_tokens = sum(len(_message_pieces(m)[0].split()) for m in req.messages)
-    return {
+    body = {
         "id": completion_id,
         "object": "chat.completion",
         "created": created,
@@ -1377,6 +1627,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             "total_tokens": prompt_tokens + len(full_text.split()),
         },
     }
+    # Not OpenAI: which conversation in the account this answer lives in, so a
+    # client that keeps its own copy can delete the real thread with it.
+    if meta.get("conversation_id"):
+        body["conversation_id"] = meta["conversation_id"]
+    return body
 
 
 def _ref_specs(req: ImageGenRequest) -> list[str]:

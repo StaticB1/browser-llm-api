@@ -89,10 +89,19 @@ rounded composer.
 - **Chat history** — every conversation is kept in this browser (`localStorage`), grouped by day,
   searchable by title and body. Rename or delete one from its row, delete all from the top-bar
   menu, export one as JSON. New chat is `Ctrl+Shift+O`.
+- **Import the account's own history** — "Import history" in the top-bar menu pulls the titles of
+  the conversations already in the signed-in account, so threads that predate this dashboard, or
+  that you had in another browser, are listed here too. A thread's messages load the first time you
+  open it, one at a time, because reading a whole account up front is what makes the site start
+  answering 429. Only ChatGPT exposes a conversation list this server can read.
+- **Delete that means delete** — deleting a chat also deletes the images it generated from disk and
+  the real conversation from the provider's account, and says which of the three it did. Select
+  several at once from the menu's "Select chats", or several images from the gallery's "Select".
 - **Create image** — one-line prompt to image, with an elapsed timer, since free-tier generation
   takes 30s to 4min. Attach reference images to switch to **image-to-image** (the request goes to
   `/v1/images/edits`).
-- **Gallery** — every image saved under `GEMINI_IMAGE_DIR`, newest first, filterable by provider.
+- **Gallery** — every image saved under `GEMINI_IMAGE_DIR`, newest first, filterable by provider,
+  with multi-select delete.
 - **Server** — per-provider telemetry (requests, errors, average and last latency, images until
   recycle), server info (version, uptime, display, image directory), and a copy-paste **embed
   snippet** with a Preview button.
@@ -100,7 +109,11 @@ rounded composer.
 The model picker sits in the top bar and shows each provider's live state; the pill beside it says
 whether the current provider is ready or busy. The theme switch in the sidebar footer has three
 states, light, auto and dark, and auto follows the system setting live. `/api/status` and
-`/api/gallery` back the status readouts and the gallery.
+`/api/gallery` back the status readouts and the gallery; `/api/history`,
+`/api/conversation/{id}`, `/api/conversations/delete` and `/api/gallery/delete` back the import and
+the deletes. Those four reach into a signed-in account, so they answer **403 to a cross-origin
+caller** — open the dashboard on the server's own address and they work; a page on another site
+cannot use them.
 
 ## Embeddable widget
 
@@ -414,7 +427,7 @@ that host has one.
 
 ## Project layout
 
-- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, `/images/<provider>/<file>`, plus `/api/status`, `/api/gallery`, `/version`, `/widget.js`, `/demo`). Also owns the attachment layer: turning whatever a client sent (data URL, base64, http URL, multipart bytes, local path) into files for the browser, and the loopback-only path policy. `main()` is the `browser-llm` console entry point.
+- **`server.py`** — FastAPI server on port **8081** (`/v1/chat/completions`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, `/images/<provider>/<file>`, plus `/api/status`, `/api/gallery`, `/api/history`, `/api/conversation/<id>`, `/api/conversations/delete`, `/api/gallery/delete`, `/version`, `/widget.js`, `/demo`). Also owns the attachment layer: turning whatever a client sent (data URL, base64, http URL, multipart bytes, local path) into files for the browser, and the loopback-only path policy. `main()` is the `browser-llm` console entry point.
 - **`providers/`** — one adapter per site behind a common `Provider` interface (`gemini.py`, `chatgpt.py`); add a backend by adding a provider, not by touching `server.py`. `base.py` holds the generic completion loop, the unit-tested done-decision logic, and the generic file-upload machinery (existing file input, or CDP file-chooser interception for sites that create one on demand).
 - **`webui/`** — `index.html` (mini web dashboard), `widget.js` (embeddable bubble), `widget-demo.html` (`/demo`). Single files, no build step.
 - **`desktop/`** — native Linux desktop app + tray widget (GTK3). See [`desktop/README.md`](desktop/README.md).
@@ -442,11 +455,16 @@ streamed answer / image done, including transient "Analyzing image"-style placeh
 layer (spec forms, size/count limits, the local-and-same-origin path policy, remote inlining) in
 `server.py`.
 
+The history and delete layer is covered the same way: which caller is allowed to read or delete an
+account's threads (an opaque `Origin: null` is not), which provider can answer at all, and which
+gallery reference resolves to a file this server will unlink — traversal, percent-encoded
+traversal, a symlink out of the image dir and a non-image extension are all refused.
+
 The MCP layer is covered too: protocol framing, the `tools/list` contract, error mapping and the
 off-the-read-loop dispatch that keeps a four-minute image generation from stalling a ping.
 
 ```bash
-./venv/bin/python -m unittest discover -s tests -v     # 97 tests, ~0.02s
+./venv/bin/python -m unittest discover -s tests -v     # 119 tests, ~0.03s
 ruff check .                                           # lint, config in pyproject.toml
 ```
 

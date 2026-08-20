@@ -14,8 +14,9 @@ selectors and timing after verifying against a real signed-in session.
 """
 import json
 import logging
+import re
 
-from .base import Provider
+from .base import Provider, RateLimited
 
 logger = logging.getLogger("gemini_server")
 
@@ -131,6 +132,8 @@ class ChatGPTProvider(Provider):
     # hidden `input[data-testid="upload-photos-input"]` (accept=image/*) in the
     # DOM at rest, so the generic input path attaches without touching the "+"
     # menu; the click path below is only a fallback if that input disappears.
+    supports_history = True
+    site_origin = "https://chatgpt.com"
     supports_upload = True
     attach_click_path = [
         ['button[data-testid="composer-plus-btn"]', 'text:add photos & files',
@@ -329,17 +332,28 @@ class ChatGPTProvider(Provider):
             logger.warning(f"[{self.name}] image extraction failed: {e}")
         return []
 
-    # chatgpt.com's own "Delete" menu item is a soft delete: PATCH the
-    # conversation with is_visible=false. Driving the menu would be slower and
-    # would break on every sidebar redesign; the id is in the URL the drive
-    # landed on, and the page's own session cookie authorises the call.
-    _DISCARD_JS = """
+    # ---- account-side history ---------------------------------------------
+    # All of it goes through chatgpt.com's own backend API rather than the
+    # sidebar: driving the menu means a click path per row, it breaks on every
+    # sidebar redesign, and the sidebar only holds what has been scrolled into
+    # view. The page's session cookie authorises the fetch and
+    # /api/auth/session hands out the bearer token the API wants.
+    _CONV_ID_RE = re.compile(r"^[0-9a-f-]{36}$", re.I)
+
+    _CONV_ID_JS = r"""
+    (function(){
+      const m = location.pathname.match(/\/c\/([0-9a-f-]{36})/i);
+      return m ? m[1] : '';
+    })()
+    """
+
+    # Delete = PATCH is_visible:false, exactly what the sidebar's own Delete
+    # does (a soft delete, recoverable by support and by nothing in the UI).
+    _DELETE_JS = """
     (async () => {
-      const m = location.pathname.match(/\\/c\\/([0-9a-f-]{36})/i);
-      if (!m) return 'no conversation in the URL';
       const s = await (await fetch('/api/auth/session', {cache: 'no-store'})).json();
       if (!s || !s.accessToken) return 'no access token';
-      const r = await fetch('/backend-api/conversation/' + m[1], {
+      const r = await fetch('/backend-api/conversation/__ID__', {
         method: 'PATCH',
         headers: {Authorization: 'Bearer ' + s.accessToken,
                   'Content-Type': 'application/json'},
@@ -349,18 +363,222 @@ class ChatGPTProvider(Provider):
     })()
     """
 
-    async def discard_conversation(self, page) -> bool:
+    # Shared by the list and the single-thread read.
+    _TIME_JS = """
+      // The list endpoint hands out ISO strings and the conversation payload
+      // epoch seconds. Take either, give back epoch ms.
+      const ms = (v) => {
+        if (typeof v === 'number' && v > 0) return Math.round(v * 1000);
+        if (typeof v === 'string' && v) return Date.parse(v) || null;
+        return null;
+      };
+      const token = async () => {
+        const s = await (await fetch('/api/auth/session', {cache:'no-store'})).json();
+        return (s && s.accessToken) || '';
+      };
+    """
+
+    # Titles only, paged. This endpoint is not rate-limited (verified
+    # 2026-08-20: five pages back to back, all 200) — unlike the per-thread
+    # read below, which is, so an import must never walk the whole account
+    # through that one.
+    #
+    # Do NOT trust the payload's `total`: it comes back as offset + page + 1
+    # (29, 57, 85 … as you page), so it describes the request, not the account.
+    # A short page is the only honest end-of-list signal.
+    _LIST_JS = r"""
+    (async () => {
+      const LIMIT = __LIMIT__, OFFSET = __OFFSET__;
+      const out = {conversations: [], has_more: false, error: null};
+      __TIME__
+      let tok = '';
+      try { tok = await token(); }
+      catch (e) { out.error = 'session read failed: ' + e; return JSON.stringify(out); }
+      if (!tok) { out.error = 'not signed in (no access token)'; return JSON.stringify(out); }
+      const H = {Authorization: 'Bearer ' + tok};
+
+      let offset = OFFSET;
+      while (out.conversations.length < LIMIT) {
+        const want = Math.min(28, LIMIT - out.conversations.length);
+        let j = null;
+        try {
+          const r = await fetch('/backend-api/conversations?offset=' + offset +
+                                '&limit=' + want + '&order=updated', {headers: H});
+          if (!r.ok) { out.error = 'list HTTP ' + r.status; break; }
+          j = await r.json();
+        } catch (e) { out.error = 'list failed: ' + e; break; }
+        const items = j.items || [];
+        for (const it of items) {
+          out.conversations.push({
+            id: it.id,
+            title: String(it.title || '').trim() || 'Untitled',
+            created: ms(it.create_time),
+            updated: ms(it.update_time) || ms(it.create_time),
+          });
+        }
+        offset += items.length;
+        if (items.length < want) break;      // short page = end of the list
+        out.has_more = true;
+      }
+      return JSON.stringify(out);
+    })()
+    """
+
+    # One thread's messages. Rate-limited by the site (429 "Too many requests"
+    # after a burst, no Retry-After, and the block outlasts a 36s wait), which
+    # is why nothing here loops over the account.
+    _ONE_JS = r"""
+    (async () => {
+      const ID = '__ID__';
+      const out = {conversation: null, error: null, status: 0};
+      __TIME__
+      let tok = '';
+      try { tok = await token(); }
+      catch (e) { out.error = 'session read failed: ' + e; return JSON.stringify(out); }
+      if (!tok) { out.error = 'not signed in (no access token)'; return JSON.stringify(out); }
+
+      let j = null;
+      try {
+        const r = await fetch('/backend-api/conversation/' + ID,
+                              {headers: {Authorization: 'Bearer ' + tok}});
+        out.status = r.status;
+        if (!r.ok) {
+          out.error = r.status === 429
+            ? 'the site is rate-limiting reads of your history; wait a minute and try again'
+            : 'HTTP ' + r.status;
+          return JSON.stringify(out);
+        }
+        j = await r.json();
+      } catch (e) { out.error = 'read failed: ' + e; return JSON.stringify(out); }
+
+      // A conversation is a tree of nodes; the thread a person actually sees is
+      // the path from current_node back to the root, so walk parents and
+      // reverse. Regenerated branches hang off that path and stay out.
+      const map = j.mapping || {};
+      const chain = [];
+      const seen = {};
+      let node = j.current_node;
+      while (node && map[node] && !seen[node]) {
+        seen[node] = 1;
+        chain.push(map[node]);
+        node = map[node].parent;
+      }
+      chain.reverse();
+      const msgs = [];
+      for (const n of chain) {
+        const m = n.message;
+        if (!m) continue;
+        const role = m.author && m.author.role;
+        if (role !== 'user' && role !== 'assistant') continue;
+        if ((m.metadata || {}).is_visually_hidden_from_conversation) continue;
+        const c = m.content || {};
+        let text = '';
+        if (c.content_type === 'text') {
+          text = (c.parts || []).join('\n');
+        } else if (c.content_type === 'multimodal_text') {
+          text = (c.parts || []).map(p =>
+            typeof p === 'string' ? p : (p && p.asset_pointer ? '[image]' : '')
+          ).join('\n');
+        } else {
+          continue;   // reasoning, tool calls, code interpreter output
+        }
+        // ChatGPT wraps canvas-style blocks in its own directive syntax
+        // (`:::writing{variant="chat_message"}` … `:::`). Those lines are
+        // markup for its renderer, not something a person wrote, so they read
+        // as stray punctuation anywhere else.
+        text = (text || '')
+          .split('\n')
+          .filter(ln => !/^\s*:::\s*([a-z_-]+\s*(\{[^}]*\})?)?\s*$/i.test(ln))
+          .join('\n')
+          .trim();
+        if (!text) continue;
+        msgs.push({role: role, content: text, ts: ms(m.create_time)});
+      }
+      out.conversation = {
+        id: ID,
+        title: String(j.title || '').trim() || 'Untitled',
+        created: ms(j.create_time),
+        updated: ms(j.update_time) || ms(j.create_time),
+        messages: msgs,
+      };
+      return JSON.stringify(out);
+    })()
+    """
+
+    async def _read_json(self, page, js: str) -> dict:
+        raw = await page.evaluate(js, await_promise=True, return_by_value=True)
         try:
-            v = await page.evaluate(self._DISCARD_JS, await_promise=True,
-                                    return_by_value=True)
+            return json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception as e:
+            raise RuntimeError(f"could not read the history payload: {e}") from None
+
+    async def list_conversations(self, page, limit: int = 200,
+                                 offset: int = 0) -> dict:
+        js = (self._LIST_JS
+              .replace("__TIME__", self._TIME_JS)
+              .replace("__LIMIT__", str(max(1, int(limit))))
+              .replace("__OFFSET__", str(max(0, int(offset)))))
+        data = await self._read_json(page, js)
+        if data.get("error") and not data.get("conversations"):
+            raise RuntimeError(data["error"])
+        convs = data.get("conversations") or []
+        logger.info(f"[{self.name}] listed {len(convs)} conversation(s) from the account")
+        return {"conversations": convs, "has_more": bool(data.get("has_more")),
+                "warning": data.get("error")}
+
+    async def fetch_conversation(self, page, conv_id: str) -> dict:
+        conv_id = (conv_id or "").strip()
+        if not self._CONV_ID_RE.match(conv_id):
+            raise ValueError("malformed conversation id")
+        js = self._ONE_JS.replace("__TIME__", self._TIME_JS).replace("__ID__", conv_id)
+        data = await self._read_json(page, js)
+        conv = data.get("conversation")
+        if not conv:
+            err = data.get("error") or "the conversation could not be read"
+            if data.get("status") == 429:
+                raise RateLimited(err)
+            raise RuntimeError(err)
+        logger.info(f"[{self.name}] read conversation {conv_id[:8]}… "
+                    f"({len(conv.get('messages') or [])} messages)")
+        return conv
+
+    async def conversation_id(self, page) -> str:
+        try:
+            v = await page.evaluate(self._CONV_ID_JS, return_by_value=True)
+        except Exception as e:
+            logger.warning(f"[{self.name}] conversation id read failed: {e}")
+            return ""
+        if isinstance(v, str):
+            return v
+        logger.warning(f"[{self.name}] conversation id came back as {type(v).__name__}: {v!r}")
+        return ""
+
+    async def delete_conversation(self, page, conv_id: str) -> bool:
+        conv_id = (conv_id or "").strip()
+        if not self._CONV_ID_RE.match(conv_id):
+            logger.warning(f"[{self.name}] refusing to delete a malformed id")
+            return False
+        try:
+            v = await page.evaluate(self._DELETE_JS.replace("__ID__", conv_id),
+                                    await_promise=True, return_by_value=True)
         except Exception as e:
             logger.warning(f"[{self.name}] could not delete the conversation: {e}")
             return False
         if v == "ok":
-            logger.info(f"[{self.name}] conversation deleted (ephemeral request)")
+            logger.info(f"[{self.name}] conversation {conv_id[:8]}… deleted")
             return True
-        logger.warning(f"[{self.name}] could not delete the conversation: {v}")
+        logger.warning(f"[{self.name}] could not delete {conv_id[:8]}…: {v}")
         return False
+
+    async def discard_conversation(self, page) -> bool:
+        conv_id = await self.conversation_id(page)
+        if not conv_id:
+            logger.warning(f"[{self.name}] no conversation in the URL to delete")
+            return False
+        ok = await self.delete_conversation(page, conv_id)
+        if ok:
+            logger.info(f"[{self.name}] conversation deleted (ephemeral request)")
+        return ok
 
     async def logged_in(self, page) -> bool:
         # ChatGPT's logged-OUT page is deceptive: it renders a full sidebar and

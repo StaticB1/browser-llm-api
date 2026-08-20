@@ -5,7 +5,8 @@ model is unknown or absent.
 """
 import os
 
-from .base import Provider, StreamMonitor, CompletionTracker, patch_cdp, CHROME_ARGS
+from .base import (Provider, StreamMonitor, CompletionTracker, RateLimited,
+                   patch_cdp, CHROME_ARGS)
 from .gemini import GeminiProvider
 from .chatgpt import ChatGPTProvider
 
@@ -24,4 +25,5 @@ def get_provider(model: str | None) -> Provider:
     return PROVIDERS[DEFAULT_PROVIDER]
 
 
-__all__ = ["Provider", "StreamMonitor", "CompletionTracker", "patch_cdp", "CHROME_ARGS", "PROVIDERS", "DEFAULT_PROVIDER", "get_provider"]
+__all__ = ["Provider", "StreamMonitor", "CompletionTracker", "RateLimited",
+           "patch_cdp", "CHROME_ARGS", "PROVIDERS", "DEFAULT_PROVIDER", "get_provider"]

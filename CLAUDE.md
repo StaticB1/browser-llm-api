@@ -99,7 +99,11 @@ server.py            # FastAPI app, port 8081. Model→provider router, the gene
                      #   (BROWSER_LLM_HOST/PORT). Serves "/" + /widget.js + /demo +
                      #   /version + /api/status (incl. per-provider telemetry:
                      #   _metrics + _record_request) + /api/gallery, and
-                     #   /v1/images/edits (multipart or JSON).
+                     #   /v1/images/edits (multipart or JSON). Also the account-history
+                     #   endpoints (/api/history, /api/conversation/{id},
+                     #   /api/conversations/delete, /api/gallery/delete) behind
+                     #   _require_trusted + _history_provider, and _gallery_target,
+                     #   which is the only thing allowed to name a file for unlink.
 _version.py          # single source of truth for __version__ (read by pyproject + server).
 pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` +
                      #   `browser-llm-mcp` entry points, and the ruff config.
@@ -107,12 +111,13 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
                      #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
                      #   exception handlers in server.py for no behaviour change. The repo
                      #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 97 unit tests + an editable install + a live MCP
+.github/workflows/ci.yml  # lint + the 119 unit tests + an editable install + a live MCP
                      #   handshake, on every push and PR. No browser, no network, no secrets,
                      #   so a green build means the pure logic holds, NOT that the sites still
                      #   scrape. Nothing here can catch a DOM change; only a real request can.
-SECURITY.md          # threat model + how to report. The origin-trust hole (2026-08-11) is
-                     #   written up there as well as in the gotchas below.
+SECURITY.md          # threat model + how to report. Both origin-trust holes (2026-08-11
+                     #   cross-origin, 2026-08-20 opaque `Origin: null`) are written up
+                     #   there as well as in the gotchas below.
 LICENSE              # MIT.
 README.md            # project overview / usage.
 QUICKSTART.md        # fast-path setup guide.
@@ -130,6 +135,10 @@ webui/index.html     # web dashboard (single file, no build step): ChatGPT-shape
                      #   delete-all, export), streaming chat with a stop button and image
                      #   attachments (click/paste/drop), image gen + image-to-image with
                      #   elapsed timer, gallery, Server view (telemetry + embed snippet).
+                     #   Also imports the account's own conversations (kebab > Import
+                     #   history, stubs + lazy body load), multi-select for chats and for
+                     #   gallery images, and a delete that cascades to the saved images
+                     #   and the real conversation.
 webui/widget.js      # embeddable floating chat bubble (Shadow-DOM isolated, no build step);
                      #   served at /widget.js; auto-discovers API base from its own <script src>.
                      #   Image attach (click/paste/drop), data-attach="0" hides it; thread
@@ -160,17 +169,24 @@ tests/               # unit tests (no browser needed):
                      #   remote parsing), test_attachments.py (attachment specs/
                      #   limits/local-path + origin policy/remote inlining),
                      #   test_mcp.py (JSON-RPC framing, tools/list contract, error
-                     #   mapping, off-the-read-loop dispatch)
+                     #   mapping, off-the-read-loop dispatch), test_history.py
+                     #   (trusted-caller gating, history-provider 501s, _gallery_target
+                     #   traversal/extension/symlink refusals, conversation-id shape)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
                      #   generic open_and_send(), generic file-upload/attach machinery
-                     #   (file input + CDP file-chooser interception), patch_cdp()
+                     #   (file input + CDP file-chooser interception), patch_cdp(),
+                     #   RateLimited, and the history hooks: session_tab() (reuses the
+                     #   ONE tab), conversation_id, list_conversations,
+                     #   fetch_conversation, delete_conversation, discard_conversation
   gemini.py          # GeminiProvider — shadow-DOM extraction, blob→b64 images,
                      #   upload via the "Upload & tools" menu + chooser interception
   chatgpt.py         # ChatGPTProvider — plain-DOM extraction, oaiusercontent/blob images,
                      #   upload via the hidden upload-photos-input; excludes INPUT images
-                     #   from generated-image scans; shimmer-aware text/generating reads
+                     #   from generated-image scans; shimmer-aware text/generating reads.
+                     #   Also the history layer, all of it in-page JS against the site's
+                     #   own backend-api: _LIST_JS, _ONE_JS, _CONV_ID_JS, _DELETE_JS
 login.py             # generic re-auth helper:  python login.py gemini|chatgpt
 mcp_server.py        # MCP stdio server (JSON-RPC 2.0, stdlib only, no `mcp` package):
                      #   tools ask / generate_image / list_models / health. Thin client of
@@ -321,6 +337,47 @@ that predate the field.
 - The MCP `ask` tool sets it by default and takes `keep_chat: true` to opt out; `client.ask()` takes
   `ephemeral=`. Tests: `AskEphemeralTest` in `tests/test_mcp.py`.
 
+## Account history: import, lazy load, cascading delete (added 2026-08-20)
+
+The dashboard can list and open the conversations that already exist in the **provider account**,
+not just the ones this browser created, and a delete here means the local chat, the images it
+generated and the thread on the site.
+
+- **All of it runs as in-page JS against the site's own backend API**, from inside the logged-in
+  tab — `providers/chatgpt.py`, `_LIST_JS` / `_ONE_JS` / `_DELETE_JS`. The access token comes from
+  `/api/auth/session`; the endpoints are `GET /backend-api/conversations?offset&limit&order=updated`,
+  `GET /backend-api/conversation/<id>` and `PATCH /backend-api/conversation/<id>`
+  `{"is_visible": false}`. No scraping of the sidebar: a redesign doesn't break it.
+- **Titles first, bodies one at a time.** `/api/history` returns titles only and the dashboard
+  writes them as **stubs** (`c.stub`); `/api/conversation/{id}` fills one in when it is opened, and
+  the filled chat is saved. That shape is not a nicety — importing 200 bodies up front makes the
+  site answer **429 "Too many requests"** partway through and the import silently lost 131 of 200
+  conversations before this was redesigned. The per-thread read is the rate-limited call; the list
+  call is not. `RateLimited` (in `base.py`) maps to HTTP 429 so the UI can say "wait a minute"
+  instead of reporting the history as broken.
+- **The list API's `total` is fake** — it answers `offset + page + 1` forever. Paging stops on a
+  short page instead, and `has_more` in the response is derived that way.
+- **Provider support is declared, not assumed:** `Provider.supports_history` (False in `base.py`,
+  True for ChatGPT) and `site_origin`. Gemini exposes no readable list, so `/api/history` answers
+  501 and the dashboard hides Import for it. A remote-proxied model also answers 501: the history
+  lives in a browser profile on the upstream box.
+- **Deleting a chat cascades**, in the UI's own words on the toast: the local chat, its saved image
+  files (`/api/gallery/delete`, matched out of the message text by the `/images/<provider>/<file>`
+  paths) and the account's conversation (`/api/conversations/delete`). The confirm dialog names all
+  three counts before it does any of it.
+- **`_gallery_target()` is the only thing allowed to name a file for unlink**: it strips the URL and
+  the `/images/` prefix, percent-decodes *before* the `..` check, resolves symlinks, and requires
+  the result to sit inside `IMAGE_DIR` with a known image extension. `tests/test_history.py` pins
+  the refusals.
+- **These four endpoints are same-origin only** (`_require_trusted`), because they read and delete
+  someone's real history. Cross-origin gets 403 with an explanation. See the `Origin: null` gotcha
+  below — that one is subtle and was live.
+- **The dashboard sends `ephemeral: false`** on every chat completion. It has to: this box sets
+  `BROWSER_LLM_EPHEMERAL=1` in a systemd drop-in, so without it every chat the dashboard started
+  deleted itself on the site and the returned `conversation_id` pointed at nothing. The id now
+  round-trips (`_note_conversation` → the closing SSE chunk / `body["conversation_id"]`) and is what
+  makes a cascading delete possible for a chat you just had.
+
 ## Configuration (env vars)
 
 | Var | Default | Meaning |
@@ -415,15 +472,35 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   All three attachment endpoints share that helper. Unit-tested in `tests/test_authz.py` +
   `tests/test_attachments.py`; verified live in three states (drive-by 400, same-origin UI passes,
   keyed LAN client still refused). **Don't "simplify" the path policy back to a loopback check.**
+- **`Origin: null` is NOT a missing Origin (fixed 2026-08-20).** `origin_is_trusted` treated the
+  literal string `null` as "no browser set this" and returned True, which handed every gated
+  endpoint back to any page: a site can give itself an opaque origin with
+  `<iframe sandbox="allow-scripts" srcdoc>`, the frame's `fetch` then carries `Origin: null`, and
+  with CORS at `*` the frame reads the reply and `postMessage`s it to its parent. Reproduced live
+  from a page on `http://localhost:3000` before the fix: its own direct call to `/api/history` got
+  403, the sandboxed one got **200 and the account's chat titles**; the same trick reached the
+  file-path attachment primitive. Now `null` falls through to the host comparison and fails it
+  (`urlsplit("null").netloc == ""`). Verified after the fix in the same browser: 403 on the history
+  read, 400 on the file-path attachment. Cost: a page opened from `file://` can't use the gated
+  endpoints, which is the right trade. Tests: `test_opaque_origin_is_not_trusted` in
+  `tests/test_authz.py`.
+- **One tab per profile, always — a history call must not open a second one.** `session_tab()` in
+  `base.py` reuses a tab already on the site's origin and otherwise navigates the FIRST target
+  (`browser.get(url)` without `new_tab`), which is the tab a drive uses. A second live chatgpt.com
+  tab makes the *next* drive read 0 chars for the full deadline: ChatGPT multiplexes one WebSocket
+  per profile and the second conversation never renders an assistant turn. Opening a tab and
+  closing it afterwards is NOT a fix — that was tried, and the drive still hung. This is the same
+  wall as the tab-pool attempt below, reached from a different direction.
 - **The per-provider lock is taken INSIDE the SSE generator** in `chat_completions`
   (`server.py`). FastAPI runs the generator *after* the handler returns, so an `async with`
   around `return StreamingResponse(...)` releases the lock before the first poll and lets
   concurrent requests fight over one browser tab (that bug existed and was fixed 2026-07-08).
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
-- **CompletionTracker, authz and attachments have unit tests** — `./venv/bin/python -m unittest
-  discover -s tests` (97 tests, no browser). If you change the done-decision logic in
-  `providers/base.py` or the attachment layer in `server.py`, run/extend them.
+- **CompletionTracker, authz, attachments and the history layer have unit tests** —
+  `./venv/bin/python -m unittest discover -s tests` (119 tests, no browser). If you change the
+  done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
+  decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
   to swallow `KeyError` from unknown CDP events (e.g. `DOM.adoptedStyleSheetsModified`). Called at
   import time by `server.py` and `login.py`; call it in any new entry point.

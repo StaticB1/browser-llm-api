@@ -79,7 +79,17 @@ class TestOriginIsTrusted(unittest.TestCase):
         self.assertTrue(authz.origin_is_trusted(None, "localhost:8081"))
         self.assertTrue(authz.origin_is_trusted("", "localhost:8081"))
         self.assertTrue(authz.origin_is_trusted("   ", "localhost:8081"))
-        self.assertTrue(authz.origin_is_trusted("null", "localhost:8081"))
+
+    def test_opaque_origin_is_not_trusted(self):
+        # A page on any site can hand itself an opaque origin with
+        # <iframe sandbox="allow-scripts" srcdoc>, so "null" is a cross-origin
+        # caller wearing a disguise. Reproduced live from localhost:3000: the
+        # sandboxed frame read the account's chat titles while the page's own
+        # direct fetch was refused.
+        for spelling in ("null", "NULL", " null "):
+            self.assertFalse(authz.origin_is_trusted(spelling, "localhost:8081"),
+                             spelling)
+        self.assertFalse(authz.origin_is_trusted("null", None))
 
     def test_same_origin_trusted(self):
         self.assertTrue(authz.origin_is_trusted("http://localhost:8081", "localhost:8081"))
