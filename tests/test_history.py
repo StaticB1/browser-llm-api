@@ -6,6 +6,7 @@ pure decisions in front of them are the ones worth pinning down: which caller
 is allowed to ask, which provider can answer, and which reference resolves to
 a file this server is willing to unlink.
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -163,6 +164,65 @@ class ConversationIdTest(unittest.TestCase):
                     "6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e123g",
                     ok + "?is_visible=true", "<script>"):
             self.assertIsNone(ChatGPTProvider._CONV_ID_RE.match(bad), bad)
+
+
+class BatchDeleteTest(unittest.TestCase):
+    """One page call for the whole list, and nothing malformed reaches the site.
+
+    Deleting one id per call cost ~4s each: a 70-chat clear-out ran for five
+    minutes with the browser still waiting, which is what made it look like the
+    account was never touched.
+    """
+
+    class FakePage:
+        def __init__(self, reply):
+            self.reply, self.seen = reply, []
+
+        async def evaluate(self, js, **kw):
+            self.seen.append(js)
+            return self.reply
+
+    def delete(self, page, ids):
+        import asyncio
+        return asyncio.run(ChatGPTProvider().delete_conversations(page, ids))
+
+    def test_one_call_for_the_whole_list(self):
+        ids = ["6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e%04d" % n for n in range(30)]
+        page = self.FakePage(json.dumps({"ok": ids, "failed": {}}))
+        done, failed = self.delete(page, ids)
+        self.assertEqual(len(page.seen), 1)
+        self.assertEqual(done, ids)
+        self.assertEqual(failed, {})
+        for conv_id in ids:
+            self.assertIn(conv_id, page.seen[0])
+
+    def test_malformed_ids_never_reach_the_page(self):
+        ok = "6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e1234"
+        page = self.FakePage(json.dumps({"ok": [ok], "failed": {}}))
+        done, failed = self.delete(page, [ok, "../../etc/passwd", "", "  ", "<script>"])
+        self.assertEqual(done, [ok])
+        self.assertEqual(set(failed), {"../../etc/passwd", "<script>"})
+        self.assertNotIn("passwd", page.seen[0])
+
+    def test_a_partial_failure_is_reported_per_id(self):
+        a = "6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e1234"
+        b = "7d2f0f2e-9b3a-4f6d-8a21-0b7c5d9e5678"
+        page = self.FakePage(json.dumps({"ok": [a], "failed": {b: "HTTP 429"}}))
+        done, failed = self.delete(page, [a, b])
+        self.assertEqual(done, [a])
+        self.assertEqual(failed, {b: "HTTP 429"})
+
+    def test_a_dead_session_raises_instead_of_reporting_success(self):
+        page = self.FakePage(json.dumps({"ok": [], "failed": {},
+                                         "error": "not signed in (no access token)"}))
+        with self.assertRaises(RuntimeError):
+            self.delete(page, ["6c1f0f2e-9b3a-4f6d-8a21-0b7c5d9e1234"])
+
+    def test_nothing_to_do_makes_no_call(self):
+        page = self.FakePage("{}")
+        done, failed = self.delete(page, ["not-an-id"])
+        self.assertEqual((done, failed), ([], {"not-an-id": "malformed id"}))
+        self.assertEqual(page.seen, [])
 
 
 class BulkLimitTest(unittest.TestCase):

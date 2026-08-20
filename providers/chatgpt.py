@@ -363,6 +363,54 @@ class ChatGPTProvider(Provider):
     })()
     """
 
+    # The whole list in ONE page call, with the PATCHes in flight together.
+    # One id per call was the naive shape and it cost ~4.2s each: a real
+    # 196-chat clear-out on 2026-08-20 ran 13 minutes, and the browser gave up
+    # waiting long before the end, so the operator saw no result at all.
+    #
+    # Eight lanes, measured, not guessed: 36 ids took 34.6s at four, 17.5s at
+    # eight, and 17.2s at sixteen — with an HTTP 500 appearing at sixteen. The
+    # site stops rewarding parallelism around eight, so that is where this sits.
+    # A 429 or a 5xx gets a pause and a retry (the sibling per-thread READ
+    # endpoint does rate-limit); a 404 means the thread is already gone and is
+    # reported as-is rather than retried.
+    _DELETE_MANY_JS = r"""
+    (async () => {
+      const IDS = __IDS__, LANES = 8, RETRIES = 2;
+      const out = {ok: [], failed: {}, error: null};
+      if (!IDS.length) return JSON.stringify(out);
+      let tok = '';
+      try {
+        const s = await (await fetch('/api/auth/session', {cache: 'no-store'})).json();
+        tok = (s && s.accessToken) || '';
+      } catch (e) { out.error = 'session read failed: ' + e; return JSON.stringify(out); }
+      if (!tok) { out.error = 'not signed in (no access token)'; return JSON.stringify(out); }
+      const H = {Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json'};
+      const body = JSON.stringify({is_visible: false});
+      const nap = (ms) => new Promise(r => setTimeout(r, ms));
+      let next = 0;
+      const lane = async () => {
+        while (next < IDS.length) {
+          const id = IDS[next++];
+          let why = '';
+          for (let attempt = 0; attempt <= RETRIES; attempt++) {
+            try {
+              const r = await fetch('/backend-api/conversation/' + id,
+                                    {method: 'PATCH', headers: H, body});
+              if (r.ok) { out.ok.push(id); why = ''; break; }
+              why = 'HTTP ' + r.status;
+              if (r.status !== 429 && r.status < 500) break;
+            } catch (e) { why = String(e); }
+            await nap(1200 * (attempt + 1));
+          }
+          if (why) out.failed[id] = why;
+        }
+      };
+      await Promise.all(Array.from({length: Math.min(LANES, IDS.length)}, lane));
+      return JSON.stringify(out);
+    })()
+    """
+
     # Shared by the list and the single-thread read.
     _TIME_JS = """
       // The list endpoint hands out ISO strings and the conversation payload
@@ -569,6 +617,28 @@ class ChatGPTProvider(Provider):
             return True
         logger.warning(f"[{self.name}] could not delete {conv_id[:8]}…: {v}")
         return False
+
+    async def delete_conversations(self, page, ids: list) -> tuple:
+        clean, failed = [], {}
+        for conv_id in ids:
+            conv_id = (conv_id or "").strip()
+            if self._CONV_ID_RE.match(conv_id):
+                clean.append(conv_id)
+            elif conv_id:
+                failed[conv_id] = "malformed id"
+        if not clean:
+            return [], failed
+        js = self._DELETE_MANY_JS.replace("__IDS__", json.dumps(clean))
+        data = await self._read_json(page, js)
+        if data.get("error"):
+            raise RuntimeError(data["error"])
+        done = [i for i in (data.get("ok") or []) if isinstance(i, str)]
+        failed.update(data.get("failed") or {})
+        logger.info(f"[{self.name}] deleted {len(done)}/{len(clean)} conversation(s) "
+                    f"from the account")
+        for conv_id, why in (data.get("failed") or {}).items():
+            logger.warning(f"[{self.name}] could not delete {conv_id[:8]}…: {why}")
+        return done, failed
 
     async def discard_conversation(self, page) -> bool:
         conv_id = await self.conversation_id(page)

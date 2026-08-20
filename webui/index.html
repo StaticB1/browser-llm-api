@@ -881,11 +881,21 @@ async function cascade(list){
       if ((j.refused || []).length) trouble.push((j.refused.length) + " image(s) refused");
     }catch(e){ trouble.push("images: " + e.message); }
   }
+  /* In chunks, and say so as it goes: each thread is a call to the site, so a
+     long selection takes real seconds and the sidebar has already emptied. */
+  const CHUNK = 40;
+  let done = 0;
+  const total = [...byModel.values()].reduce((n, ids) => n + ids.length, 0);
   for (const [model, ids] of byModel){
-    try{
-      const j = await post("/api/conversations/delete", {model, ids: ids.slice(0, 200)});
-      if ((j.failed || []).length) trouble.push(j.failed.length + " conversation(s) on " + model);
-    }catch(e){ trouble.push(model + ": " + e.message); }
+    for (let i = 0; i < ids.length; i += CHUNK){
+      const slice = ids.slice(i, i + CHUNK);
+      if (total > CHUNK) toast("Deleting on the account: " + done + " of " + total + "…");
+      try{
+        const j = await post("/api/conversations/delete", {model, ids: slice});
+        done += (j.deleted || []).length;
+        if ((j.failed || []).length) trouble.push(j.failed.length + " conversation(s) on " + model);
+      }catch(e){ trouble.push(model + ": " + e.message); }
+    }
   }
   return trouble;
 }

@@ -365,6 +365,19 @@ generated and the thread on the site.
   files (`/api/gallery/delete`, matched out of the message text by the `/images/<provider>/<file>`
   paths) and the account's conversation (`/api/conversations/delete`). The confirm dialog names all
   three counts before it does any of it.
+- **Bulk delete is ONE page call, not one per id** (`delete_conversations`, 2026-08-20). The naive
+  per-id shape cost ~4.2s each — a CDP round trip plus its own `/api/auth/session` read — so a real
+  196-chat clear-out ran for 13 minutes, and the browser's `fetch` gave up long before the end: the
+  work finished server-side, uvicorn never logged a response line because the client had gone, and
+  the operator saw the sidebar empty with no toast and concluded nothing had happened. The batch JS
+  reads the token once and runs 8 PATCHes in flight; measured on 36 ids, 34.6s at 4 lanes, 17.5s at
+  8, 17.2s at 16 with an HTTP 500 appearing — the site stops rewarding parallelism around 8. The
+  dashboard also sends ids in chunks of 40 with a running progress toast, so a long delete reports
+  as it goes instead of at the end.
+- **A PATCH on an already-deleted conversation answers 404**, which is how to check whether a thread
+  is really gone; a 429 or 5xx is retried twice with backoff, a 404 is reported as-is. A batch that
+  reports failures is worth re-checking against the list before believing them: the 4 that failed
+  with `TypeError: Failed to fetch` in the 13-minute run had in fact been deleted.
 - **`_gallery_target()` is the only thing allowed to name a file for unlink**: it strips the URL and
   the `/images/` prefix, percent-decodes *before* the `..` check, resolves symlinks, and requires
   the result to sit inside `IMAGE_DIR` with a known image extension. `tests/test_history.py` pins

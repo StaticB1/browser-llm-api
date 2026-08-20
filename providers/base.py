@@ -723,6 +723,23 @@ class Provider(ABC):
         a local copy, so it is as destructive as the site's own Delete."""
         return False
 
+    async def delete_conversations(self, page, ids: list) -> tuple:
+        """Delete many, returning ``(deleted_ids, {failed_id: why})``.
+
+        One id at a time is the naive shape and it is unusably slow: each one
+        costs a CDP round trip plus a session read, which measured ~4s, so
+        clearing 70 chats took five minutes with the client still waiting. A
+        provider that can do the whole list inside one page call should override
+        this; the loop stays as the fallback for one that can't.
+        """
+        done, failed = [], {}
+        for conv_id in ids:
+            if await self.delete_conversation(page, conv_id):
+                done.append(conv_id)
+            else:
+                failed[conv_id] = "delete refused"
+        return done, failed
+
     async def discard_conversation(self, page) -> bool:
         """Delete the conversation this drive just created.
 

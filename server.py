@@ -1393,20 +1393,22 @@ async def api_conversations_delete(req: ConversationDeleteRequest, request: Requ
             detail=f"too many ids ({len(ids)}); delete at most {_MAX_BULK_DELETE} at a time")
     provider = _history_provider(req.model)
     deleted: list[str] = []
-    failed: list[str] = []
+    why: dict = {}
     async with _locks[provider.name]:
         try:
             browser = await get_browser(provider)
             async with provider.session_tab(browser) as page:
-                for conv_id in ids:
-                    ok = await provider.delete_conversation(page, conv_id)
-                    (deleted if ok else failed).append(conv_id)
+                # The whole list in one page call. Per-id calls measured ~4s
+                # each, so a 70-chat clear-out held this request open for five
+                # minutes and looked to the operator like nothing happened.
+                deleted, why = await provider.delete_conversations(page, ids)
         except Exception as e:
             await _evict_dead_browser(provider, e)
             logger.error(f"[{provider.name}] conversation delete failed: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail=str(e))
     logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s)")
-    return {"model": provider.name, "deleted": deleted, "failed": failed}
+    return {"model": provider.name, "deleted": deleted,
+            "failed": list(why), "why": why}
 
 
 def _gallery_target(ref: str) -> Optional[Path]:
