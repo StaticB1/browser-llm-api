@@ -16,6 +16,7 @@ A provider is mostly declarative — set the class attributes (``chat_url``,
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -23,15 +24,29 @@ from contextlib import asynccontextmanager
 
 logger = logging.getLogger("gemini_server")
 
-# Chrome flags enabling software (SwiftShader) GL so canvas/WebGL renders under a
+# Chrome flags, passed to every uc.start() (server + login).
+#
+# The first four enable software (SwiftShader) GL so canvas/WebGL renders under a
 # headless Xvfb display with no GPU. ChatGPT's GPT-image generation draws on a
 # <canvas>; without a GL backend it stalls forever on the "rendering" tile.
-# Harmless on a real GPU display. Passed to every uc.start() (server + login).
+# Harmless on a real GPU display.
+#
+# --disable-backgrounding-occluded-windows: on X11, Chrome marks a window that is
+# off-screen or fully covered by another window as occluded, and every page in it
+# goes to document.visibilityState "hidden". A hidden page gets no animation
+# frames, so both sites' single-page apps take the prompt out of the composer
+# and never render a turn: each drive then waited out the 420s deadline and
+# answered an empty 200. That broke both providers from 2026-09-18 to 09-26,
+# after a session mirroring the shared display parked these windows at
+# +2400+1400 on a 1920x1080 screen and maximised another Chrome over the rest.
+# With this flag an occluded window stays "visible". Measured on :98: off-screen
+# and covered windows read "hidden" without it and "visible" with it.
 CHROME_ARGS = [
     "--use-gl=angle",
     "--use-angle=swiftshader",
     "--enable-unsafe-swiftshader",
     "--ignore-gpu-blocklist",
+    "--disable-backgrounding-occluded-windows",
 ]
 
 
@@ -243,6 +258,13 @@ class CompletionTracker:
     it returns ``(chunk, done_reason)`` where ``chunk`` is any new text to emit
     and ``done_reason`` is a short string (``"text"`` / ``"image"`` / ``"empty"``)
     once the answer has settled, else ``None``.
+
+    ``"nostart"`` is the failure outcome: for ``NOT_STARTED_TIMEOUT`` seconds
+    after sending, the page showed nothing at all (no user turn, no text, no
+    generation, no image). The caller turns it into an error. Before it existed,
+    that case rode the full 420s deadline and came back as an empty 200 with
+    ``errors: 0``, which is how a hidden page (2026-09-18) looked like an expired
+    login for eight days.
     """
 
     # tuning (seconds)
@@ -252,6 +274,10 @@ class CompletionTracker:
     IMAGE_STABLE = 4.0              # rendered-image count stable this long -> done
     WS_ACTIVE_WINDOW = 2.0          # a WS frame within this window == still streaming
     FALSE_CREATING_TIMEOUT = 45.0   # "creating" stuck with no image after gen ended -> ignore it
+    # Nothing on the page this long after sending -> "nostart". A working site
+    # shows the user turn within a few seconds, so this only needs to outlast a
+    # slow page, not a slow model: any sign of life (user turn included) disarms it.
+    NOT_STARTED_TIMEOUT = 60.0
 
     # Transient status lines a site shows *instead of* the answer: "Creating your
     # image…" (image gen) or "Analyzing image" (vision request). These must never
@@ -274,6 +300,8 @@ class CompletionTracker:
         self._loaded_since: float | None = None
         self._creating_since: float | None = None
         self._saw_placeholder = False
+        self._first_sample: float | None = None
+        self.started = False    # any sign the site took the prompt (see feed)
 
     def _is_placeholder(self, text: str) -> bool:
         """True for transient status text shown instead of the answer —
@@ -285,13 +313,23 @@ class CompletionTracker:
     def silent_for(self, now: float) -> float:
         return 0.0 if self._last_change is None else now - self._last_change
 
-    def feed(self, now, raw_text, is_generating, img, *, cdp_done=False):
+    def feed(self, now, raw_text, is_generating, img, *, cdp_done=False, submitted=None):
+        """``submitted`` is whether the page shows our user turn: True, False,
+        or None when the provider cannot tell. Only used to decide ``started``."""
         if self._last_change is None:
             self._last_change = now
+        if self._first_sample is None:
+            self._first_sample = now
 
         loaded = img.get("loaded", 0)
         creating = bool(img.get("creating"))
         pending = img.get("pending", 0) > 0
+
+        # Any sign of life at all, placeholders included. Deliberately broad:
+        # "nostart" must never cut off a real answer, only a page that did nothing.
+        if (submitted or is_generating or creating or pending or loaded
+                or (raw_text or "").strip()):
+            self.started = True
 
         # Track how long "creating" has been asserted with nothing rendered.
         if creating and loaded == 0:
@@ -365,6 +403,9 @@ class CompletionTracker:
         if (self.text_len == 0 and self._saw_generation and not self._saw_creating
                 and silent >= empty_after):
             return chunk, "empty"
+        if (not self.started
+                and now - self._first_sample >= self.NOT_STARTED_TIMEOUT):
+            return chunk, "nostart"
         return chunk, None
 
 
@@ -391,6 +432,10 @@ class Provider(ABC):
     input_selector: str = 'div[contenteditable="true"]'
     send_selectors: list = ['button[aria-label="Send message"]']
     load_wait: float = 6.0  # seconds to let the page settle before typing
+    # CSS for the turn the site renders for OUR prompt once it is submitted. Only
+    # read until the answer starts, as one of the signs of life that keep the
+    # "nostart" failure (CompletionTracker) from firing. Empty = cannot tell.
+    user_turn_selector: str = ""
     # When True, do NOT stream incremental deltas — emit the final full answer
     # once at completion. Needed for providers whose extracted text *reshapes*
     # near the end (e.g. ChatGPT: a code answer flattens to "Python\nRun\n<code>"
@@ -575,6 +620,76 @@ class Provider(ABC):
                        f"(wanted {n} attachment(s))")
         return False
 
+    # ------------------------------------------------------------------
+    # Page visibility (see the note on CHROME_ARGS)
+    # ------------------------------------------------------------------
+    async def page_visibility(self, page) -> str:
+        """``document.visibilityState`` of the drive's page, or "" if unreadable."""
+        try:
+            state = await page.evaluate("document.visibilityState")
+        except Exception:
+            return ""
+        return state if isinstance(state, str) else ""
+
+    async def ensure_visible(self, page) -> None:
+        """Refuse to drive a hidden page, after trying to un-hide it.
+
+        A hidden page takes the prompt and never renders an answer, so without
+        this check the drive would wait out the whole deadline for nothing.
+        ``--disable-backgrounding-occluded-windows`` keeps an off-screen or
+        covered window visible, so this only fires for what the flag cannot
+        cover (a minimised or unmapped window, or a Chrome started without the
+        flag). The repair is the browser's own: restore the window, put it at
+        the screen's origin and raise it. If the page is still hidden, raise an
+        error that names the cause instead of returning an empty answer.
+        """
+        state = await self.page_visibility(page)
+        if state in ("visible", ""):  # "" = unreadable; don't block a drive on it
+            return
+        logger.warning(f"[{self.name}] page is {state!r} before sending; restoring "
+                       f"its window on-screen and raising it")
+        try:
+            from nodriver import cdp
+            # TargetID(...)/WindowID(...) because the commands call .to_json() on
+            # their arguments, which a plain str or int does not have.
+            window_id, _bounds = await page.send(cdp.browser.get_window_for_target(
+                cdp.target.TargetID(page.target.target_id)))
+            window_id = cdp.browser.WindowID(window_id)
+            # A window state change cannot be combined with a position change.
+            await page.send(cdp.browser.set_window_bounds(
+                window_id, cdp.browser.Bounds(window_state=cdp.browser.WindowState.NORMAL)))
+            await page.send(cdp.browser.set_window_bounds(
+                window_id, cdp.browser.Bounds(left=0, top=0)))
+            # Moving alone is not enough when another window covers the origin
+            # (measured 2026-09-26): the raise is what makes it visible.
+            await page.send(cdp.page.bring_to_front())
+        except Exception as e:
+            logger.warning(f"[{self.name}] could not restore the window: {e}")
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            state = await self.page_visibility(page)
+            if state == "visible":
+                logger.info(f"[{self.name}] page visible again")
+                return
+        display = os.environ.get("DISPLAY", "?")
+        raise RuntimeError(
+            f"[{self.name}] the chat page is {state or 'unreadable'!r}, so it would "
+            f"never render an answer: its Chrome window on DISPLAY {display} is "
+            f"off-screen, covered or minimised, and restoring it did not help. "
+            f"Check `DISPLAY={display} xwininfo -root -tree` for the window's position."
+        )
+
+    async def has_user_turn(self, page):
+        """True/False: does the page show our submitted prompt? None when the
+        provider declares no ``user_turn_selector`` or the read failed."""
+        if not self.user_turn_selector:
+            return None
+        try:
+            return bool(await page.evaluate(
+                "!!document.querySelector(%s)" % json.dumps(self.user_turn_selector)))
+        except Exception:
+            return None
+
     async def open_and_send(self, browser, prompt: str, attachments: list = None):
         """Open a fresh chat, attach any input images, type the prompt, submit.
         Returns (page, monitor).
@@ -588,6 +703,7 @@ class Provider(ABC):
 
         logger.info(f"[{self.name}] waiting for page to load...")
         await asyncio.sleep(self.load_wait)
+        await self.ensure_visible(page)
 
         if attachments:
             if not self.supports_upload:

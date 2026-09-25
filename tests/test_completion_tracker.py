@@ -182,5 +182,63 @@ class FalseCreatingGuard(unittest.TestCase):
         self.assertEqual(done, "text")
 
 
+class NotStarted(unittest.TestCase):
+    """2026-09-18: a hidden page took every prompt and rendered nothing, and each
+    drive rode the 420s deadline to an empty 200. "nostart" turns a page that
+    shows nothing at all into a failure; any sign of life must disarm it."""
+
+    def _run(self, t, until, sample):
+        """Feed `sample(now)` -> (raw, gen, img, submitted) every 0.8s until
+        `until`; return the first done reason and when it fired."""
+        now = 0.0
+        while now <= until:
+            raw, gen, img, sub = sample(now)
+            _, done = t.feed(now, raw, gen, img, submitted=sub)
+            if done:
+                return done, now
+            now += 0.8
+        return None, None
+
+    def test_a_page_that_shows_nothing_fails_at_the_timeout(self):
+        t = CompletionTracker()
+        done, at = self._run(t, 300, lambda now: ("", False, NO_IMG, False))
+        self.assertEqual(done, "nostart")
+        self.assertGreaterEqual(at, CompletionTracker.NOT_STARTED_TIMEOUT)
+        self.assertLess(at, CompletionTracker.NOT_STARTED_TIMEOUT + 1.0)
+
+    def test_unknown_submission_still_fails_when_nothing_happens(self):
+        t = CompletionTracker()
+        done, _ = self._run(t, 300, lambda now: ("", False, NO_IMG, None))
+        self.assertEqual(done, "nostart")
+
+    def test_a_user_turn_disarms_it(self):
+        # Submitted, then a long silent think with no stop button and no text:
+        # slow, not broken. Only the server's deadline may end this one.
+        t = CompletionTracker()
+        done, _ = self._run(t, 400, lambda now: ("", False, NO_IMG, now >= 3.0))
+        self.assertIsNone(done)
+
+    def test_generation_disarms_it(self):
+        t = CompletionTracker()
+        done, _ = self._run(t, 400, lambda now: ("", 2.0 <= now <= 4.0, NO_IMG, False))
+        self.assertNotEqual(done, "nostart")
+
+    def test_a_placeholder_disarms_it(self):
+        t = CompletionTracker()
+        done, _ = self._run(t, 400, lambda now: ("Analyzing image", False, NO_IMG, False))
+        self.assertNotEqual(done, "nostart")
+
+    def test_an_image_in_flight_disarms_it(self):
+        t = CompletionTracker()
+        creating = {"loaded": 0, "pending": 0, "creating": True}
+        done, _ = self._run(t, 400, lambda now: ("", False, creating, False))
+        self.assertNotEqual(done, "nostart")
+
+    def test_a_normal_answer_is_unaffected(self):
+        t = CompletionTracker()
+        done, _ = self._run(t, 60, lambda now: ("OK" if now >= 5 else "", now < 5, NO_IMG, now >= 1))
+        self.assertEqual(done, "text")
+
+
 if __name__ == "__main__":
     unittest.main()

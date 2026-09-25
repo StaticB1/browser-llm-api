@@ -778,10 +778,27 @@ async def _stream_completion(provider, page, monitor) -> AsyncGenerator[str, Non
         img = await provider.image_status(page)
         is_gen = await provider.is_generating(page)
         cdp_done = monitor.stream_done.is_set()
+        # Only needed until the answer shows any sign of life (see "nostart").
+        submitted = None if tracker.started else await provider.has_user_turn(page)
 
-        chunk, done = tracker.feed(now, raw, is_gen, img, cdp_done=cdp_done)
+        chunk, done = tracker.feed(now, raw, is_gen, img, cdp_done=cdp_done,
+                                   submitted=submitted)
         if chunk and not buffered:
             yield chunk
+
+        if done == "nostart":
+            # Fail loudly instead of riding the deadline to an empty 200: the
+            # request is then counted in /api/status errors and the caller is
+            # told what the page looked like.
+            state = await provider.page_visibility(page)
+            raise RuntimeError(
+                f"[{provider.name}] nothing happened on the page "
+                f"{now - start:.0f}s after sending: no user turn, no reply, no "
+                f"generation (page visibility: {state or 'unreadable'}). A hidden "
+                f"page, a changed composer or send button, or a sign-in or "
+                f"bot-check wall all look like this; an expired login is only one "
+                f"of them."
+            )
 
         logger.debug(
             f"[{provider.name}] poll: text={tracker.text_len} "

@@ -128,6 +128,7 @@ class ChatGPTProvider(Provider):
         'button[aria-label="Send message"]',
     ]
     load_wait = 7.0  # ChatGPT can be slow to hydrate / may show a bot check
+    user_turn_selector = '[data-message-author-role="user"]'
     # --- image input (upload). Verified live 2026-07-28: chatgpt.com keeps a
     # hidden `input[data-testid="upload-photos-input"]` (accept=image/*) in the
     # DOM at rest, so the generic input path attaches without touching the "+"

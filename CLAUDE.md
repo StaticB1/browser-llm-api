@@ -111,7 +111,7 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
                      #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
                      #   exception handlers in server.py for no behaviour change. The repo
                      #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 119 unit tests + an editable install + a live MCP
+.github/workflows/ci.yml  # lint + the 147 unit tests + an editable install + a live MCP
                      #   handshake, on every push and PR. No browser, no network, no secrets,
                      #   so a green build means the pure logic holds, NOT that the sites still
                      #   scrape. Nothing here can catch a DOM change; only a real request can.
@@ -171,7 +171,9 @@ tests/               # unit tests (no browser needed):
                      #   test_mcp.py (JSON-RPC framing, tools/list contract, error
                      #   mapping, off-the-read-loop dispatch), test_history.py
                      #   (trusted-caller gating, history-provider 501s, _gallery_target
-                     #   traversal/extension/symlink refusals, conversation-id shape)
+                     #   traversal/extension/symlink refusals, conversation-id shape),
+                     #   test_visibility.py (the occlusion flag in CHROME_ARGS,
+                     #   ensure_visible's restore-or-refuse, has_user_turn)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
@@ -236,7 +238,8 @@ Pillow (in requirements.txt) is only needed by `gen_asset.py`.
 Adding/altering a backend means editing a provider, not `server.py`. A provider is mostly
 declarative — class attributes `name`, `chat_url`, `profile_dir`, `stream_url_fragments` (CDP
 completion signal), `supports_images`, `image_text_is_caption`, `input_selector`, `send_selectors`,
-`load_wait`, and for image input `supports_upload`, `attach_click_path`, `attachment_ready_js`,
+`load_wait`, `user_turn_selector` (the submitted prompt's own element, a sign of life for the
+"nostart" check), and for image input `supports_upload`, `attach_click_path`, `attachment_ready_js`,
 `upload_timeout`, `upload_settle` — plus site-specific reads:
 
 - `open_and_send(browser, prompt, attachments=None) -> (page, monitor)` — **generic in base**;
@@ -265,7 +268,7 @@ and provider-parameterized** in `server.py`/`base.py`.
 4. `_build_prompt()` flattens the OpenAI `messages` array (system → `[Context/Instructions: …]` preamble; multi-turn → `User:`/`Assistant:` labels) and returns `(prompt, image specs)`.
 5. `_attachment_files()` materializes those specs into files, then `provider.open_and_send()` opens the chat, uploads them, types, submits (temp files are cleaned up when the drive ends).
 6. `_stream_completion()` polls, yielding text deltas from `provider.get_response_text()`. It **suppresses** transient status text — "Creating your image…" / "Analyzing image" (see `CompletionTracker._PLACEHOLDER_RE`, short text only) and thinking text while `image_status` reports an image pending — and keeps waiting until the `<img>` renders.
-7. **Completion**: the `CompletionTracker` (in `base.py`, unit-testable without a browser) is fed one poll sample at a time and decides done via: image-stability (an `<img>` rendered and stable ≥4s), or text settled (text unchanged ≥2.5s while not generating), or a give-up guard (generation happened but no text — 10s, stretched to 45s while a status placeholder is on screen). The `StreamMonitor`'s HTTP `stream_url_fragments` signal (`cdp_fired_at`) is informational only. Deadline is progress-aware: base 420s, **extended up to 900s while the answer is still actively streaming** (text still growing or WebSocket frames still arriving), so long code/HTML answers aren't truncated. Then `provider.get_images()` runs and images are `_persist()`ed + appended.
+7. **Completion**: the `CompletionTracker` (in `base.py`, unit-testable without a browser) is fed one poll sample at a time and decides done via: image-stability (an `<img>` rendered and stable ≥4s), or text settled (text unchanged ≥2.5s while not generating), or a give-up guard (generation happened but no text — 10s, stretched to 45s while a status placeholder is on screen). It also has one failure outcome, `nostart`: nothing at all on the page (no user turn, text, generation or image) for `NOT_STARTED_TIMEOUT` (60s) after sending, which `_stream_completion` raises as an error instead of riding the deadline to an empty answer. Before any of that, `open_and_send` calls `ensure_visible()`, which refuses to drive a hidden page (see the hidden-page gotcha). The `StreamMonitor`'s HTTP `stream_url_fragments` signal (`cdp_fired_at`) is informational only. Deadline is progress-aware: base 420s, **extended up to 900s while the answer is still actively streaming** (text still growing or WebSocket frames still arriving), so long code/HTML answers aren't truncated. Then `provider.get_images()` runs and images are `_persist()`ed + appended.
 8. The tab is **left open on purpose** — closing/navigating away destabilizes the browser.
 
 ## Image input — attachments (vision + image-to-image, added 2026-07-28)
@@ -454,8 +457,13 @@ DISPLAY=:1 ./serve.sh
 
 ## Authentication — the #1 failure mode
 
-**Each provider needs its own login** (separate profile). Empty answers / a sign-in or "verify you're
-human" wall ⇒ that provider's session expired. Re-auth on a real display:
+**Each provider needs its own login** (separate profile). A sign-in or "verify you're human" wall on
+the page ⇒ that provider's session expired. **Empty answers alone do not prove that**: from
+2026-09-18 to 09-26 both providers answered nothing while both were signed in, because their pages
+were hidden (see the hidden-page gotcha). Read the page first — its CDP port is in
+`pgrep -af 'user-data-dir=./chatgpt_profile'`, and `document.visibilityState`, the URL and the
+composer tell you more than the answer does. Re-auth on a real display only when the page shows a
+sign-in:
 
 ```bash
 systemctl --user stop browser-llm-api
@@ -540,7 +548,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (119 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (147 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
@@ -649,6 +657,27 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `serve.sh` (venv python +
   display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/browser-llm`
   (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
+- **A hidden page answers nothing, on both providers (fixed 2026-09-26).** On 2026-09-18 at 01:58 a
+  Claude session mirrored `:98` to the desktop with x11vnc for a sign-in, ran `xdotool windowmove
+  <id> 2400 1400` on both service windows (off a 1920x1080 screen) and maximised the automation
+  Chrome over the rest. Chrome on X11 treats an off-screen or fully covered window as occluded and
+  every page in it reads `document.visibilityState == "hidden"`; a hidden page gets no animation
+  frames, so both sites took the typed prompt out of the composer and never rendered a turn (no
+  `/c/<id>` URL, no user message, no streaming request). Each drive then waited 420s and returned an
+  empty 200 with `errors: 0`, and the watchdog's alert text blamed an expired login, which is
+  what everyone believed for eight days while `/api/auth/session` showed a live session. Proved both
+  ways before the fix: on the unchanged service, one uncovered pixel made the page `visible` and
+  each provider answered "OK" in 17-18s; parked again, Gemini returned `''` after 433s. Three
+  layers, each checked live: `--disable-backgrounding-occluded-windows` in `CHROME_ARGS` keeps an
+  occluded window visible (off-screen, covered and even unmapped windows read `visible` with it;
+  Gemini answered with its window parked at `+2400+1400` again); `ensure_visible()` restores and
+  raises a window that is still hidden (`Browser.setWindowBounds` + `Page.bringToFront` — moving
+  alone is not enough when another window covers the origin) and otherwise raises an error naming
+  the cause; and `nostart` fails a drive that shows nothing for 60s (measured: 62s, was 420s). The
+  watchdog now logs the server's own `detail` instead of "returned nothing". Chrome also persisted
+  the parked position in `chatgpt_profile/Default/Preferences` and reopened at `+1890+1050` with
+  a corner on-screen, so a restart alone would not have been a dependable fix. **Don't move or
+  cover the service windows on `:98`, and don't remove the flag.**
 - **Two tabs in one Chrome cannot drive two ChatGPT conversations (tried and reverted
   2026-08-18).** A per-provider tab pool replacing the `asyncio.Lock` *looks* like the obvious way
   to run requests in parallel, and mechanically it works: two tabs navigate and submit 0.2s apart,

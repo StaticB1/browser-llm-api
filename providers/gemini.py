@@ -72,6 +72,7 @@ class GeminiProvider(Provider):
     image_text_is_caption = False  # Gemini's image-prompt prose is "thinking" chrome
     input_selector = 'div[contenteditable="true"]'
     send_selectors = ['button[aria-label="Send message"]']
+    user_turn_selector = 'user-query'  # the submitted prompt's own element, beside model-response
     load_wait = 6.0
     # --- image input (upload). Gemini keeps NO <input type="file"> in the DOM at
     # rest (verified 2026-07-28) — it creates one when you pick "Upload files"

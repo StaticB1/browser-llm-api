@@ -139,9 +139,10 @@ fi
 today=$(date +%F)
 if [ "$fail" = 0 ] && { [ "$DEEP" = 1 ] || [ "$(cat "$STATE/deep-last" 2>/dev/null)" != "$today" ]; }; then
   for model in ${BLM_HEALTH_MODELS:-chatgpt-browser gemini-browser}; do
-    reply=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+    body=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
       -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"ephemeral\":true}" \
-      2>/dev/null | python3 -c \
+      2>/dev/null)
+    reply=$(printf '%s' "$body" | python3 -c \
       'import sys, json
 try: print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip()[:40])
 except Exception: print("")' 2>/dev/null)
@@ -149,14 +150,28 @@ except Exception: print("")' 2>/dev/null)
       log "deep ok — $model answered '$reply'"
       clear_alert "auth-$model"
     else
-      log "DEEP FAIL — $model returned nothing"
+      # The server names the failure in "detail" (a hidden page, an input box it
+      # could not find, a page that never started an answer). Log that rather
+      # than guessing: "returned nothing" read as "expired login" for eight days
+      # in September 2026 while the real cause was a hidden window.
+      why=$(printf '%s' "$body" | python3 -c \
+        'import sys, json
+try: print(str(json.load(sys.stdin).get("detail") or "")[:400])
+except Exception: print("")' 2>/dev/null)
+      [ -z "$body" ] && why="no response within 180s"
+      [ -z "$why" ] && why="empty answer"
+      log "DEEP FAIL — $model: $why"
       alert "auth-$model" 21600 high "browser-llm: $model is returning empty answers" \
-"A one-word test completion to $model came back empty. The server itself is healthy, so this is almost certainly the account session: an expired login, or a 'verify you are human' wall.
+"A one-word test completion to $model failed: $why
 
-Re-auth needs a real display:
-  systemctl --user stop $UNIT
-  DISPLAY=:1 ./venv/bin/python login.py ${model%%-*}
-  systemctl --user start $UNIT
+The server itself is up. Causes seen so far, most recent first:
+- The chat page is hidden (its Chrome window off-screen or covered on the agent display), so the
+  site takes the prompt and never renders an answer. Check the page before anything else:
+  curl -s http://127.0.0.1:<the provider's CDP port>/json/list, then read document.visibilityState.
+- An expired login or a 'verify you are human' wall. Re-auth needs a real display:
+    systemctl --user stop $UNIT
+    DISPLAY=:1 ./venv/bin/python login.py ${model%%-*}
+    systemctl --user start $UNIT
 
 Log: $LOG"
     fi
