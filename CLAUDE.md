@@ -1,14 +1,14 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repo.
+Working instructions for this repository.
 
 ## What this is
 
 Drives a **chat web UI through an automated Chrome browser**
 ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and exposes it as an
 **OpenAI-compatible HTTP API** — chat completions, image generation, **and image input** (vision +
-image-to-image). There is **no official API key** for either backend; it piggybacks on a logged-in
-web session stored in a local Chrome profile. Prompts are typed into the page, input images are
+image-to-image). It uses a logged-in web session stored in a local Chrome profile,
+with **no official API key** for either backend. Prompts are typed into the page, input images are
 uploaded through the site's own file picker, and answers (text and generated images) are scraped
 back out of the DOM.
 
@@ -28,7 +28,7 @@ handles a quota overflow by shedding image data from the oldest turns first, the
 never conversation text. Other keys: `blm.cur` (last open chat), `blm.model`, `blm.theme`,
 `blm.sidebar`, `blm.system` (default system prompt), `browserLlmApiKey`.
 
-Other things worth knowing before editing the file. The theme switch is 3-state
+Before editing the dashboard, note the following. The theme switch is 3-state
 (light / auto / dark) in the sidebar footer, persisted under `blm.theme`, and an inline script in
 `<head>` resolves it onto `documentElement.dataset.theme` **before first paint**, so keep that
 script where it is. Colours are CSS custom properties on `:root` (light) and
@@ -368,7 +368,7 @@ generated and the thread on the site.
   `{"is_visible": false}`. No scraping of the sidebar: a redesign doesn't break it.
 - **Titles first, bodies one at a time.** `/api/history` returns titles only and the dashboard
   writes them as **stubs** (`c.stub`); `/api/conversation/{id}` fills one in when it is opened, and
-  the filled chat is saved. That shape is not a nicety — importing 200 bodies up front makes the
+  the filled chat is saved. Loading bodies only when opened matters: importing 200 bodies up front makes the
   site answer **429 "Too many requests"** partway through and the import silently lost 131 of 200
   conversations before this was redesigned. The per-thread read is the rate-limited call; the list
   call is not. `RateLimited` (in `base.py`) maps to HTTP 429 so the UI can say "wait a minute"
@@ -397,7 +397,7 @@ generated and the thread on the site.
   196-chat clear-out ran for 13 minutes, and the browser's `fetch` gave up long before the end: the
   work finished server-side, uvicorn never logged a response line because the client had gone, and
   the operator saw the sidebar empty with no toast and concluded nothing had happened. The batch JS
-  reads the token once and runs 8 PATCHes in flight; measured on 36 ids, 34.6s at 4 lanes, 17.5s at
+  reads the token once and runs 8 PATCHes in flight; measured on 36 ids, 34.6s at 4 concurrent requests, 17.5s at
   8, 17.2s at 16 with an HTTP 500 appearing — the site stops rewarding parallelism around 8. The
   dashboard also sends ids in chunks of 40 with a running progress toast, so a long delete reports
   as it goes instead of at the end.
