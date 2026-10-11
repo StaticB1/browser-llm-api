@@ -78,8 +78,9 @@ def patch_cdp() -> None:
 # Sending an image *into* a chat means driving the site's file picker. Two
 # mechanisms cover every site we've seen, tried in this order:
 #
-#   1. An <input type="file"> that already exists in the DOM (ChatGPT keeps a
-#      hidden `[data-testid="upload-photos-input"]` there at rest). We hand its
+#   1. An <input type="file"> that already exists in the DOM (ChatGPT keeps
+#      hidden ones there at rest, labelled only by aria-label since its page of
+#      11 Oct 2026). We hand its
 #      objectId to CDP's DOM.setFileInputFiles, which fires real input/change
 #      events — the page can't tell it apart from a human picking a file.
 #   2. No such input (Gemini creates one on demand behind its "Upload & tools"
@@ -690,6 +691,29 @@ class Provider(ABC):
         except Exception:
             return None
 
+    async def composer_hint(self, page) -> str:
+        """Why the composer was not found, read from what the page does hold.
+
+        A site redesign leaves an editable element that the selector no longer
+        matches; a sign-in or verification wall, or a page that never loaded,
+        leaves none. On 11 Oct 2026 ChatGPT's redesign produced a bare "input box
+        not found" and the watchdog filed it as an expired login. Returns "" when
+        the page cannot be read."""
+        try:
+            raw = await page.evaluate(
+                "JSON.stringify({ce: document.querySelectorAll('[contenteditable=\"true\"]').length,"
+                " ta: document.querySelectorAll('textarea').length, url: location.href})")
+            st = json.loads(raw) if isinstance(raw, str) else {}
+            ce, ta = int(st.get("ce") or 0), int(st.get("ta") or 0)
+        except Exception:
+            return ""
+        if ce or ta:
+            return (f"; the page has {ce} contenteditable and {ta} textarea element(s), so "
+                    f"the site has probably changed its composer: read the live page and "
+                    f"update input_selector in {type(self).__module__}")
+        return (f"; the page has no editable element at all (a sign-in or verification "
+                f"wall, or a page that did not load) at {str(st.get('url') or '')[:100]}")
+
     async def open_and_send(self, browser, prompt: str, attachments: list = None):
         """Open a fresh chat, attach any input images, type the prompt, submit.
         Returns (page, monitor).
@@ -713,7 +737,8 @@ class Provider(ABC):
 
         input_box = await page.select(self.input_selector, timeout=20)
         if not input_box:
-            raise RuntimeError(f"[{self.name}] input box not found ({self.input_selector})")
+            raise RuntimeError(f"[{self.name}] input box not found ({self.input_selector})"
+                               + await self.composer_hint(page))
 
         logger.info(f"[{self.name}] sending prompt ({len(prompt)} chars)...")
         await input_box.send_keys(prompt)

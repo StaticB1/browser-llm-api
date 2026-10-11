@@ -1,16 +1,16 @@
 """
 ChatGPT provider — drives chatgpt.com.
 
-Unlike Gemini, ChatGPT's UI is plain DOM (no shadow piercing needed): the last
-assistant turn is ``[data-message-author-role="assistant"]`` and its text lives
-in a ``.markdown`` container. Generated images (GPT-image / DALL·E) render as
-``<img>`` served from ``oaiusercontent.com`` (or a ``blob:`` URL mid-stream);
-we read them to base64 inside the page, falling back to the remote URL if CORS
-blocks the fetch.
+Unlike Gemini, ChatGPT's UI is plain DOM (no shadow piercing needed). The last
+assistant turn and the answer body inside it are found through the selector
+lists below. Generated images (GPT-image / DALL·E) render as ``<img>`` served
+from ``oaiusercontent.com`` (or a ``blob:`` URL mid-stream); we read them to
+base64 inside the page, falling back to the remote URL if CORS blocks the fetch.
 
-NOTE: These selectors are best-guess against the live ChatGPT web UI, which
-changes often and sits behind Cloudflare/anti-bot checks. Expect to tweak the
-selectors and timing after verifying against a real signed-in session.
+NOTE: ChatGPT changes its page without notice and sits behind Cloudflare/anti-bot
+checks. Every selector here was measured on a real signed-in session (dates
+below); when a request fails with "input box not found" or an empty answer,
+read the live page over CDP before changing anything.
 """
 import json
 import logging
@@ -21,22 +21,75 @@ from .base import Provider, RateLimited
 logger = logging.getLogger("gemini_server")
 
 
+# --- page selectors ---------------------------------------------------------
+# On 11 Oct 2026 ChatGPT shipped a new page that dropped `#prompt-textarea`,
+# `data-message-author-role` and nearly every `data-testid` at once, and every
+# request failed at "input box not found" for a day and a half. Each selector is
+# therefore a LIST that keeps the earlier layout and adds the one measured live
+# on 12 Oct 2026 (signed-in Free account), so a page serving either one works:
+#   composer  div.ProseMirror[contenteditable] inside form[data-chatgpt-composer],
+#             aria-label "Ask ChatGPT", no id; CDP char events still type into it
+#   send      the form's button[type=submit], aria-label "Send", only after typing
+#   stop      the form's button[aria-label="Stop"] while an answer streams, and
+#             the turn's [data-talvt-turn-state="in_progress"]
+#   turns     [data-chatgpt-search-unit-key="<turn>:<n>:user|assistant"]; the
+#             answer body is [data-markdown-text-style="assistant-message"]
+#   upload    four hidden file inputs with aria-labels and no test ids; a chip is
+#             button[aria-label="Remove <file name>"]; the sent image renders in
+#             the user turn, OUTSIDE the bubble, as a blob: <img>
+_COMPOSER_SEL = ", ".join([
+    '#prompt-textarea',
+    'form[data-chatgpt-composer] [contenteditable="true"]',
+    'form .ProseMirror[contenteditable="true"]',
+])
+_USER_TURN_SEL = ", ".join([
+    '[data-message-author-role="user"]',
+    '[data-chatgpt-search-unit-key$=":user"]',
+    '[data-content-search-unit-key$=":user"]',
+    '[data-user-message-bubble]',
+])
+
+# In-page helpers shared by the reads below (ES5, pasted inside each IIFE):
+# _turns() = the assistant turns in document order, _body(turn) = the answer's
+# markdown root, _COMPOSER = the composer selector list.
+_PAGE_HELPERS_JS = """
+  var _COMPOSER=__COMPOSER__;
+  var _turns=function(){
+    var m=document.querySelectorAll('[data-message-author-role="assistant"]');
+    if(!m.length) m=document.querySelectorAll(
+      '[data-chatgpt-search-unit-key$=":assistant"], [data-content-search-unit-key$=":assistant"]');
+    if(!m.length) m=Array.prototype.map.call(
+      document.querySelectorAll('[data-conversation-role="assistant"]'),
+      function(h){ return h.parentElement; });
+    return m;
+  };
+  var _body=function(turn){
+    return turn.querySelector('.markdown')
+      ||turn.querySelector('[data-markdown-text-style="assistant-message"]')
+      ||turn.querySelector('.prose')||turn;
+  };
+""".replace("__COMPOSER__", json.dumps(_COMPOSER_SEL))
+
+
 # Shared image predicates. `_isGenImg` matches ChatGPT's generated-image URLs;
 # `_isInput` excludes images WE uploaded as input (a vision request) — those
 # render with the very same blob:/content? URLs, but inside the user's turn or
 # the composer's file tile. Without this exclusion an uploaded image counts as
 # "generated": the completion tracker fires image-stability immediately (cutting
 # the text answer off) and the upload gets echoed back and saved to the gallery.
+# Since the 11 Oct 2026 page the sent image sits in the user turn but outside
+# the bubble, so the turn itself has to match, not only the bubble.
 _IMG_PREDICATES_JS = """
   const _isGenImg=(src,alt)=>{src=src||'';alt=(alt||'').trim().toLowerCase();
     return src.indexOf('backend-api/estuary')>=0||src.indexOf('backend-api/files')>=0
       ||src.indexOf('oaiusercontent')>=0||src.indexOf('/content?')>=0
       ||src.indexOf('blob:')===0||alt.indexOf('generated image')===0;};
   const _isInput=(im)=>{ try{
-    return !!(im.closest('[data-message-author-role="user"]')
-      || im.closest('form') || im.closest('[class*="file-tile"]'));
+    return !!(im.closest(__USER_TURN__)
+      || im.closest('form') || im.closest('[class*="file-tile"]')
+      || im.closest('[data-composer-attachments]'));
   }catch(e){ return false; } };
-"""
+""".replace("__USER_TURN__", json.dumps(_USER_TURN_SEL))
 
 # Generated-image render status. Only images served from oaiusercontent/blob are
 # counted (avoids counting UI icons/avatars, which would wrongly suppress plain
@@ -119,36 +172,50 @@ class ChatGPTProvider(Provider):
     # the CodeMirror card finalizes), which append-only delta streaming can't represent
     # correctly. Buffer and emit the final text once. See Provider.buffered_stream.
     buffered_stream = True
-    # ProseMirror contenteditable composer.
-    input_selector = '#prompt-textarea'
-    send_selectors = [
-        'button[data-testid="send-button"]',
+    # ProseMirror contenteditable composer (selector list: see the top of the file).
+    input_selector = _COMPOSER_SEL
+    # ONE entry holding every layout's send button: base.open_and_send waits up
+    # to 3 s per entry, so separate entries would cost 3 s per layout not shown.
+    send_selectors = [", ".join([
+        'form[data-chatgpt-composer] button[type="submit"]',  # 11 Oct 2026: "Send"
+        'form button[aria-label="Send"]',
+        'button[data-testid="send-button"]',                   # earlier layouts
         'button[data-testid="composer-send-button"]',
         'button[aria-label="Send prompt"]',
         'button[aria-label="Send message"]',
-    ]
+    ])]
     load_wait = 7.0  # ChatGPT can be slow to hydrate / may show a bot check
-    user_turn_selector = '[data-message-author-role="user"]'
-    # --- image input (upload). Verified live 2026-07-28: chatgpt.com keeps a
-    # hidden `input[data-testid="upload-photos-input"]` (accept=image/*) in the
-    # DOM at rest, so the generic input path attaches without touching the "+"
-    # menu; the click path below is only a fallback if that input disappears.
+    user_turn_selector = _USER_TURN_SEL
+    # --- image input (upload). Verified live 2026-07-28 and again 2026-10-12:
+    # chatgpt.com keeps hidden file inputs in the DOM at rest (until 11 Oct 2026
+    # `input[data-testid="upload-photos-input"]`, since then four inputs with
+    # aria-labels only: "Take a photo", "Attach photos or videos", "Attach
+    # photos", "Attach files"). The generic input path ranks image inputs first;
+    # the top-ranked one took the file on 12 Oct. The click path below is only a
+    # fallback if every input disappears, and its menu labels are unverified
+    # since the 11 Oct page.
     supports_history = True
     site_origin = "https://chatgpt.com"
     supports_upload = True
     attach_click_path = [
-        ['button[data-testid="composer-plus-btn"]', 'text:add photos & files',
-         'text:add files and more'],
+        ['button[aria-label="Add files and more"]', 'button[data-testid="composer-plus-btn"]',
+         'text:add photos & files', 'text:add files and more'],
         ['text:add photos & files', 'text:upload from computer', 'text:add photos'],
     ]
-    # Each accepted file renders a 144px "file tile" with a
-    # `button[aria-label="Remove file N: <name>"]`; that button is the reliable
-    # per-file chip count. Busy = the tile still shows a progress indicator.
+    # One chip per accepted file. Earlier layouts: a 144px "file tile" with
+    # `button[aria-label="Remove file N: <name>"]`. Since 11 Oct 2026: a tile in
+    # `[data-composer-attachments]` with `button[aria-label="Remove <name>"]`.
+    # Busy = the form still shows a progress indicator (true on both layouts).
+    # A wrong chip count is not harmless: _attach_via_input reads "no chip" as
+    # "wrong input" and attaches the same file to the next input, up to four.
     attachment_ready_js = """
     (function(){
+      var form=document.querySelector('form[data-chatgpt-composer]')
+        ||document.querySelector('form')||document.body;
       var chips=document.querySelectorAll('button[aria-label^="Remove file"]').length;
+      if(!chips) chips=form.querySelectorAll('button[aria-label^="Remove "]').length;
       if(!chips) chips=document.querySelectorAll('[class*="file-tile"] img').length;
-      var form=document.querySelector('form')||document.body;
+      if(!chips) chips=document.querySelectorAll('[data-composer-attachments] img').length;
       var busy=!!form.querySelector('[role="progressbar"], progress');
       return JSON.stringify({ready:chips, busy:busy});
     })()
@@ -164,7 +231,7 @@ class ChatGPTProvider(Provider):
         # the toolbar), skipping the toolbar chrome. Verified against the live DOM 2026-07-08.
         try:
             result = await page.evaluate(r"""
-                (function(){
+                (function(){""" + _PAGE_HELPERS_JS + r"""
                     // Extract the real code from a CodeMirror editor (or plain <pre>).
                     function codeText(el){
                         var content=(el.classList&&el.classList.contains('cm-content'))
@@ -217,11 +284,11 @@ class ChatGPTProvider(Provider):
                         }catch(e){}
                         return '';
                     }
-                    var msgs=document.querySelectorAll('[data-message-author-role="assistant"]');
+                    var msgs=_turns();
                     var msg='';
                     if(msgs.length){
                         var last=msgs[msgs.length-1];
-                        var md=last.querySelector('.markdown')||last.querySelector('.prose')||last;
+                        var md=_body(last);
                         // Transient status text ("Analyzing image" while a vision
                         // request is processed) lives in the SAME .markdown node,
                         // marked with loading-shimmer/aria-busy. It is not the
@@ -266,9 +333,11 @@ class ChatGPTProvider(Provider):
                     // always read it and return whichever is the larger, real payload.
                     // (CodeMirror virtualizes offscreen lines, so a very long canvas can
                     // still come back partial — a known limitation, not fixed here.)
-                    var composer=document.querySelector('#prompt-textarea');
-                    var isComposer=function(el){ return composer&&(el===composer||el.contains(composer)
-                        ||composer.contains(el)||el.id==='prompt-textarea'); };
+                    // The composer is a ProseMirror too; never read it as a canvas.
+                    var composer=document.querySelector(_COMPOSER);
+                    var isComposer=function(el){ return (composer&&(el===composer||el.contains(composer)
+                        ||composer.contains(el)))||el.id==='prompt-textarea'
+                        ||!!(el.closest&&el.closest('form')); };
                     var canvasTxt='';
                     var consider=function(el){ if(!el||isComposer(el))return;
                         var t=(el.innerText||el.textContent||'').trim();
@@ -291,19 +360,26 @@ class ChatGPTProvider(Provider):
     async def is_generating(self, page) -> bool:
         try:
             v = await page.evaluate("""
-                (function(){
+                (function(){""" + _PAGE_HELPERS_JS + """
                     if(document.querySelector('[data-testid="stop-button"]')) return true;
                     if(document.querySelector('button[aria-label="Stop streaming"]')) return true;
                     if(document.querySelector('button[aria-label="Stop generating"]')) return true;
+                    // Since 11 Oct 2026 the composer's send button turns into a
+                    // plain "Stop" and the turn says in_progress. Both cleared at
+                    // the end of every answer measured on 12 Oct; a signal that
+                    // stuck would hold every request to the deadline, so add one
+                    // here only after watching it clear.
+                    if(document.querySelector('form button[aria-label="Stop"]')) return true;
+                    if(document.querySelector('[data-talvt-turn-state="in_progress"]')) return true;
                     if(document.querySelector('.result-streaming')) return true;
                     // Still working: the assistant bubble is showing shimmering
                     // status text ("Analyzing image" on a vision request). The
                     // stop button can be absent during that phase, which used to
                     // look like "settled" and ended the poll before the answer.
-                    var msgs=document.querySelectorAll('[data-message-author-role="assistant"]');
+                    var msgs=_turns();
                     if(msgs.length){
                         var last=msgs[msgs.length-1];
-                        var md=last.querySelector('.markdown')||last.querySelector('.prose')||last;
+                        var md=_body(last);
                         if(/loading-shimmer|aria-busy/.test(md.className||'')
                            || md.getAttribute('aria-busy')==='true') return true;
                     }
@@ -671,9 +747,10 @@ class ChatGPTProvider(Provider):
                     const authPrompt = /sign up or log in|log in to get|log in to save/i.test(bodyTxt);
                     if (loginBtn || oauthBtn || authPrompt) return false;   // logged OUT
                     // No logged-out affordance + a composer present => signed in.
-                    return !!document.querySelector('#prompt-textarea, [data-testid="composer-send-button"]');
+                    return !!document.querySelector(__COMPOSER__);
                 })()
-            """)
+            """.replace("__COMPOSER__", json.dumps(
+                _COMPOSER_SEL + ', [data-testid="composer-send-button"]')))
             return bool(v)
         except Exception:
             return False

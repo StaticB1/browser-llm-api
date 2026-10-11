@@ -467,7 +467,7 @@ that host has one.
 
 ## Caveats
 
-- **Fragile by nature** — each provider depends on its site's live DOM/selectors (Gemini: `model-response`; ChatGPT: `[data-message-author-role="assistant"]`, `[data-testid="send-button"]`). A UI change can break extraction. ChatGPT additionally sits behind Cloudflare/anti-bot.
+- **Fragile by nature** — each provider depends on its site's live DOM/selectors (Gemini: `model-response`; ChatGPT: the composer form's ProseMirror, its "Send" button and the `[data-chatgpt-search-unit-key$=":assistant"]` turn since its 11 Oct 2026 redesign, kept alongside the earlier `[data-message-author-role="assistant"]` layout). A UI change can break extraction. ChatGPT additionally sits behind Cloudflare/anti-bot.
 - **Image input rides the same selectors.** ChatGPT's upload path is verified end-to-end; Gemini's uses the generic file-chooser mechanism with best-guess menu labels (its "Upload & tools" button is verified) — if Gemini stops receiving attachments, check `attach_click_path` in `providers/gemini.py` first. Attachments are capped by `MAX_ATTACHMENTS` / `MAX_ATTACHMENT_MB`, and a multi-turn conversation re-uploads its images on every request (each request drives a fresh chat), so long image conversations get slower.
 - **One request at a time per provider** (per-provider lock); Gemini and ChatGPT run concurrently, callers to the same provider queue.
 - **`usage` token counts are approximate** (word-split, not a real tokenizer).

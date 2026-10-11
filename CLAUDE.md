@@ -111,7 +111,7 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
                      #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
                      #   exception handlers in server.py for no behaviour change. The repo
                      #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 147 unit tests + an editable install + a live MCP
+.github/workflows/ci.yml  # lint + the 158 unit tests + an editable install + a live MCP
                      #   handshake, on every push and PR. No browser, no network, no secrets,
                      #   so a green build means the pure logic holds, NOT that the sites still
                      #   scrape. Nothing here can catch a DOM change; only a real request can.
@@ -173,7 +173,9 @@ tests/               # unit tests (no browser needed):
                      #   (trusted-caller gating, history-provider 501s, _gallery_target
                      #   traversal/extension/symlink refusals, conversation-id shape),
                      #   test_visibility.py (the occlusion flag in CHROME_ARGS,
-                     #   ensure_visible's restore-or-refuse, has_user_turn)
+                     #   ensure_visible's restore-or-refuse, has_user_turn),
+                     #   test_chatgpt_page.py (every ChatGPT selector list keeps both
+                     #   layouts of the 11 Oct 2026 redesign; composer_hint)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
@@ -185,7 +187,7 @@ providers/
   gemini.py          # GeminiProvider — shadow-DOM extraction, blob→b64 images,
                      #   upload via the "Upload & tools" menu + chooser interception
   chatgpt.py         # ChatGPTProvider — plain-DOM extraction, oaiusercontent/blob images,
-                     #   upload via the hidden upload-photos-input; excludes INPUT images
+                     #   upload via a hidden file input; excludes INPUT images
                      #   from generated-image scans; shimmer-aware text/generating reads.
                      #   Also the history layer, all of it in-page JS against the site's
                      #   own backend-api: _LIST_JS, _ONE_JS, _CONV_ID_JS, _DELETE_JS
@@ -305,16 +307,22 @@ files, and the provider uploads them through the site's own file picker before s
   `wait_uploads_ready()` polls `attachment_ready_js` (`{ready, busy}`) for two clean samples —
   `require_idle=False` while probing an input (chips only), then the full idle wait in
   `open_and_send` before submitting, because sending mid-upload loses the attachment.
-- **ChatGPT** (verified live 2026-07-28): hidden `input[data-testid="upload-photos-input"]`
-  (`accept=image/*`) exists at rest, so path (1) always wins; each accepted file renders a 144px
-  tile with `button[aria-label^="Remove file …"]` — that's the chip count. **Gemini** keeps *no*
+- **ChatGPT** (verified live 2026-07-28, again 2026-10-12): hidden file inputs exist at rest, so
+  path (1) always wins. Until 11 Oct 2026 that was `input[data-testid="upload-photos-input"]` and
+  each file rendered a 144px tile with `button[aria-label^="Remove file …"]`; since then there are
+  four inputs labelled only by aria-label ("Take a photo", "Attach photos or videos", "Attach
+  photos", "Attach files"; the top-ranked one took the file) and each file shows
+  `button[aria-label="Remove <file name>"]`. That button is the chip count, and it must be right:
+  "no chip" makes `_attach_via_input` try the next input with the same file, up to four times. **Gemini** keeps *no*
   file input at rest, so it needs path (2); its `button[aria-label="Upload & tools"]` is verified but
   the menu-item labels are best-guess (the box's Gemini profile was signed out) — check those first
   if a Gemini upload stops landing.
 - **Don't let an input image look like a generated one.** ChatGPT's `image_status`/`get_images` scan
   the *whole page* (a generated image renders outside the assistant turn), and an uploaded image has
-  the same `blob:`/`content?` URL shape. `_isInput()` excludes anything inside
-  `[data-message-author-role="user"]`, a `form`, or a `file-tile` — without it every vision request
+  the same `blob:`/`content?` URL shape. `_isInput()` excludes anything inside the user turn
+  (`_USER_TURN_SEL`: `[data-message-author-role="user"]` before 11 Oct 2026,
+  `[data-chatgpt-search-unit-key$=":user"]` since, where the sent image sits outside the bubble),
+  a `form`, a `file-tile` or `[data-composer-attachments]` — without it every vision request
   completed instantly on "image stability" (truncating the text) and echoed the upload back into the
   gallery.
 - **"Analyzing image" placeholder (fixed 2026-07-28):** on a vision request ChatGPT puts transient
@@ -548,7 +556,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (147 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (158 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
@@ -604,9 +612,17 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   must run with the server on a real display** (e.g. `DISPLAY=:1 ./venv/bin/python server.py`).
   Verified working on `:1` (produced a real 1536×1024 PNG in ~40s). Image gen on the free "Go" tier
   is also slow/variable (30s–4min+), hence the 420s completion deadline.
-- **ChatGPT specifics (verified):** composer `#prompt-textarea`; send `button[data-testid="send-button"]`
-  (only appears after typing — the composer shows a Voice button at rest); response text in the last
-  `[data-message-author-role="assistant"] .markdown`; generation state = `[data-testid="stop-button"]`.
+- **ChatGPT specifics (verified 2026-10-12):** every selector is a LIST holding the layout before
+  11 Oct 2026 and the one after, defined once at the top of `providers/chatgpt.py`. Composer:
+  `#prompt-textarea`, now a `div.ProseMirror[contenteditable]` inside `form[data-chatgpt-composer]`
+  with no id (CDP char events still type into it, newlines included). Send: the form's
+  `button[type=submit]`, labelled "Send" (was `button[data-testid="send-button"]`); it only appears
+  after typing, the composer shows a Voice button at rest. Answer: the last assistant turn
+  (`[data-chatgpt-search-unit-key$=":assistant"]`, was `[data-message-author-role="assistant"]`)
+  and its `[data-markdown-text-style="assistant-message"]` root (was `.markdown`). Generating: the
+  form's `button[aria-label="Stop"]` and `[data-talvt-turn-state="in_progress"]` (was
+  `[data-testid="stop-button"]`); both cleared at the end of every measured answer, and a signal
+  that sticks holds every request to the deadline, so only add one after watching it clear.
   ChatGPT **streams over WebSocket** (`ws.chatgpt.com`), so the HTTP CDP stream signal never fires —
   completion relies on `is_generating` going false + image-stability, NOT on `cdp_fired_at`. WS frames
   are tracked (`ws_url_fragments`) only as a "still streaming" heartbeat that extends the deadline for
@@ -630,7 +646,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   inline fenced output.)
   A generated image is an `<img src="…/backend-api/estuary/content?id=file_…" alt="Generated image: …">`
   (same-origin → fetchable to base64), NOT `oaiusercontent`/`blob:`. The finished image is *not* inside
-  a `data-message-author-role` element, so `image_status`/`get_images` scan the whole page.
+  the assistant turn element, so `image_status`/`get_images` scan the whole page.
 - **ChatGPT code blocks are CodeMirror, and the stream is buffered (fixed 2026-07-08):** an inline code
   answer is NOT a plain `<pre><code class="language-x">` — it's a **CodeMirror editor** (`.cm-editor` /
   `.cm-content`, `#code-block-viewer`) with the language shown only as a toolbar pill (no `language-*`
@@ -678,6 +694,19 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   the parked position in `chatgpt_profile/Default/Preferences` and reopened at `+1890+1050` with
   a corner on-screen, so a restart alone would not have been a dependable fix. **Don't move or
   cover the service windows on `:98`, and don't remove the flag.**
+- **ChatGPT redesigned its page on 11 Oct 2026 and every request failed for 36 hours (fixed
+  2026-10-12).** The new page dropped `#prompt-textarea`, `data-message-author-role` and nearly every
+  `data-testid` at once, so the composer, the send and stop buttons, the answer turn, the upload input
+  and the attachment chip all stopped matching. Requests failed at `input box not found` from 11 Oct
+  00:02, and the watchdog's alert, titled as empty answers with an expired login first in its list of
+  causes, did not name a redesign. Two silent traps came with it: the sent image now sits in the user
+  turn outside the bubble, so the old `_isInput()` would have counted it as a generated image, and the
+  chip is now `Remove <file name>`, so the old count would have attached the image four times. The fix
+  keeps both layouts in one list per selector (top of `providers/chatgpt.py`), and
+  `Provider.composer_hint()` now says whether the page still holds an editable element (a redesign)
+  or none (a sign-in wall). When this happens again, read the live page over CDP first (the port is in
+  `pgrep -af 'user-data-dir=./chatgpt_profile'`), measure every selector in the provider on a real
+  turn, a code answer and an upload, and add the new layout to each list rather than replacing it.
 - **Two tabs in one Chrome cannot drive two ChatGPT conversations (tried and reverted
   2026-08-18).** A per-provider tab pool replacing the `asyncio.Lock` *looks* like the obvious way
   to run requests in parallel, and mechanically it works: two tabs navigate and submit 0.2s apart,

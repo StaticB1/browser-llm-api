@@ -165,6 +165,9 @@ except Exception: print("")' 2>/dev/null)
 "A one-word test completion to $model failed: $why
 
 The server itself is up. Causes seen so far, most recent first:
+- The site changed its page, so a selector in providers/${model%%-*}.py no longer matches
+  (ChatGPT, 11 Oct 2026: 'input box not found' while signed in). The detail above then says the
+  page still has an editable element. Read the live page over CDP and update the selector list.
 - The chat page is hidden (its Chrome window off-screen or covered on the agent display), so the
   site takes the prompt and never renders an answer. Check the page before anything else:
   curl -s http://127.0.0.1:<the provider's CDP port>/json/list, then read document.visibilityState.
