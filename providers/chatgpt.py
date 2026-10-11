@@ -28,7 +28,8 @@ logger = logging.getLogger("gemini_server")
 # therefore a LIST that keeps the earlier layout and adds the one measured live
 # on 12 Oct 2026 (signed-in Free account), so a page serving either one works:
 #   composer  div.ProseMirror[contenteditable] inside form[data-chatgpt-composer],
-#             aria-label "Ask ChatGPT", no id; CDP char events still type into it
+#             aria-label "Ask ChatGPT", no id; a "\n" typed as a key event is lost
+#             (see type_prompt)
 #   send      the form's button[type=submit], aria-label "Send", only after typing
 #   stop      the form's button[aria-label="Stop"] while an answer streams, and
 #             the turn's [data-talvt-turn-state="in_progress"]
@@ -220,6 +221,17 @@ class ChatGPTProvider(Provider):
       return JSON.stringify({ready:chips, busy:busy});
     })()
     """
+
+    async def type_prompt(self, page, input_box, prompt: str) -> None:
+        # Measured 12 Oct 2026 on the composer of 11 Oct: a "\n" sent as a CDP
+        # char event inserts nothing, so a multi-line prompt reached the site as
+        # one run-on line ("...lower case only.]First line: ...Second line: ...").
+        # One Input.insertText call puts the whole prompt in the way a paste
+        # does, each line break as a new paragraph, and costs one CDP call
+        # instead of one per character.
+        from nodriver import cdp
+        await input_box.apply("(elem) => elem.focus()")
+        await page.send(cdp.input_.insert_text(text=prompt))
 
     async def get_response_text(self, page) -> str:
         # ChatGPT renders code blocks as CodeMirror editors (.cm-editor / .cm-content),

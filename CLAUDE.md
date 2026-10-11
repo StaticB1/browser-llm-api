@@ -111,7 +111,7 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
                      #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
                      #   exception handlers in server.py for no behaviour change. The repo
                      #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 158 unit tests + an editable install + a live MCP
+.github/workflows/ci.yml  # lint + the 160 unit tests + an editable install + a live MCP
                      #   handshake, on every push and PR. No browser, no network, no secrets,
                      #   so a green build means the pure logic holds, NOT that the sites still
                      #   scrape. Nothing here can catch a DOM change; only a real request can.
@@ -246,7 +246,8 @@ completion signal), `supports_images`, `image_text_is_caption`, `input_selector`
 
 - `open_and_send(browser, prompt, attachments=None) -> (page, monitor)` — **generic in base**;
   navigates, attaches the `StreamMonitor`, uploads any `attachments` (see the image-input section),
-  types into `input_selector`, clicks the first working `send_selectors` (Enter fallback). Override
+  types into `input_selector` through `type_prompt()` (key events by default; ChatGPT inserts the
+  text in one call), clicks the first working `send_selectors` (Enter fallback). Override
   only for a site that needs something special.
 - `attach_files(page, paths) -> int` / `wait_uploads_ready(page, n)` — **generic in base**; driven by
   the declarative `supports_upload`, `attach_click_path`, `attachment_ready_js`, `upload_timeout`,
@@ -556,7 +557,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (158 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (160 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
@@ -615,7 +616,9 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 - **ChatGPT specifics (verified 2026-10-12):** every selector is a LIST holding the layout before
   11 Oct 2026 and the one after, defined once at the top of `providers/chatgpt.py`. Composer:
   `#prompt-textarea`, now a `div.ProseMirror[contenteditable]` inside `form[data-chatgpt-composer]`
-  with no id (CDP char events still type into it, newlines included). Send: the form's
+  with no id. Typing: CDP char events still type letters into it but a "\n" types nothing, so
+  `type_prompt` puts the whole prompt in with one `Input.insertText` (each line break becomes a
+  paragraph, as a paste would). Send: the form's
   `button[type=submit]`, labelled "Send" (was `button[data-testid="send-button"]`); it only appears
   after typing, the composer shows a Voice button at rest. Answer: the last assistant turn
   (`[data-chatgpt-search-unit-key$=":assistant"]`, was `[data-message-author-role="assistant"]`)
@@ -701,7 +704,10 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   00:02, and the watchdog's alert, titled as empty answers with an expired login first in its list of
   causes, did not name a redesign. Two silent traps came with it: the sent image now sits in the user
   turn outside the bubble, so the old `_isInput()` would have counted it as a generated image, and the
-  chip is now `Remove <file name>`, so the old count would have attached the image four times. The fix
+  chip is now `Remove <file name>`, so the old count would have attached the image four times. Code
+  cards became one `[data-markdown-copy="code-block"]` element with a button inside the editor pane,
+  which left "Python\nRun" in front of every fence, and line breaks typed as key events vanished from
+  the prompt (whether the old composer did the same was never measured). The fix
   keeps both layouts in one list per selector (top of `providers/chatgpt.py`), and
   `Provider.composer_hint()` now says whether the page still holds an editable element (a redesign)
   or none (a sign-in wall). When this happens again, read the live page over CDP first (the port is in

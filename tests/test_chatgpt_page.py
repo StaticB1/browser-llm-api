@@ -89,6 +89,43 @@ class InPageReads(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("__USER_TURN__", page.exprs[0])
 
 
+class FakeBox:
+    def __init__(self):
+        self.calls = []
+
+    async def apply(self, js):
+        self.calls.append(("apply", js))
+
+    async def send_keys(self, text):
+        self.calls.append(("send_keys", text))
+
+
+class SendingPage:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, cmd):
+        self.sent.append(next(cmd))  # nodriver commands are generators
+
+
+class TypePrompt(unittest.IsolatedAsyncioTestCase):
+    PROMPT = "First line: a test.\nSecond line: reply ready."
+
+    async def test_chatgpt_inserts_the_whole_prompt_with_its_line_breaks(self):
+        # A "\n" char event types nothing on the 11 Oct 2026 composer.
+        page, box = SendingPage(), FakeBox()
+        await ChatGPTProvider().type_prompt(page, box, self.PROMPT)
+        self.assertEqual([m["method"] for m in page.sent], ["Input.insertText"])
+        self.assertEqual(page.sent[0]["params"]["text"], self.PROMPT)
+        self.assertNotIn("send_keys", [c[0] for c in box.calls])
+
+    async def test_other_providers_keep_typing_key_by_key(self):
+        page, box = SendingPage(), FakeBox()
+        await GeminiProvider().type_prompt(page, box, self.PROMPT)
+        self.assertEqual(box.calls, [("send_keys", self.PROMPT)])
+        self.assertEqual(page.sent, [])
+
+
 class ComposerHint(unittest.IsolatedAsyncioTestCase):
     async def test_an_editable_element_means_the_site_changed(self):
         page = RecordingPage(answer=json.dumps({"ce": 1, "ta": 0, "url": "https://chatgpt.com/"}))

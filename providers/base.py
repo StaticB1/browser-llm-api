@@ -691,6 +691,12 @@ class Provider(ABC):
         except Exception:
             return None
 
+    async def type_prompt(self, page, input_box, prompt: str) -> None:
+        """Put the prompt into the composer. Default: one CDP key event per
+        character (nodriver's send_keys). Override for a composer that drops
+        some characters typed that way (ChatGPT's drops line breaks)."""
+        await input_box.send_keys(prompt)
+
     async def composer_hint(self, page) -> str:
         """Why the composer was not found, read from what the page does hold.
 
@@ -741,7 +747,7 @@ class Provider(ABC):
                                + await self.composer_hint(page))
 
         logger.info(f"[{self.name}] sending prompt ({len(prompt)} chars)...")
-        await input_box.send_keys(prompt)
+        await self.type_prompt(page, input_box, prompt)
         # Nudge frameworks that only react to a real 'input' event.
         await page.evaluate(
             "const el = document.querySelector(%r); "
