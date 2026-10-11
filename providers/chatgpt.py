@@ -325,7 +325,16 @@ class ChatGPTProvider(Provider):
                         // all prose untouched.
                         msg=(md.innerText||md.textContent||'').trim();
                         var editors=md.querySelectorAll('.cm-editor, #code-block-viewer');
-                        if(!editors.length){
+                        // Since 11 Oct 2026 every card is one [data-markdown-copy=
+                        // "code-block"] element holding EITHER a CodeMirror editor
+                        // (Python, with Run) or a plain <pre> (Bash), so one answer
+                        // can mix both and the <pre> fallback below never ran for
+                        // it: the Bash card came back as "Bash\necho ..." (12 Oct).
+                        var blocks=md.querySelectorAll('[data-markdown-copy="code-block"]');
+                        if(blocks.length){
+                            editors=Array.prototype.map.call(blocks, function(b){
+                                return b.querySelector('.cm-editor')||b.querySelector('pre')||b; });
+                        } else if(!editors.length){
                             editors=Array.prototype.filter.call(md.querySelectorAll('pre'),
                                 function(p){var c=p.querySelector('code');
                                     return c && (c.textContent||'').trim().length>0;});
