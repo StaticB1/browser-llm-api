@@ -248,6 +248,13 @@ class ChatGPTProvider(Provider):
                     // Smallest ancestor of the editor that also holds the toolbar
                     // (its innerText == the flattened "Python\nRun\n<code>" chunk in msg).
                     function findCard(editor){
+                        // Since 11 Oct 2026 the whole card (language label, Copy
+                        // and Run toolbar, editor) is one element, and the editor
+                        // pane holds its own "Scroll to bottom" button, so the
+                        // button climb below would stop inside the pane and leave
+                        // "Python\nRun" in the prose (measured 12 Oct).
+                        var block=editor.closest&&editor.closest('[data-markdown-copy="code-block"]');
+                        if(block) return block;
                         var card=editor, n=0;
                         while(card.parentElement && n<8
                               && !(card.querySelector && card.querySelector('button'))){
@@ -281,6 +288,10 @@ class ChatGPTProvider(Provider):
                             var first=(((card.innerText||'').trim().split('\n')[0])||'').trim().toLowerCase();
                             if(/^[a-z0-9+#.\-]{1,15}$/.test(first)
                                && !/^(copy|copy code|run|edit|share|preview|code)$/.test(first)) return first;
+                            // 11 Oct 2026 page: the editor names its language too.
+                            var tagged=card.querySelector&&card.querySelector('.cm-content[data-language]');
+                            var lang=tagged?(tagged.getAttribute('data-language')||'').trim().toLowerCase():'';
+                            if(/^[a-z0-9+#.\-]{1,15}$/.test(lang)) return lang;
                         }catch(e){}
                         return '';
                     }
