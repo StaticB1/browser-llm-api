@@ -53,7 +53,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 _BASE = (os.environ.get("BROWSER_LLM_API") or os.environ.get("GEMINI_API")
          or "http://localhost:8081").rstrip("/")
@@ -324,7 +324,12 @@ def contact_sheet(paths, out, height=480, gap=24):
         im = Image.open(p).convert("RGBA")
         w = round(im.width * height / im.height)
         tiles.append(im.resize((w, height), Image.LANCZOS))
-    label_h = 40
+    # Labels at a size readable when the sheet is shown scaled to a screen.
+    try:
+        font = ImageFont.load_default(size=max(20, height // 14))
+    except Exception:  # Pillow before 10.1 has no sized default font
+        font = ImageFont.load_default()
+    label_h = max(40, height // 14 + 20)
     sheet = Image.new("RGB", (sum(t.width for t in tiles) + gap * (len(tiles) + 1),
                               height + label_h + gap * 2), (255, 255, 255))
     draw = ImageDraw.Draw(sheet)
@@ -332,7 +337,7 @@ def contact_sheet(paths, out, height=480, gap=24):
     for i, t in enumerate(tiles, 1):
         sheet.paste(t, (x, gap), t)
         draw.text((x, gap + height + 10), f"v{i}  {os.path.basename(paths[i - 1])}",
-                  fill=(20, 20, 20))
+                  fill=(20, 20, 20), font=font)
         x += t.width + gap
     sheet.save(out)
     return out

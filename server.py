@@ -885,9 +885,15 @@ async def _read_model_used(provider, page, monitor, options: dict) -> dict:
     if options.get("picker"):
         used["picker"] = options["picker"]
     if used:
-        effort = f" ({used['effort']})" if used.get("effort") else ""
-        logger.info(f"[{provider.name}] answered by {used.get('model')}{effort} per the "
-                    f"{used.get('source')}; picker {used.get('picker', '-')}")
+        if used.get("model"):
+            effort = f" ({used['effort']})" if used.get("effort") else ""
+            logger.info(f"[{provider.name}] answered by {used['model']}{effort} per the "
+                        f"{used.get('source')}; picker {used.get('picker', '-')}")
+        else:
+            # ChatGPT's record of an image made at Instant names no model
+            # (13 Oct 2026), and the page's request may not have been seen.
+            logger.info(f"[{provider.name}] the page did not say which model answered; "
+                        f"picker {used.get('picker', '-')}")
         note = getattr(provider, "note_model_used", None)
         if note:
             note(used)

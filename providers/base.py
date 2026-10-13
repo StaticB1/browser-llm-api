@@ -219,6 +219,21 @@ class StreamMonitor:
         except Exception as e:
             logger.warning(f"CDP network monitor unavailable: {e}")
 
+    # Chrome leaves postData out of requestWillBeSent unless Network.enable
+    # names a size, and nodriver enables the domain without one, so until
+    # 13 Oct 2026 sent_model stayed empty on every request. 256 KB holds a chat
+    # request with a long prompt; larger bodies (file uploads) are left out.
+    MAX_POST_DATA = 262144
+
+    async def enable_bodies(self, tab) -> None:
+        """Ask Chrome to include request bodies (up to MAX_POST_DATA) in the
+        events attach() listens to. Call after attach(). Never raises."""
+        try:
+            from nodriver import cdp
+            await tab.send(cdp.network.enable(max_post_data_size=self.MAX_POST_DATA))
+        except Exception as e:
+            logger.debug(f"request bodies unavailable to the monitor: {e}")
+
     def _on_request(self, event):
         url = event.request.url
         if self._fragments and any(k in url for k in self._fragments):
@@ -861,6 +876,7 @@ class Provider(ABC):
         page = await browser.get(self.chat_url)
         monitor = self.new_monitor()
         monitor.attach(page)
+        await monitor.enable_bodies(page)
 
         logger.info(f"[{self.name}] waiting for page to load...")
         await asyncio.sleep(self.load_wait)

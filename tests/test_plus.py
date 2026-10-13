@@ -205,6 +205,49 @@ class ModelChoice(unittest.TestCase):
         self.assertEqual(m.sent_model["model"], "gpt-6-thinking")
 
 
+class MonitorAsksForBodies(unittest.IsolatedAsyncioTestCase):
+    # Chrome omits postData from requestWillBeSent unless Network.enable names
+    # a size; without it sent_model stayed empty on every live request.
+    async def test_enable_bodies_names_a_post_data_size(self):
+        sent = []
+
+        class Tab:
+            async def send(self, cmd):
+                sent.append(next(cmd))
+
+        await StreamMonitor(["backend-api/conversation"]).enable_bodies(Tab())
+        self.assertEqual(sent[0]["method"], "Network.enable")
+        self.assertGreaterEqual(sent[0]["params"]["maxPostDataSize"], 65536)
+
+    async def test_open_and_send_asks_for_bodies(self):
+        calls = []
+
+        class Monitor:
+            def attach(self, tab):
+                calls.append("attach")
+
+            async def enable_bodies(self, tab):
+                calls.append("enable_bodies")
+
+        class Stop(Exception):
+            pass
+
+        p = ChatGPTProvider()
+        p.new_monitor = Monitor
+
+        async def stop(*a, **k):
+            raise Stop
+
+        class Browser:
+            async def get(self, url):
+                return object()
+
+        with mock.patch("providers.base.asyncio.sleep", new=stop):
+            with self.assertRaises(Stop):
+                await p.open_and_send(Browser(), "hi")
+        self.assertEqual(calls, ["attach", "enable_bodies"])
+
+
 # ---------------------------------------------------------------------------
 # The words an image request types
 # ---------------------------------------------------------------------------
