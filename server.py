@@ -416,10 +416,14 @@ class ImageGenRequest(BaseModel):
 _browsers: dict[str, uc.Browser] = {}
 _locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in PROVIDERS}
 
-# The persistent browser's renderer bloats after a handful of image generations
-# (heavy canvas/blobs + growing SPA DOM) and starts timing out; a fresh browser
-# resets it. Recycle a provider's browser once it has done this many image gens.
-_RECYCLE_AFTER_IMAGES = int(os.environ.get("BROWSER_RECYCLE_AFTER_IMAGES", "3"))
+# Recycle a provider's browser once it has done this many image gens. On the
+# free plan the renderer bloated after 4-5 slow image generations and started
+# timing out, hence the old default of 3. On ChatGPT Plus, measured 13 Oct 2026
+# over 7 images in one browser (49-90 s each): the chatgpt.com renderer settled
+# at 479-548 MB after each image and peaked at 754-813 MB while drawing, with
+# no upward trend. 8 keeps a browser within that measured range and saves a
+# Chrome restart on most runs.
+_RECYCLE_AFTER_IMAGES = int(os.environ.get("BROWSER_RECYCLE_AFTER_IMAGES", "8"))
 
 # Most conversations or image files one delete call may name. A multi-select in
 # the UI is a handful of rows; a request for thousands is a mistake or a script

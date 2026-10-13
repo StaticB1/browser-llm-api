@@ -60,10 +60,19 @@ Two providers, selected per-request by the OpenAI **`model`** field:
 
 | model | site | profile | images out | images in |
 |-------|------|---------|------------|-----------|
-| `gemini-browser` | gemini.google.com | `gemini_profile/` | yes | yes (chooser path) |
-| `chatgpt-browser` | chatgpt.com | `chatgpt_profile/` | yes | yes (verified) |
+| `chatgpt-browser` | chatgpt.com | `chatgpt_profile/` | yes, the image provider | yes (verified) |
+| `gemini-browser` | gemini.google.com | `gemini_profile/` | only if `IMAGE_PROVIDERS` names it | yes (chooser path) |
 
-Unknown/absent `model` → `DEFAULT_PROVIDER` (env, default `gemini-browser`).
+Unknown/absent `model` → `DEFAULT_PROVIDER` (env, default `chatgpt-browser` since 13 Oct 2026).
+`IMAGE_PROVIDERS` (comma list; unset = every provider that can draw) gates image requests; others
+get 403.
+
+**Images must not use Gemini on this install (Eben's order, 13 Oct 2026, EBE-2054):** he paid for
+ChatGPT Plus and said "use gpt images the best as much as u can. Stop using gemini now." The
+service's drop-in `~/.config/systemd/user/browser-llm-api.service.d/30-chatgpt-plus.conf` sets
+`DEFAULT_PROVIDER=chatgpt-browser`, `IMAGE_PROVIDERS=chatgpt-browser`, `CHATGPT_MODEL=GPT-6`,
+`CHATGPT_EFFORT=high`, `CHATGPT_IMAGE_RESERVE=10` and `BROWSER_RECYCLE_AFTER_IMAGES=8`. Gemini
+stays available by name for text. The Plus limits, measured, are in README, "ChatGPT Plus limits".
 
 This is inherently **fragile**: each provider depends on its site's live DOM/selectors, and ChatGPT
 additionally sits behind Cloudflare/anti-bot. A UI change can silently break extraction or submission.
@@ -175,9 +184,16 @@ tests/               # unit tests (no browser needed):
                      #   test_visibility.py (the occlusion flag in CHROME_ARGS,
                      #   ensure_visible's restore-or-refuse, has_user_turn),
                      #   test_chatgpt_page.py (every ChatGPT selector list keeps both
-                     #   layouts of the 11 Oct 2026 redesign; composer_hint)
+                     #   layouts of the 11 Oct 2026 redesign; composer_hint),
+                     #   test_plus.py (EBE-2054: limits counter + refusal text → 429,
+                     #   model_variant/effort parsing, size words, pixel sizes,
+                     #   IMAGE_PROVIDERS 403, gen_asset size/original/variants/exit 3,
+                     #   draft replaced not appended, request bodies asked for)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
+                     #   + IMAGE_PROVIDERS
+  limits.py          # UsageLimitReached, quota_refusal (site counter), parse_limit_message
+                     #   / refusal_from_message (site refusal text) → HTTP 429
   base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
                      #   generic open_and_send(), generic file-upload/attach machinery
                      #   (file input + CDP file-chooser interception), patch_cdp(),
@@ -200,9 +216,14 @@ mcp_server.py        # MCP stdio server (JSON-RPC 2.0, stdlib only, no `mcp` pac
                      #   reply mid-image-gen). stdout carries protocol frames ONLY — every
                      #   log line goes to stderr or the client sees corrupt JSON.
                      #   Console entry point `browser-llm-mcp`. Tests: tests/test_mcp.py.
-gen_asset.py         # CLI wrapper: POST /v1/images/generations (no model → DEFAULT_PROVIDER),
-                     #   or /v1/images/edits with `--ref FILE` (image-to-image restyle),
-                     #   then Pillow post-process (resize/crop/favicon/knockout) → asset file.
+gen_asset.py         # CLI wrapper: POST /v1/images/generations (model chatgpt-browser unless
+                     #   --model / BROWSER_LLM_IMAGE_MODEL; NOT the server's DEFAULT_PROVIDER),
+                     #   or /v1/images/edits with `--ref FILE` (image-to-image restyle), sending
+                     #   size, background and model_variant; then Pillow post-process (exact
+                     #   resize/crop, favicon, knockout only if no alpha came back) → asset file.
+                     #   --keep-original, --variants N (+ contact sheet). Raises GenAssetError
+                     #   (code 3 = usage limit, from HTTP 429), never SystemExit: the MCP tool
+                     #   runs it on a worker thread, where SystemExit killed the thread silently.
                      #   `render()` is the whole wrapper as one call (generate → shape →
                      #   write → return path); main() is just argparse over it, and
                      #   mcp_server calls the same function. Keep them sharing it.
@@ -341,7 +362,8 @@ files, and the provider uploads them through the site's own file picker before s
 - **Extraction** is per-provider (`image_status` + `get_images`). Gemini reads `blob:` URLs to base64 by shadow-piercing; ChatGPT reads `oaiusercontent`/`blob:` `<img>`s in the last assistant turn, falling back to the remote `src` URL if CORS blocks the in-page fetch.
 - **Storage** (`_persist`): images with inline `b64` are written to a **per-provider subfolder** of the base dir (`<IMAGE_DIR>/<provider>/<provider>_<ts>_<hash>.ext`, e.g. `chatgpt/…` vs `gemini/…`) and served at `/images/<provider>/<file>` (mounted `StaticFiles` serves nested dirs); the returned link uses `GEMINI_PUBLIC_URL`. The per-provider slug (`_provider_slug`) stops one provider's images from being mislabeled as another's. Remote-only images keep their `src`. If the dir isn't writable, saving is skipped (`_SAVE_ENABLED=False`).
 - **In chat**: `_compose()` returns image-only markdown when `image_text_is_caption` is False (Gemini — its image-prompt prose is internal thinking), or text + images when True (ChatGPT — real caption).
-- **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?}]}`. `n`/`size` accepted but ignored. **501** if the provider doesn't support images, **502** if it returned none.
+- **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?, width, height, mime, revised_prompt?}], "model_used"}`. `n` ignored; `size`, `background` and `model_variant` are honoured (`Provider.image_prompt` writes size and background into the prompt in words, ChatGPT's adds "Use the image generation tool to create this image."; no style words, per the design-with-chatgpt rule). **501** if the provider doesn't support images, **403** if `IMAGE_PROVIDERS` leaves it out, **429** with `Retry-After` on a usage limit (`providers/limits.py`), **502** if it returned none otherwise (the detail quotes the page).
+- **Usage limits** (`providers/limits.py`, EBE-2054). Before an image, `ChatGPTProvider.prepare_page` POSTs `/backend-api/conversation/init` from inside the page and reads `limits_progress`; `quota_refusal` raises `UsageLimitReached` when `image_gen.remaining <= CHATGPT_IMAGE_RESERVE` or the feature is in `blocked_features`. After a request with no image, `refusal_from_message` matches ChatGPT's second-person refusal wording ("You've hit the Plus plan limit for image generation ... resets in 23 hours", "You're generating images too quickly ... wait for 3 minutes") and works out the reset. Both become 429. On 13 Oct 2026 the counter read 120 (24 h window) and did not drop after 7 images, so the text parser is the backstop that will actually fire.
 
 ## Ephemeral conversations (added 2026-08-20)
 
@@ -431,10 +453,15 @@ generated and the thread on the site.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `DEFAULT_PROVIDER` | `gemini-browser` | Provider used when `model` is unknown/absent. |
+| `DEFAULT_PROVIDER` | `chatgpt-browser` | Provider used when `model` is unknown/absent. `serve.sh` exports the same default (it used to export `gemini-browser`, which beat the code). |
+| `IMAGE_PROVIDERS` | *(every provider that can draw)* | Comma list of providers allowed to make images; others get 403. This install: `chatgpt-browser`. |
+| `CHATGPT_MODEL` | `GPT-6` | Picker row selected before each ChatGPT request. |
+| `CHATGPT_EFFORT` | `high` | Picker power slider: `instant` / `medium` / `high` (aliases fast, standard, extended). |
+| `CHATGPT_IMAGE_RESERVE` | `0` | Images on ChatGPT's own counter that requests here must leave for the account owner (this install: 10). |
+| `CHATGPT_READ_MODEL` | `1` | Read the conversation record after each answer for `model_used` (one extra GET). |
 | `GEMINI_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images; each provider gets a subfolder (`chatgpt/`, `gemini/`). `IMAGE_DIR` also accepted. |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
-| `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | Recycle a provider's browser after this many image gens (renderer bloats and times out otherwise). |
+| `BROWSER_RECYCLE_AFTER_IMAGES` | `8` | Recycle a provider's browser after this many image gens. Was 3 for the free plan's renderer bloat; on Plus the renderer stayed at 479-548 MB settled, 754-813 MB peak, over 7 images (13 Oct 2026). |
 | `MAX_ATTACHMENTS` | `6` | Most input images one request may attach. |
 | `MAX_ATTACHMENT_MB` | `20` | Per-attachment size ceiling (data URLs, downloads and local files alike). |
 | `BROWSER_LLM_HOST` | `127.0.0.1` | Interface to bind. Localhost-only by default (2026-08-11) — the server drives logged-in accounts, so LAN exposure is opt-in. This box's systemd override sets `0.0.0.0` explicitly, so the service is unaffected. |
@@ -459,7 +486,8 @@ systemctl --user list-timers browser-llm-health.timer
 ./healthcheck.sh --deep                        # run it by hand, including the model ping
 tail ~/.local/state/browser-llm-api/health.log # its log; silent when healthy
 
-# serve.sh auto-detects the display: real $DISPLAY (ChatGPT images work) else headless Xvfb.
+# serve.sh auto-detects the display: real $DISPLAY (ChatGPT images work; the service's Xvfb :98
+# counts, measured 13 Oct 2026) else its own xvfb-run.
 # On a headless box, force a real display for ChatGPT image gen:
 DISPLAY=:1 ./serve.sh
 ```
@@ -731,17 +759,45 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   `"gemini-browser did not return an image"`. Asked in words, Gemini says: *"I can search for
   images, but can't create any for you at the moment. You might be signed out or image creation
   may not be available in your location yet."* Account/region, not a code bug — reproduced with
-  raw curl against the endpoint. It matters because `DEFAULT_PROVIDER=gemini-browser`, so every
-  image call that omits `model` fails: **pass `--model chatgpt-browser` / `"model":
-  "chatgpt-browser"` for assets** until Gemini is re-authed on a real display.
+  raw curl against the endpoint. Since 13 Oct 2026 it no longer matters here: the default is
+  `chatgpt-browser`, `IMAGE_PROVIDERS=chatgpt-browser` refuses Gemini images with 403, and Eben
+  ordered Gemini out of image work.
 - **ChatGPT image gen DID work under the Xvfb display `:98` on 2026-08-18** — a 512×512 knockout
   PNG in ~90s via the service as installed. That contradicts the "requires a real display" note
   below, which was written before the SwiftShader flags landed in `CHROME_ARGS`. One dated
   observation, not a refutation: if canvas gen stalls again, a real display is still the fix.
 - **ChatGPT does NOT honour a `?model=` URL parameter** (probed live 2026-08-18 against the
   logged-in profile: `chatgpt.com/?model=gpt-5-thinking` and `?model=gpt-5-instant` both redirect
-  to bare `chatgpt.com/`). Per-request model selection would have to click the model switcher in
-  the DOM. Don't add a `?model=` shortcut believing it works.
+  to bare `chatgpt.com/`). Don't add a `?model=` shortcut believing it works; model selection
+  clicks the picker (next note).
+- **The ChatGPT Plus model picker (measured 13 Oct 2026, EBE-2054).** `button[aria-label="Select
+  ChatGPT model"]` shows the power label ("High"; GPT-5.6 Sol shows "5.6 Instant", so
+  `effort_matches` looks for the word). Its menu has `[data-model-picker-power-slider]` with three
+  `span[data-selected]` dots (Instant, Medium, High) and `[role=menuitemradio]` model rows with
+  `aria-checked` (GPT-6, GPT-5.6 Sol, GPT-5.5 "leaving 14 Oct"); the rows are in the DOM but inert
+  until `[data-model-picker-view-toggle]` is clicked. Clicks must be real CDP mouse events
+  (`_click_xy`); Escape closes the menu. The choice persists across reloads, so `select_variant`
+  caches the model and only opens the menu when something differs. The non-secret cookies
+  `oai-last-model-config` / `oai-default-model-config` do NOT track the picker; don't read them.
+- **What answered: the conversation record, not the picker.** `GET /backend-api/conversation/<id>`
+  (Bearer from `/api/auth/session`) gives each assistant message `metadata.model_slug`,
+  `resolved_model_slug` and `thinking_effort`. GPT-6 at High answers text as `gpt-6-thinking` /
+  `extended`; image turns are routed by the site to `gpt-5-4-thinking` (or `gpt-5-4-auto-thinking`)
+  whatever the picker says, Instant images to `gpt-6`; one Instant image's record named NO model
+  (its assistant message carried only `model_switcher_deny`), the next one did. The page's own
+  request body (`model`, `thinking_effort` on `/backend-api/f/conversation`) is the fallback,
+  and Chrome only puts bodies in `requestWillBeSent` when `Network.enable` names
+  `maxPostDataSize` — nodriver doesn't, so `StreamMonitor.enable_bodies` does (until 76f5e94
+  `requested_by_page` was never filled). The answer's "Try again" menu shows the page's own label
+  ("Try again • 6 Thinking").
+- **A send that doesn't land leaves a draft (13 Oct 2026).** The send click missed once; the prompt
+  stayed in the composer and the site persisted it as a draft, so the retry's `insertText` appended
+  the prompt to itself and ChatGPT got it twice. `type_prompt` now selects the whole composer
+  first (insertText replaces the selection) and checks the text; `open_and_send` confirms a send
+  (our turn shown or composer empty) and retries one click, then Enter.
+- **ChatGPT's image sizes (13 Oct 2026, Plus).** The tool picks a shape near the asked ratio:
+  1254x1254 square, 1672x941 for 16:9, 1731x909 for 1.91:1, 1122x1402 for 4:5. It honours
+  "transparent background" with a real RGBA PNG. Exact pixels come from gen_asset's crop.
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
 - **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; `serve.sh` clears both
   profiles' locks on every start, so the service and a foreground run are both covered. Running

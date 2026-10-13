@@ -12,7 +12,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8081/v1", api_key="not-needed")
 
 client.chat.completions.create(
-    model="chatgpt-browser",                       # or "gemini-browser"
+    model="chatgpt-browser",                       # the default; "gemini-browser" for text
     messages=[{"role": "user", "content": "Write a haiku about local-first AI."}],
 )
 ```
@@ -41,10 +41,16 @@ client.chat.completions.create(
 
 | `model` | Backend | Images out | Images in |
 |---------|---------|------------|-----------|
-| `chatgpt-browser` | chatgpt.com | ✅ | ✅ |
-| `gemini-browser` | gemini.google.com | ✅ | ✅ |
+| `chatgpt-browser` (default) | chatgpt.com | ✅ the image provider | ✅ |
+| `gemini-browser` | gemini.google.com | only where `IMAGE_PROVIDERS` names it | ✅ |
 
-An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `gemini-browser`).
+An unknown/absent `model` falls back to `DEFAULT_PROVIDER` (env, default `chatgpt-browser`).
+`IMAGE_PROVIDERS` (comma list) says which providers may make images; unset, every provider that
+can draw may, and a provider outside the list gets HTTP 403.
+
+**Images must not use Gemini on our own install** (Eben's order, 13 Oct 2026): ChatGPT Plus is
+the only image provider there, and its service sets `IMAGE_PROVIDERS=chatgpt-browser`. Gemini
+still answers text when a request names `gemini-browser`.
 
 ## Quick start
 
@@ -178,7 +184,29 @@ curl http://localhost:8081/v1/chat/completions \
 # swap "chatgpt-browser" for "gemini-browser" to hit Gemini instead
 ```
 
-`GET /v1/models` lists both. Set `DEFAULT_PROVIDER=chatgpt-browser` to change the fallback.
+`GET /v1/models` lists both. `DEFAULT_PROVIDER` changes the fallback (default `chatgpt-browser`).
+
+### Choosing ChatGPT's model
+
+ChatGPT requests set the composer's model picker before sending. `CHATGPT_MODEL` (default `GPT-6`)
+names the picker row and `CHATGPT_EFFORT` (`instant`, `medium` or `high`; default `high`) the
+power slider. On a Plus account on 13 Oct 2026 GPT-6 at High was the strongest choice, and it
+sends the turn as `gpt-6-thinking` with `thinking_effort: "extended"`. One request can choose
+otherwise with `model_variant`: `"instant"`, `"medium"`, `"GPT-5.6 Sol"` or `"GPT-6/medium"`.
+The next request without one goes back to the setting.
+
+Every answer reports `model_used`, read from the conversation's own record on chatgpt.com:
+
+```json
+"model_used": {"model": "gpt-6-thinking", "effort": "extended", "resolved": "gpt-6-thinking",
+               "source": "conversation record", "requested_by_page": "gpt-6-thinking",
+               "picker": "GPT-6 / High"}
+```
+
+Image turns are routed by the site itself: on 13 Oct 2026 every image made at High came back from
+`gpt-5-4-thinking` (or `gpt-5-4-auto-thinking`) whatever the picker said, and images made at
+Instant from `gpt-6`. One Instant image's record named no model at all; `requested_by_page`, the
+model the page's own request asked for, is reported either way.
 
 ## Run in the background (systemd --user)
 
@@ -235,31 +263,60 @@ systemctl --user start browser-llm-api
 
 ## Image generation
 
-Both providers generate images from a natural prompt. Generated images are saved to disk **and** served over HTTP, so you get a file and a link.
+Both providers can generate images from a natural prompt; `IMAGE_PROVIDERS` decides which may (ChatGPT only, on our install). Generated images are saved to disk **and** served over HTTP, so you get a file and a link.
 
 **Storage path** — `GEMINI_IMAGE_DIR` (env; `serve.sh` defaults it to `~/Pictures/browser-llm`). The folder is created on startup and mounted at `/images/<file>`. `GEMINI_PUBLIC_URL` (default `http://localhost:8081`) is the base used to build the returned links — change it if you reach the server from another host. If the folder isn't writable, saving is skipped and it falls back to inline base64 / `data:` URLs.
 
-- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![...](http://localhost:8081/images/gemini/gemini_….png)`. Gemini replies image-only (its accompanying text is internal "thinking"); ChatGPT keeps its caption text and appends the image.
+- **In chat** — a prompt like "generate an image of …" returns the image inline in the assistant message as markdown pointing at the served file: `![...](http://localhost:8081/images/chatgpt/chatgpt_….png)`. Gemini replies image-only (its accompanying text is internal "thinking"); ChatGPT keeps its caption text and appends the image.
 - **Images endpoint** — OpenAI-style `POST /v1/images/generations` (`model` selects the provider):
 
 ```bash
 curl http://localhost:8081/v1/images/generations \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gemini-browser","prompt":"a red bicycle on a beach at sunset"}'
+  -d '{"model":"chatgpt-browser","prompt":"a red bicycle on a beach at sunset","size":"1600x900"}'
 # -> {"created": ..., "data": [{
-#      "b64_json": "<base64>",
-#      "url":  "http://localhost:8081/images/gemini/gemini_….png",
-#      "path": "~/Pictures/browser-llm/gemini/gemini_….png"
-#    }]}
+#      "b64_json": "<base64>", "width": 1672, "height": 941, "mime": "image/png",
+#      "url":  "http://localhost:8081/images/chatgpt/chatgpt_….png",
+#      "path": "~/Pictures/browser-llm/chatgpt/chatgpt_….png"
+#    }], "model_used": {"model": "gpt-5-4-thinking", "picker": "GPT-6 / High", ...}}
 ```
 
-`n` and `size` are accepted but ignored — the provider decides count and dimensions. Internally the server waits for the `<img>` to finish rendering, then reads it to base64 from inside the page, writes it to `GEMINI_IMAGE_DIR`, and returns base64 + URL + path. The endpoint returns **501** if the provider can't generate images, **502** if it returned none.
+`n` is accepted but ignored. `size` (`WxH`, or `square`/`landscape`/`portrait`) and `background`
+(`transparent`) are written into the prompt in plain words, since the site's image tool takes them
+from the conversation; `model_variant` works as for chat. No style words are added. ChatGPT's tool
+draws a few fixed shapes near the asked ratio (13 Oct 2026: 1254x1254 square, 1672x941 for 16:9,
+1731x909 for 1.91:1, 1122x1402 for 4:5), so `gen_asset.py` crops to the exact pixels afterwards.
+Asked for a transparent background it returned a real RGBA PNG (63% of pixels fully clear in the
+test). Each data item carries `width`, `height` and `mime` of the original as delivered, and
+`revised_prompt` when the page gives one; the response carries `model_used`.
 
-For **long asset runs**, the provider's browser is **auto-recycled** every few image gens (`BROWSER_RECYCLE_AFTER_IMAGES`, default 3) — its renderer bloats after ~4–5 heavy image generations and starts timing out, so a fresh browser is spun up automatically before that happens. (Clients should still treat a 502/timeout as "check `GEMINI_IMAGE_DIR` for the newest file" — the image is written to disk before the response returns.)
+Internally the server waits for the `<img>` to finish rendering, then reads it to base64 from inside the page, writes it to `GEMINI_IMAGE_DIR`, and returns base64 + URL + path. The endpoint returns **501** if the provider can't generate images, **403** if `IMAGE_PROVIDERS` leaves it out, **429** when the site's image limit is reached (see below), and **502** if it returned none for another reason (the detail quotes what the page said).
 
-> **⚠️ ChatGPT image generation needs a GPU / real display.** GPT-image renders on a `<canvas>` that stalls under headless Xvfb, so the Xvfb systemd service can't produce ChatGPT images (text is fine). Run the server on a real display for ChatGPT images: `DISPLAY=:1 ./venv/bin/python server.py`. It's also slow on the free tier (30s–4 min). Gemini images work under Xvfb.
+For **long asset runs**, the provider's browser is **auto-recycled** after `BROWSER_RECYCLE_AFTER_IMAGES` image gens (default 8). On the free plan the renderer bloated after 4–5 slow generations, hence the old default of 3. On Plus, measured over 7 images in one browser on 13 Oct 2026, the renderer settled at 479–548 MB after each image and peaked at 754–813 MB while drawing, with no upward trend. (Clients should still treat a 502/timeout as "check `GEMINI_IMAGE_DIR` for the newest file" — the image is written to disk before the response returns.)
 
-**Generating website assets** — the image endpoint returns one landscape image with no transparency, so for real assets (hero images, backgrounds, textures, avatars, favicons) use **`gen_asset.py`**, which generates then post-processes with Pillow (resize/crop/convert/favicon/transparency). It calls `/v1/images/generations` with no `model`, so it uses `DEFAULT_PROVIDER`. See **`AGENT_IMAGE_GUIDE.md`** for a ready-to-hand instruction set for an AI coding agent (its Gemini-specific notes — fixed output size, ✦ watermark — apply to the Gemini provider; ChatGPT returns a larger PNG with no watermark).
+> **ChatGPT image generation needs an X display**, not Chrome's `--headless` mode: the image renders on a `<canvas>`. A plain Xvfb display works: on 13 Oct 2026 the service on Xvfb `:98` (1920x1080x24) made 8 images on a Plus account, 48–90 s each. Gemini images work under Xvfb too.
+
+### ChatGPT Plus limits
+
+Measured 13 Oct 2026, 23:07 to 23:41 KST, from the page's own counter (`POST /backend-api/conversation/init`, field `limits_progress`) on a Plus account:
+
+| feature | allowance | window |
+|---|---|---|
+| `image_gen` | 120 images | 24 hours |
+| `file_upload`, `paste_text_to_file` | 80 each | 3 hours |
+| `deep_research` | 24 | until a date about a week ahead |
+
+The image counter still read 120 after 7 images, and its reset time moved to 24 hours after each read, so it shows the plan's ceiling rather than live use. The site publishes no per-hour image cap; 7 images in 9 minutes met no refusal.
+
+The server works with that as follows:
+
+- **Before an image** it reads the counter. When `remaining` is at or below `CHATGPT_IMAGE_RESERVE` (default 0; our install keeps 10 for the account owner's own chats) it answers **429** with `Retry-After` and the reset time, without touching the page.
+- **After an image request that produced no image** it reads the page's text. ChatGPT's refusals ("You've hit the Plus plan limit for image generation requests ... resets in 23 hours and 59 minutes", "You're generating images too quickly ... Please wait for 3 minutes") become **429** with the reset time worked out. Ordinary answers that mention limits are left alone (tests/test_plus.py).
+- **Pacing**: one image at a time per provider (the per-provider lock), with no added gap. An image takes 48–90 s, so the lock alone keeps a run under about 70 an hour, and a "too quickly" refusal comes back as a 429 naming the wait.
+
+A 429 detail ends with "Stop and say so; do not retry before then." `gen_asset.py` exits with code 3 on it and keeps the variants it already made.
+
+**Generating website assets** — use **`gen_asset.py`**, which asks ChatGPT for the size and background, then crops or resizes to the exact pixels with Pillow (and converts, writes favicons, or knocks out a flat background if the tool did not make it transparent). It draws with `chatgpt-browser` unless `--model` or `BROWSER_LLM_IMAGE_MODEL` says otherwise. `--keep-original` copies ChatGPT's untouched file beside the output, `--variants N` writes N alternatives (`name-v1.png` ...) plus `name-variants.png` showing them side by side, and `--ref` sends reference images. See **`AGENT_IMAGE_GUIDE.md`** for a ready-to-hand instruction set for an AI coding agent.
 
 ```bash
 ./venv/bin/python gen_asset.py --prompt "friendly cartoon fox mascot, flat vector, centered, solid white background" \
@@ -355,10 +412,15 @@ than conversation; pass `keep_chat: true` when the person asked to see the threa
 
 | env var | default | meaning |
 |---------|---------|---------|
-| `DEFAULT_PROVIDER` | `gemini-browser` | provider used when `model` is unknown/absent |
+| `DEFAULT_PROVIDER` | `chatgpt-browser` | provider used when `model` is unknown/absent |
+| `IMAGE_PROVIDERS` | *(every provider that can draw)* | comma list of providers allowed to make images; others get 403 |
+| `CHATGPT_MODEL` | `GPT-6` | ChatGPT picker row to select before each request |
+| `CHATGPT_EFFORT` | `high` | ChatGPT power slider: `instant`, `medium` or `high` |
+| `CHATGPT_IMAGE_RESERVE` | `0` | images on ChatGPT's daily counter that requests here must leave unused |
+| `CHATGPT_READ_MODEL` | `1` | read the conversation record after each answer to report `model_used` (one extra GET) |
 | `GEMINI_IMAGE_DIR` (`IMAGE_DIR`) | `~/Pictures/browser-llm` | base dir for saved images (per-provider subfolders) |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | base URL used to build returned image links |
-| `BROWSER_RECYCLE_AFTER_IMAGES` | `3` | recycle a provider's browser after this many image gens |
+| `BROWSER_RECYCLE_AFTER_IMAGES` | `8` | recycle a provider's browser after this many image gens |
 | `BROWSER_LLM_API` | `http://localhost:8081` | server URL the desktop app / `client.py` connect to |
 | `BROWSER_LLM_HOST` | `127.0.0.1` | interface the server binds. It drives your logged-in accounts, so it stays off the network until you set `0.0.0.0` (do that with `BROWSER_LLM_API_KEY`) |
 | `BROWSER_LLM_PORT` | `8081` | port the server binds |

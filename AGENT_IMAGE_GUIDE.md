@@ -1,52 +1,54 @@
 # Generating image assets (instructions for the coding agent)
 
-You have a **local image-generation API** (Google Gemini, driven via browser automation)
-for creating raster image assets while building the website: hero images, section
-background images, textures/patterns, avatars/mascots, favicons, app icons, illustrations,
-og/social images, etc. **Use it to produce real assets instead of leaving placeholder
+You have a **local image-generation API** (ChatGPT's image tool, driven via browser automation)
+for creating raster image assets while building a website or app: hero images, section
+backgrounds, textures, avatars and mascots, favicons and app icons, illustrations, og/social
+images and product shots. **Use it to produce real assets instead of leaving placeholder
 boxes, lorem-picsum links, or empty `src`s.**
 
 The endpoint runs at `http://localhost:8081`.
 
-> **Provider note:** this API is multi-provider (Gemini and ChatGPT). Image requests without a
-> `model` field (as `gen_asset.py` sends) use the server's `DEFAULT_PROVIDER`. The Gemini-specific
-> constraints below (fixed ~1024×559 output, ✦ watermark, Google-account quota) apply when the
-> default is `gemini-browser`; ChatGPT returns a larger PNG with no watermark but needs the server
-> on a GPU display. Post-processing via `gen_asset.py` is identical either way.
+> **Provider:** images are drawn by ChatGPT (`chatgpt-browser`), on a ChatGPT Plus account
+> since 13 Oct 2026. On our install Gemini must not be used for images (Eben's order): the server
+> answers a Gemini image request with 403. `gen_asset.py` draws with ChatGPT unless you pass
+> `--model`.
 
 ---
 
 ## 1. Hard constraints — read before using
 
-- **Raw output is fixed:** every call returns **one JPEG, ~1024×559 px, landscape, fully
-  opaque (no transparency).** The `n`, `size`, and aspect-ratio parameters are **ignored**.
-- Therefore you **must post-process** for any other dimension, aspect ratio, square/portrait
-  shape, transparency, or file format. Use `gen_asset.py` (below) — it does this for you.
-- **Latency: ~30–40 s per image when warm, occasionally up to ~3 min** under load. The API handles
-  **ONE request at a time** — generate assets **sequentially, never in parallel** (parallel calls
-  just queue and can time out). Use a generous timeout: `gen_asset.py` waits `--timeout` (default
-  440 s); if you call the raw API, set a **≥300 s (ideally ~450 s) client timeout** to match the
-  server's 420 s ceiling. A short client timeout is the #1 cause of "it failed" when the image
-  actually generated fine.
-- **A timed-out/502 call usually still produced the image.** The server writes the file to disk
-  (and returns its `path`) **before** the HTTP response, so on a timeout/502 check the newest file
-  in `GEMINI_IMAGE_DIR` rather than blindly retrying. Long sequential runs stay healthy — the server
-  **auto-recycles its browser every few image gens**, so you won't hit the old "slows down / times
-  out after 4–5 images" wall and never need a manual restart.
-- **Watermark:** Gemini stamps a small ✦ sparkle in the **bottom-right corner**. Square/center
-  crops (`--square`) remove it; for full-bleed images either crop a little off the bottom-right
-  or keep important content away from that corner.
-- **Don't put text in images** — Gemini renders words unreliably. Add real text/logos in HTML/CSS
-  on top of the image instead.
-- Not suitable for **exact brand logos, precise typography, or pixel-accurate diagrams.**
+- **ChatGPT picks the pixel size.** It draws a shape near the ratio you ask for: on 13 Oct 2026
+  1254×1254 for square, 1672×941 for 16:9, 1731×909 for 1.91:1 and 1122×1402 for 4:5. So
+  ask for the size you need and let `gen_asset.py` crop to the exact pixels. The untouched
+  original is kept by the server (its `path`) and, with `--keep-original`, beside your file.
+- **Transparency works.** Asked for a transparent background, ChatGPT returns a real RGBA PNG
+  (63% of pixels fully clear in the 13 Oct 2026 test). `--knockout-bg` asks for it and only falls
+  back to knocking out a flat background if no alpha came back.
+- **Latency: ~50–90 s per image** on Plus (measured 13 Oct 2026). The API handles **one image
+  request at a time** — generate assets **sequentially, never in parallel** (parallel calls just
+  queue and can time out). Use a generous timeout: `gen_asset.py` waits `--timeout` (default
+  440 s); if you call the raw API, set a **client timeout of at least 300 s, ideally ~450 s**.
+  A short client timeout is the #1 cause of "it failed" when the image was made fine.
+- **A timed-out call usually still produced the image.** The server writes the file to disk
+  before the HTTP response, so on a timeout check the newest file in
+  `~/Pictures/browser-llm/chatgpt/` rather than retrying blindly.
+- **Limits.** Plus allows 120 images per 24 hours (the page's own counter, 13 Oct 2026), and our
+  install keeps 10 of them for the account owner. When the limit is reached the API answers
+  **HTTP 429** with `Retry-After`, and `gen_asset.py` exits with **code 3** and prints the reset
+  time. **Stop, tell the user the reset time, and do not retry before it.** With `--variants`
+  the alternatives already made are kept.
+- **Text in images:** ChatGPT writes short words fairly well, but check every letter. Put real
+  copy, prices and logos in HTML/CSS on top of the image.
+- Not suitable for **exact brand logos or pixel-accurate diagrams**; use `--ref` with the real
+  asset when something must match.
 
 ---
 
 ## 2. Preferred path: `gen_asset.py`
 
-A wrapper that does **generate → resize/crop/convert/favicon → write the file**. Call it once
-per asset. (It lives at `gen_asset.py`; copy it into the project or call by
-absolute path. Needs Python + Pillow.)
+A wrapper that does **generate → crop/resize/convert/favicon → write the file**. Call it once
+per asset. (It lives at `gen_asset.py`; copy it into the project or call it by absolute path.
+Needs Python + Pillow.)
 
 ```
 python3 gen_asset.py --prompt "<description>" --out <path> [shaping flags]
@@ -56,74 +58,88 @@ Flags:
 | flag | meaning |
 |------|---------|
 | `--out PATH` | output file; **format inferred from extension** (`.webp`/`.png`/`.jpg`/`.ico`) |
-| `--width W --height H` | resize to exactly WxH, **crop-to-fill** (cover) by default |
-| `--fit contain` | pad instead of crop (letterbox on white) |
-| `--square SIZE` | center-crop to a `SIZE×SIZE` square (avatars, icons) — also removes the corner watermark |
+| `--width W --height H` | ask for that size, then resize to exactly WxH, **crop-to-fill** (cover) by default |
+| `--fit contain` | pad instead of crop (letterbox on white, or transparent if the image has alpha) |
+| `--square SIZE` | ask for a square, then centre-crop to `SIZE×SIZE` (avatars, icons) |
+| `--size SIZE` | ask the image tool for `WxH`, `square`, `landscape` or `portrait` without reshaping |
 | `--favicon` | write a multi-size `.ico` (16/32/48/64) |
-| `--knockout-bg` | make a flat background transparent (png/webp/ico only; prompt a "solid <color> background") |
+| `--knockout-bg` | ask for a transparent background (png/webp/ico only) |
+| `--keep-original` | also write ChatGPT's untouched file as `<name>.original.<ext>` |
+| `--variants N` | make N alternatives: `<name>-v1 … -vN` plus `<name>-variants.png` showing them side by side |
+| `--ref PATH` | reference image for image-to-image (repeatable) |
+| `--variant MODEL` | ChatGPT model/power for this image, e.g. `instant` (default: the server's GPT-6 at High) |
 | `--format` | override the inferred format |
 | `--quality N` | JPEG/WebP quality (default 88) |
-| `--model NAME` | pick the provider (`gemini-browser` / `chatgpt-browser`); default = server's `DEFAULT_PROVIDER` |
-| `--timeout SEC` | how long to wait for generation (default 440; ChatGPT can be slow) |
+| `--model NAME` | provider; default `chatgpt-browser` |
+| `--timeout SEC` | how long to wait for generation (default 440) |
 
-It prints the output path on success. Verify the file (open it / check dimensions) and
-**regenerate with a refined prompt if it's off** — output is non-deterministic.
+It prints the output path, the original's size and the model that drew it. Open the file and
+**regenerate with a refined prompt if it's off** — output is non-deterministic. Exit codes: 0
+done, 1 failed, 3 image limit reached.
+
+From an MCP client, the `generate_image` tool takes the same options (`width`, `height`,
+`square`, `knockout_bg`, `keep_original`, `variants`, `refs`, `model_variant`).
 
 ---
 
 ## 3. Recipes by asset type
 
-**Hero / full-width background** — WebP, sized to the layout, keep it uncluttered so text stays legible:
+Describe the subject, what the image is for and where it sits on the page. Add style words
+only when the person asked for that style; don't add `minimal`, `clean`, `subtle`, `muted`,
+`elegant`, `modern`, `professional`, `sleek` or `editorial` on your own (they pull every image
+towards the same look).
+
+**Hero / full-width background** — WebP, sized to the layout, with room for the headline:
 ```
 python3 gen_asset.py \
-  --prompt "misty pine forest at dawn, cinematic wide shot, muted greens, soft light, lots of open sky, uncluttered" \
+  --prompt "pine forest at dawn, wide shot, open sky across the top third for a headline" \
   --out src/assets/hero.webp --width 1920 --height 1080
 ```
 
-**Section background** — subtle, low-contrast so foreground content reads:
+**Section background** — behind body text, so it must stay readable:
 ```
 python3 gen_asset.py \
-  --prompt "abstract soft gradient mesh, pastel blue and lavender, very subtle, minimal, blurred" \
+  --prompt "soft gradient in pale blue and lavender, used behind paragraphs of dark text" \
   --out public/bg/features.webp --width 1600 --height 1000
 ```
 
-**Texture / pattern** — ask for "seamless / tileable / low contrast" (tiling is approximate):
+**Texture / pattern** — ask for "seamless / tileable" (tiling is approximate):
 ```
 python3 gen_asset.py \
-  --prompt "seamless subtle light-grey concrete texture, uniform, low contrast, tileable" \
+  --prompt "seamless light-grey concrete texture, tileable, low contrast" \
   --out public/textures/concrete.webp --width 1024 --height 1024
 ```
 
-**Avatar / mascot** — square PNG; prompt "centered … plain white background":
+**Avatar / mascot** — square PNG with a transparent background:
 ```
 python3 gen_asset.py \
-  --prompt "friendly cartoon fox mascot, flat vector, centered, plain white background" \
+  --prompt "friendly cartoon fox mascot, centred, full body" \
   --out public/avatar.png --square 256 --knockout-bg
 ```
 
-**Favicon / app icon** — simple bold mark, centered, solid background:
+**Favicon / app icon** — one bold mark, centred:
 ```
 python3 gen_asset.py \
-  --prompt "minimalist geometric mountain icon, bold, centered, solid white background, simple" \
+  --prompt "geometric mountain icon, one bold shape, centred, readable at 16 px" \
   --out public/favicon.ico --favicon --knockout-bg
 # also emit a large PNG for apple-touch-icon / PWA:
 python3 gen_asset.py \
-  --prompt "minimalist geometric mountain icon, bold, centered, solid white background, simple" \
+  --prompt "geometric mountain icon, one bold shape, centred, readable at 16 px" \
   --out public/icon-512.png --square 512 --knockout-bg
 ```
 
-**Illustration / spot image** — transparent PNG on a flat background:
+**Illustration / spot image** — transparent PNG:
 ```
 python3 gen_asset.py \
-  --prompt "flat illustration of a rocket launching, bright colors, plain white background" \
+  --prompt "illustration of a rocket launching, bright colours" \
   --out src/assets/rocket.png --square 512 --knockout-bg
 ```
 
-**OG / social share image** — 1200×630:
+**OG / social share image** — 1200×630; try a few and pick one:
 ```
 python3 gen_asset.py \
-  --prompt "modern abstract tech background, deep blue and cyan, subtle geometric shapes" \
-  --out public/og-image.jpg --width 1200 --height 630
+  --prompt "share image for a cloud backup product: a laptop on a desk with files flowing up into the sky" \
+  --out public/og-image.jpg --width 1200 --height 630 --variants 3
 ```
 
 ---
@@ -134,45 +150,46 @@ python3 gen_asset.py \
 asset instead of regenerating it from a description. Same post-processing flags apply.
 
 ```bash
-# re-colour an existing hero to a night palette, same composition
+# the same hero at night, same composition
 python3 gen_asset.py --ref public/hero.webp --out public/hero-night.webp \
-    --prompt "identical composition and layout, night-time palette, deep blues, moonlit" \
+    --prompt "identical composition and layout, at night under moonlight" \
     --width 1600 --height 900
 
-# turn a screenshot mock into a clean flat-vector illustration
-python3 gen_asset.py --ref mock.png --out public/feature.png \
-    --prompt "same layout, flat vector illustration, solid white background"
+# put a product cutout into a scene
+python3 gen_asset.py --ref teapot.png --out public/teapot-kitchen.png \
+    --prompt "place this exact teapot on a marble kitchen counter next to a bowl of lemons" \
+    --width 1080 --height 1350
 ```
 
-Say what must stay the same ("identical layout", "keep the text") — the model otherwise drifts.
-Raw endpoint: `POST /v1/images/edits` (multipart `image=@file` + `prompt`, or JSON with
+Say what must stay the same ("identical layout", "this exact teapot") — the model otherwise
+drifts. Raw endpoint: `POST /v1/images/edits` (multipart `image=@file` + `prompt`, or JSON with
 `{"image": "<path|data-url>"}`).
 
 ## 4. Prompt guidance
 
-- **Structure:** `subject + style + composition + palette + lighting/mood`.
-  e.g. "*cozy reading nook by a rainy window, watercolor style, warm lamplight, muted palette*".
-- **Style keywords steer it hard:** `flat vector`, `photographic`, `3d render`, `watercolor`,
-  `line art`, `isometric`, `minimalist`, `cinematic`.
-- **Backgrounds:** add "uncluttered / lots of negative space / subtle / low contrast" so overlaid
-  text is readable.
-- **Icons/logos/cutouts:** add "centered, simple, bold, solid <color> background" and use
-  `--square` + `--knockout-bg`.
-- **Consistency:** reuse the same style/palette phrasing across a set of assets so they match.
+- **Structure:** `subject + setting + composition + what the image is for`, e.g. "*a reading
+  nook by a rainy window, lamp on, room on the left for a quote*".
+- **Purpose and placement beat adjectives:** "behind white headline text", "card thumbnail at
+  320 px", "full-bleed on a phone" tell the tool more than a list of moods.
+- **Style words only from the brief:** if the person said "watercolour" or "flat vector", pass
+  it on; don't invent a style for them.
+- **Consistency:** reuse the same subject and setting phrasing across a set of assets so they
+  match, or pass the first asset as `--ref` for the next.
 
 ---
 
 ## 5. Rules / workflow
 
-1. **Format:** WebP for photos & backgrounds (smallest), PNG for anything needing transparency,
-   ICO for favicons, JPG only if a tool requires it.
-2. **Size to the real rendered size** — don't ship a 1024px image where 400px is displayed.
+1. **Format:** WebP for photos and backgrounds (smallest), PNG for anything needing
+   transparency, ICO for favicons, JPG only if a tool requires it.
+2. **Size to the real rendered size** — don't ship a 1600 px image where 400 px is displayed.
 3. **Commit generated assets into the repo.** Do **not** regenerate on every build: it's slow,
-   non-deterministic, and consumes the account's quota. Generate once, review, commit.
+   non-deterministic, and uses the account's daily image allowance. Generate once, review, commit.
 4. **Name assets meaningfully** in the project (`hero-home.webp`, `favicon.ico`), not the raw
-   `gemini_*.jpg` filenames.
+   `chatgpt_*.png` filenames.
 5. **Generate sequentially** (one call at a time).
-6. **Verify each asset** (dimensions/appearance) and refine the prompt + regenerate if needed.
+6. **Verify each asset** (dimensions and appearance) and refine the prompt and regenerate if
+   needed. On exit code 3, stop and report the reset time.
 
 ---
 
@@ -181,31 +198,33 @@ Raw endpoint: `POST /v1/images/edits` (multipart `image=@file` + `prompt`, or JS
 ```bash
 curl -s http://localhost:8081/v1/images/generations \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"a red bicycle on a beach at sunset"}'
+  -d '{"prompt":"a red bicycle on a beach at sunset","size":"1600x900"}'
 ```
 Response — use whichever field suits you (`path` is already a file on disk):
 ```json
-{"created": 1782..., "data": [{
-  "b64_json": "<base64 jpeg>",
-  "url":  "http://localhost:8081/images/gemini/gemini_....jpg",
-  "path": "~/Pictures/browser-llm/gemini/gemini_....jpg"
-}]}
+{"created": 1791..., "data": [{
+  "b64_json": "<base64 png>", "width": 1672, "height": 941, "mime": "image/png",
+  "url":  "http://localhost:8081/images/chatgpt/chatgpt_....png",
+  "path": "~/Pictures/browser-llm/chatgpt/chatgpt_....png"
+}], "model_used": {"model": "gpt-5-4-thinking", "picker": "GPT-6 / High"}}
 ```
+`size` (`WxH`, `square`, `landscape`, `portrait`), `background` (`transparent`) and
+`model_variant` are accepted. A 429 means the image limit is reached; its `detail` and
+`Retry-After` give the reset time.
+
 Image-to-image with the raw API — multipart, or JSON with an `image` field:
 ```bash
 curl -s http://localhost:8081/v1/images/edits \
-  -F image=@public/hero.webp -F 'prompt=identical layout, night-time palette'
+  -F image=@public/hero.webp -F 'prompt=identical layout, at night'
 ```
-You still have to resize/crop/convert yourself (the wrapper exists so you don't).
+You still have to crop and convert yourself (the wrapper exists so you don't).
 
 ---
 
 ## 7. Limits
 
-- Best-effort transparency (flat-background knockout); for clean cutouts always prompt a plain
-  solid background.
-- No exact text, logos, or precise layouts. `--ref` helps a lot here: editing an existing asset
-  holds a layout far better than describing one, but still verify the output rather than trusting it.
+- No exact logos or precise layouts. `--ref` helps a lot: editing an existing asset holds a
+  layout far better than describing one, but still verify the output.
 - At most `MAX_ATTACHMENTS` (default 6) reference images per request, `MAX_ATTACHMENT_MB` (20) each.
-- Shared Google-account quota; if generation starts failing/returning empty, the login session
-  may need re-auth (a human task — tell the user).
+- One ChatGPT account is shared by everything using this server. If generation starts failing or
+  returning nothing, the login may need renewing (a human task — tell the user).

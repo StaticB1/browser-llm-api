@@ -35,7 +35,8 @@ from PIL import Image  # noqa: E402
 import gen_asset  # noqa: E402
 import server  # noqa: E402
 from providers.base import StreamMonitor, parse_size, size_instruction  # noqa: E402
-from providers.chatgpt import ChatGPTProvider, model_version, parse_variant  # noqa: E402
+from providers.chatgpt import (  # noqa: E402
+    ChatGPTProvider, effort_matches, model_version, parse_variant)
 from providers.gemini import GeminiProvider  # noqa: E402
 from providers.limits import (  # noqa: E402
     UsageLimitReached, describe_reset, parse_limit_message, quota_refusal,
@@ -175,6 +176,15 @@ class ModelChoice(unittest.TestCase):
         self.assertEqual(parse_variant("GPT-5.6 Sol"), ("GPT-5.6 Sol", None))
         self.assertEqual(parse_variant("GPT-6/medium"), ("GPT-6", "medium"))
         self.assertEqual(parse_variant(" high / GPT-6 "), ("GPT-6", "high"))
+
+    def test_effort_is_read_from_the_word_in_the_label(self):
+        # GPT-6's button reads "High"; GPT-5.6 Sol's read "5.6 Instant" (13 Oct 2026).
+        self.assertTrue(effort_matches("High", "high"))
+        self.assertTrue(effort_matches("5.6 Instant", "instant"))
+        self.assertFalse(effort_matches("5.6 Instant", "high"))
+        self.assertFalse(effort_matches("Medium", "high"))
+        self.assertFalse(effort_matches(None, "high"))
+        self.assertFalse(effort_matches("High", None))
 
     def test_model_version_matches_labels_and_slugs(self):
         self.assertEqual(model_version("GPT-6"), "6")

@@ -64,6 +64,13 @@ def model_version(name) -> str:
     return m.group(1).replace("-", ".") if m else ""
 
 
+def effort_matches(label, effort) -> bool:
+    """Does the picker button's label show ``effort``? GPT-6 labels it "High";
+    GPT-5.6 Sol labels it "5.6 Instant" (13 Oct 2026), so look for the word."""
+    words = re.findall(r"[a-z]+", str(label or "").lower())
+    return bool(effort) and any(_EFFORT_ALIASES.get(w) == effort for w in words)
+
+
 def parse_variant(variant) -> tuple:
     """A request's model_variant -> (model label or None, effort or None).
 
@@ -446,7 +453,7 @@ class ChatGPTProvider(Provider):
                 self._picker_warned = True
             return ""
         need_model = bool(model_label) and _norm(self._model_seen) != _norm(model_label)
-        need_effort = bool(effort) and _norm(st.get("label")) != _norm(effort)
+        need_effort = bool(effort) and not effort_matches(st.get("label"), effort)
         if not (need_model or need_effort):
             return f"{self._model_seen or '?'} / {st.get('label')}"
         st = await self._open_picker(page, st)
@@ -477,7 +484,7 @@ class ChatGPTProvider(Provider):
                         st = await self._open_picker(page, st)
                     checked = [m["label"] for m in st.get("models") or [] if m.get("checked")]
                     self._model_seen = checked[0] if checked else None
-            if effort and _norm(st.get("label")) != _norm(effort):
+            if effort and not effort_matches(st.get("label"), effort):
                 dots = st.get("dots") or []
                 idx = EFFORTS.index(effort)
                 if len(dots) == len(EFFORTS):
@@ -491,7 +498,7 @@ class ChatGPTProvider(Provider):
             await asyncio.sleep(0.4)
         st = await self._picker(page)
         shown = f"{self._model_seen or '?'} / {st.get('label', '?')}"
-        if effort and _norm(st.get("label")) != _norm(effort):
+        if effort and not effort_matches(st.get("label"), effort):
             logger.warning(f"[{self.name}] picker reads {shown}, wanted {effort}")
         else:
             logger.info(f"[{self.name}] model picker set to {shown}")
