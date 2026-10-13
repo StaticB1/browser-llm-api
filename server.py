@@ -20,7 +20,7 @@ Endpoints:
 Usage:
   python server.py            # listens on 0.0.0.0:8081
 
-OpenClaw openclaw.json:
+OpenClaw ebenworks.json:
   {
     "models": {
       "providers": {
