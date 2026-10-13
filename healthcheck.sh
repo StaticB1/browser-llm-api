@@ -16,7 +16,9 @@
 #              repairs it while it is still latent.
 #   liveness   is /api/status answering with ok:true? Catches a dead process,
 #              a crash loop, or a port nobody is listening on.
-#   auth       once a day, one real completion per provider. A provider session
+#   auth       once a day, one real completion per provider in BLM_HEALTH_MODELS
+#              (default chatgpt-browser only since 13 Oct 2026: Gemini is out of
+#              use, so pinging it would only start its browser). A provider session
 #              expiring is this project's #1 failure mode, and the server stays
 #              perfectly healthy while returning nothing, so no free probe sees it.
 #
@@ -138,7 +140,7 @@ fi
 # --- 3. auth (once a day) -------------------------------------------------
 today=$(date +%F)
 if [ "$fail" = 0 ] && { [ "$DEEP" = 1 ] || [ "$(cat "$STATE/deep-last" 2>/dev/null)" != "$today" ]; }; then
-  for model in ${BLM_HEALTH_MODELS:-chatgpt-browser gemini-browser}; do
+  for model in ${BLM_HEALTH_MODELS:-chatgpt-browser}; do
     body=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
       -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"ephemeral\":true}" \
       2>/dev/null)

@@ -15,7 +15,7 @@ cd "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 export GEMINI_IMAGE_DIR="${GEMINI_IMAGE_DIR:-$HOME/Pictures/browser-llm}"
 export GEMINI_PUBLIC_URL="${GEMINI_PUBLIC_URL:-http://localhost:8081}"
-export DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-gemini-browser}"
+export DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-chatgpt-browser}"
 
 # The venv is the ONLY interpreter that can run this. Never fall back to the
 # system python3: it is PEP-668 and can never hold nodriver, so falling back

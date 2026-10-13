@@ -72,10 +72,11 @@ TOOLS = [
     {
         "name": "ask",
         "description": (
-            "Ask the browser-backed ChatGPT or Gemini session and get its reply as text. "
-            "Attach images to have it look at screenshots, mockups or photos. Every call "
-            "should demand a finished artifact (a complete HTML page, a hard critique with "
-            "the replacement markup) rather than an opinion. Text replies take 10-40s."
+            "Ask the browser-backed ChatGPT session (Plus; GPT-6 at High power by default) "
+            "and get its reply as text. Attach images to have it look at screenshots, "
+            "mockups or photos. Every call should demand a finished artifact (a complete "
+            "HTML page, a hard critique with the replacement markup) rather than an "
+            "opinion. Text replies take 15-60s at High; model_variant 'instant' is faster."
         ),
         "inputSchema": {
             "type": "object",
@@ -89,8 +90,14 @@ TOOLS = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Provider id, e.g. chatgpt-browser or gemini-browser. "
-                                   "Defaults to the server's configured provider.",
+                    "description": "Provider id. Defaults to chatgpt-browser; "
+                                   "gemini-browser is text only.",
+                },
+                "model_variant": {
+                    "type": "string",
+                    "description": "ChatGPT model and power for this call: 'instant', "
+                                   "'medium', 'high', 'GPT-6/high', 'GPT-5.6 Sol'. "
+                                   "Default: the server's setting (GPT-6, High).",
                 },
                 "system": {"type": "string", "description": "Optional system prompt."},
                 "strip_fences": {
@@ -119,10 +126,13 @@ TOOLS = [
     {
         "name": "generate_image",
         "description": (
-            "Generate a real raster asset (hero, icon, texture, illustration, og-image) and "
-            "write it to disk, resized/cropped/converted as asked. Pass reference images to "
-            "restyle an existing asset or match a set. Takes 30s-4min. Returns the output "
-            "path — open it and look before shipping."
+            "Generate a real raster asset (hero, icon, texture, illustration, og-image) with "
+            "ChatGPT's image tool and write it to disk, cropped/converted to the exact size "
+            "asked. Pass reference images to restyle an existing asset or match a set; "
+            "variants=2 or 3 makes finished alternatives side by side plus a contact sheet. "
+            "About 1 min per image, one at a time. Returns the output path(s) and the "
+            "untouched original's path; open them and look before shipping. If ChatGPT's "
+            "image limit is reached the call fails with the reset time: stop and say so."
         ),
         "inputSchema": {
             "type": "object",
@@ -139,17 +149,30 @@ TOOLS = [
                     "description": "Reference images for image-to-image (paths or URLs). "
                                    "Holds a layout far better than describing one.",
                 },
-                "model": {"type": "string", "description": "chatgpt-browser | gemini-browser."},
-                "width": {"type": "integer"},
+                "model": {"type": "string",
+                          "description": "Default chatgpt-browser, the only image provider."},
+                "model_variant": {"type": "string",
+                                  "description": "ChatGPT model/power, e.g. 'instant'. "
+                                                 "Default: the server's setting."},
+                "width": {"type": "integer",
+                          "description": "Exact output width; the size is also asked of "
+                                         "the image tool so the crop loses little."},
                 "height": {"type": "integer"},
                 "square": {"type": "integer", "description": "Center-crop to SIZExSIZE."},
+                "variants": {"type": "integer",
+                             "description": "Make N finished alternatives (2-3 for a main "
+                                            "image): <name>-v1..vN plus <name>-variants.png."},
+                "keep_original": {"type": "boolean",
+                                  "description": "Also copy ChatGPT's untouched image beside "
+                                                 "the output (<name>.original.png)."},
                 "fit": {"type": "string", "enum": ["cover", "contain"]},
                 "format": {"type": "string", "description": "Override the inferred format."},
                 "favicon": {"type": "boolean", "description": "Write a multi-size .ico."},
                 "knockout_bg": {
                     "type": "boolean",
-                    "description": "Make a flat background transparent (png/webp/ico). "
-                                   "Prompt a 'solid <colour> background' for a clean cut.",
+                    "description": "Transparent background (png/webp/ico): asked of "
+                                   "ChatGPT's tool, and a flat one is knocked out locally "
+                                   "if none came back.",
                 },
                 "quality": {"type": "integer"},
                 "timeout": {"type": "integer"},
@@ -187,6 +210,7 @@ def tool_ask(args):
         # An agent's question is tooling, not conversation: it has no business
         # sitting in the account's chat history afterwards.
         ephemeral=not args.get("keep_chat"),
+        model_variant=args.get("model_variant") or None,
     )
     if args.get("strip_fences"):
         text = "\n".join(ln for ln in text.splitlines()
@@ -205,9 +229,7 @@ def tool_generate_image(args):
     import gen_asset  # imported lazily: needs Pillow, which `ask` does not
 
     out = os.path.abspath(os.path.expanduser(args["out"]))
-    path = gen_asset.render(
-        prompt=args["prompt"],
-        out=out,
+    kw = dict(
         model=args.get("model"),
         refs=args.get("refs") or None,
         timeout=int(args.get("timeout") or DEFAULT_TIMEOUT),
@@ -219,8 +241,25 @@ def tool_generate_image(args):
         favicon=bool(args.get("favicon")),
         knockout=bool(args.get("knockout_bg")),
         quality=int(args.get("quality") or 88),
+        keep_original=bool(args.get("keep_original")),
+        variant=args.get("model_variant") or None,
     )
-    return f"wrote {path}"
+
+    def line(r):
+        o = r.get("original_size") or ["?", "?"]
+        s = r.get("size") or ["?", "?"]
+        used = (r.get("model_used") or {}).get("model")
+        return (f"wrote {r['out']} ({s[0]}x{s[1]}); original {o[0]}x{o[1]} at "
+                f"{r.get('original') or '(not saved)'}" + (f"; drawn via {used}" if used else ""))
+
+    n = int(args.get("variants") or 1)
+    if n > 1:
+        res = gen_asset.render_variants(args["prompt"], out, n, **kw)
+        lines = [line(r) for r in res["variants"]]
+        if res.get("sheet"):
+            lines.append(f"contact sheet {res['sheet']}")
+        return "\n".join(lines)
+    return line(gen_asset.render_full(args["prompt"], out, **kw))
 
 
 def tool_list_models(_args):

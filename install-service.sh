@@ -33,10 +33,10 @@ systemctl --user enable --now browser-llm-health.timer
 loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
 
 echo
-echo "[install] up at http://localhost:8081   (model: gemini-browser | chatgpt-browser)"
+echo "[install] up at http://localhost:8081   (model: chatgpt-browser, the default | gemini-browser, text only)"
 systemctl --user --no-pager status browser-llm-api.service | head -6 || true
 echo
 echo "  logs:    journalctl --user -u browser-llm-api -f"
 echo "  restart: systemctl --user restart browser-llm-api"
-echo "  re-auth: DISPLAY=:1 ./venv/bin/python login.py gemini   # or: chatgpt"
+echo "  re-auth: DISPLAY=:1 ./venv/bin/python login.py chatgpt   # or: gemini"
 echo "  health:  ./healthcheck.sh --deep   (timer runs it every 10 min)"

@@ -12,13 +12,154 @@ checks. Every selector here was measured on a real signed-in session (dates
 below); when a request fails with "input box not found" or an empty answer,
 read the live page over CDP before changing anything.
 """
+import asyncio
 import json
 import logging
+import os
 import re
+import time
 
 from .base import Provider, RateLimited
+from .limits import quota_refusal
 
 logger = logging.getLogger("gemini_server")
+
+
+# --- model choice -----------------------------------------------------------
+# On a Plus account (measured 13 Oct 2026) the composer has a picker,
+# button[aria-label="Select ChatGPT model"], whose label is the power level.
+# Its menu holds a three-step "Power" slider, Instant / Medium / High, and a
+# second view listing the models (GPT-6, GPT-5.6 Sol, GPT-5.5). The choice is
+# kept by the account across reloads. GPT-6 at High sent model gpt-6-thinking
+# with thinking_effort "extended", the conversation record said model_slug
+# gpt-6-thinking, and the page's "Try again" menu read "6 Thinking". That is
+# the strongest setting Plus offers, so it is the default.
+#   CHATGPT_MODEL   picker model row, e.g. "GPT-6" or "GPT-5.6 Sol"
+#   CHATGPT_EFFORT  Instant | Medium | High
+# A request can override either with model_variant ("instant", "GPT-5.6 Sol",
+# "GPT-6/medium"); see parse_variant.
+EFFORTS = ("instant", "medium", "high")          # slider order, left to right
+_EFFORT_ALIASES = {"instant": "instant", "fast": "instant", "low": "instant",
+                   "medium": "medium", "standard": "medium", "normal": "medium",
+                   "high": "high", "extended": "high", "max": "high", "best": "high"}
+DEFAULT_MODEL_LABEL = os.environ.get("CHATGPT_MODEL", "GPT-6").strip() or "GPT-6"
+DEFAULT_EFFORT = _EFFORT_ALIASES.get(
+    os.environ.get("CHATGPT_EFFORT", "high").strip().lower(), "high")
+# Images left on the site's own counter that requests here must not use, so
+# the account owner keeps some for his own chats (0 = use them all).
+IMAGE_RESERVE = max(0, int(os.environ.get("CHATGPT_IMAGE_RESERVE", "0") or 0))
+# Read the conversation record after each answer to report which model the
+# site really used (one GET per request). Off: report what the page sent.
+READ_ANSWERED_MODEL = os.environ.get("CHATGPT_READ_MODEL", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
+
+def _norm(s) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def model_version(name) -> str:
+    """'GPT-5.6 Sol' -> '5.6', 'gpt-5-6-thinking' -> '5.6', 'gpt-6-thinking' -> '6'."""
+    m = re.search(r"(\d+(?:[.-]\d+)?)", str(name or ""))
+    return m.group(1).replace("-", ".") if m else ""
+
+
+def parse_variant(variant) -> tuple:
+    """A request's model_variant -> (model label or None, effort or None).
+
+    Parts are separated by "/": an effort word (instant, medium, high, or
+    fast / standard / extended) sets the power level, anything else names a
+    picker model ("GPT-5.6 Sol", "gpt-5.6-sol"). "GPT-6/high" sets both."""
+    model = effort = None
+    for part in str(variant or "").split("/"):
+        p = part.strip()
+        if not p:
+            continue
+        e = _EFFORT_ALIASES.get(p.lower())
+        if e:
+            effort = e
+        else:
+            model = p
+    return model, effort
+
+
+# Reads the picker: the button, and when its menu is open the slider's three
+# dots, the status line and the model rows (the model view is inert until its
+# toggle is clicked, but its rows and their aria-checked are in the DOM).
+_PICKER_JS = r"""
+(function(){
+  var b=document.querySelector('button[aria-label="Select ChatGPT model"]');
+  if(!b) return JSON.stringify({button:false});
+  var r=b.getBoundingClientRect();
+  var out={button:true, label:(b.innerText||'').trim(), x:r.x+r.width/2, y:r.y+r.height/2};
+  var menu=null;
+  document.querySelectorAll('[role=menu][data-state=open]').forEach(function(m){
+    if(m.querySelector('[data-model-picker-power-slider],[role=menuitemradio]')) menu=m; });
+  out.open=!!menu;
+  if(menu){
+    var p=menu.querySelector('[data-model-picker-power-slider]');
+    out.dots=p?Array.prototype.map.call(p.querySelectorAll('span[data-selected]'),function(d){
+      var q=d.getBoundingClientRect(); return [q.x+q.width/2,q.y+q.height/2];}):[];
+    var st=menu.querySelector('[role=status]'); out.status=st?(st.innerText||'').trim():'';
+    out.models=Array.prototype.map.call(menu.querySelectorAll('[role=menuitemradio]'),function(e){
+      var q=e.getBoundingClientRect(); var lab=e.querySelector('[data-menu-row-content] span')||e;
+      return {label:((lab.innerText||lab.textContent||'').trim().split('\n')[0]),
+              checked:e.getAttribute('aria-checked')==='true', x:q.x+q.width/2, y:q.y+q.height/2,
+              shown:q.width>0&&q.height>0&&!e.closest('[inert]')};});
+    var t=menu.querySelector('[data-model-picker-view-toggle]');
+    if(t){var q=t.getBoundingClientRect(); out.toggle=[q.x+q.width/2,q.y+q.height/2];}
+  }
+  return JSON.stringify(out);
+})()
+"""
+
+# The site's own usage counters: the call its page makes on every new chat.
+_LIMITS_JS = r"""
+(async () => {
+  const s = await (await fetch('/api/auth/session', {cache: 'no-store'})).json();
+  if (!s || !s.accessToken) return JSON.stringify({error: 'no access token'});
+  const r = await fetch('/backend-api/conversation/init', {method: 'POST',
+    headers: {Authorization: 'Bearer ' + s.accessToken, 'Content-Type': 'application/json'},
+    body: JSON.stringify({gizmo_id: null, requested_default_model: null, conversation_id: null,
+                          timezone_offset_min: new Date().getTimezoneOffset(), system_hints: []})});
+  if (!r.ok) return JSON.stringify({error: 'HTTP ' + r.status});
+  const j = await r.json();
+  return JSON.stringify({limits_progress: j.limits_progress || [],
+                         blocked_features: j.blocked_features || [],
+                         default_model_slug: j.default_model_slug || null});
+})()
+"""
+
+# Which model the site says answered: the last assistant text message in the
+# conversation record, which names model_slug, resolved_model_slug and
+# thinking_effort. An image turn is routed by the site itself (13 Oct 2026:
+# sent gpt-6-thinking, recorded gpt-5-4-thinking), so only this shows it.
+_ANSWERED_JS = r"""
+(async () => {
+  const m = location.pathname.match(/\/c\/([0-9a-f-]{36})/i);
+  if (!m) return JSON.stringify({error: 'no conversation in the URL'});
+  const s = await (await fetch('/api/auth/session', {cache: 'no-store'})).json();
+  if (!s || !s.accessToken) return JSON.stringify({error: 'no access token'});
+  const r = await fetch('/backend-api/conversation/' + m[1],
+                        {headers: {Authorization: 'Bearer ' + s.accessToken}});
+  if (!r.ok) return JSON.stringify({error: 'HTTP ' + r.status});
+  const j = await r.json();
+  let best = null;
+  for (const n of Object.values(j.mapping || {})) {
+    const msg = n.message;
+    if (!msg || !msg.author || msg.author.role !== 'assistant') continue;
+    const md = msg.metadata || {};
+    if (!md.model_slug) continue;
+    const t = msg.create_time || 0;
+    const text = (msg.content || {}).content_type === 'text';
+    if (!best || (text && !best.text) || (text === best.text && t >= best.t))
+      best = {t: t, text: text, model_slug: md.model_slug,
+              resolved_model_slug: md.resolved_model_slug || null,
+              thinking_effort: md.thinking_effort || null};
+  }
+  return JSON.stringify(best || {error: 'no assistant message with a model'});
+})()
+"""
 
 
 # --- page selectors ---------------------------------------------------------
@@ -222,16 +363,208 @@ class ChatGPTProvider(Provider):
     })()
     """
 
+    def __init__(self):
+        super().__init__()
+        self._model_seen = None      # picker model row last read, None = unknown
+        self._last_used: dict = {}   # model_used of the last answer
+        self._last_limits: dict = {}  # last read of the site's own counters
+        self._picker_warned = False
+
+    # Select everything in the composer, so the insert below REPLACES it. On
+    # 13 Oct 2026 a send that did not land left its prompt in the composer,
+    # the site kept it as a draft, and the next drive's text was appended to
+    # it: ChatGPT received that prompt twice in one message.
+    _SELECT_ALL_JS = """(elem) => { elem.focus();
+        const r = document.createRange(); r.selectNodeContents(elem);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }"""
+
     async def type_prompt(self, page, input_box, prompt: str) -> None:
         # Measured 12 Oct 2026 on the composer of 11 Oct: a "\n" sent as a CDP
         # char event inserts nothing, so a multi-line prompt reached the site as
         # one run-on line ("...lower case only.]First line: ...Second line: ...").
         # One Input.insertText call puts the whole prompt in the way a paste
         # does, each line break as a new paragraph, and costs one CDP call
-        # instead of one per character.
+        # instead of one per character. It replaces the selection, so selecting
+        # the whole composer first drops any draft the site restored.
         from nodriver import cdp
-        await input_box.apply("(elem) => elem.focus()")
-        await page.send(cdp.input_.insert_text(text=prompt))
+        want = _norm(prompt)
+        for attempt in (1, 2):
+            await input_box.apply(self._SELECT_ALL_JS)
+            await asyncio.sleep(0.15)
+            await page.send(cdp.input_.insert_text(text=prompt))
+            await asyncio.sleep(0.3)
+            got = _norm(await self.composer_text(page) or "")
+            # A long paste can become a file attachment (the site's
+            # paste_text_to_file), leaving the composer empty: that is fine.
+            if not got or got == want:
+                return
+            logger.warning(f"[{self.name}] composer holds {len(got)} chars, not the "
+                           f"{len(want)} typed (attempt {attempt}); replacing its content")
+        logger.warning(f"[{self.name}] composer text still differs from the prompt; sending anyway")
+
+    # ---- model choice, limits and what answered ---------------------------
+    async def _click_xy(self, page, x: float, y: float) -> None:
+        from nodriver import cdp
+        await page.send(cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=x, y=y))
+        await page.send(cdp.input_.dispatch_mouse_event(
+            type_="mousePressed", x=x, y=y, button=cdp.input_.MouseButton.LEFT, click_count=1))
+        await page.send(cdp.input_.dispatch_mouse_event(
+            type_="mouseReleased", x=x, y=y, button=cdp.input_.MouseButton.LEFT, click_count=1))
+
+    async def _escape(self, page) -> None:
+        from nodriver import cdp
+        for kind in ("keyDown", "keyUp"):
+            await page.send(cdp.input_.dispatch_key_event(
+                type_=kind, key="Escape", code="Escape", windows_virtual_key_code=27))
+
+    async def _picker(self, page) -> dict:
+        try:
+            raw = await page.evaluate(_PICKER_JS)
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            return {}
+
+    async def _open_picker(self, page, st: dict) -> dict:
+        await self._click_xy(page, st["x"], st["y"])
+        for _ in range(6):
+            await asyncio.sleep(0.4)
+            st = await self._picker(page)
+            if st.get("open"):
+                break
+        return st
+
+    async def select_variant(self, page, model_label, effort) -> str:
+        """Set the composer's picker to ``model_label`` at ``effort`` and
+        return what it shows afterwards ("GPT-6 / High"), or "" if it could
+        not be read. Never fails the request: a picker that moved or vanished
+        is logged and the page's own choice is used and reported."""
+        st = await self._picker(page)
+        if not st.get("button"):
+            if not self._picker_warned:
+                logger.warning(f"[{self.name}] no model picker on the page; using the "
+                               f"site's own choice (signed out of Plus, or a new layout)")
+                self._picker_warned = True
+            return ""
+        need_model = bool(model_label) and _norm(self._model_seen) != _norm(model_label)
+        need_effort = bool(effort) and _norm(st.get("label")) != _norm(effort)
+        if not (need_model or need_effort):
+            return f"{self._model_seen or '?'} / {st.get('label')}"
+        st = await self._open_picker(page, st)
+        if not st.get("open"):
+            logger.warning(f"[{self.name}] the model picker did not open; using the site's choice")
+            return f"{self._model_seen or '?'} / {st.get('label', '?')}"
+        try:
+            checked = [m["label"] for m in st.get("models") or [] if m.get("checked")]
+            if checked:
+                self._model_seen = checked[0]
+            if model_label and _norm(self._model_seen) != _norm(model_label):
+                rows = st.get("models") or []
+                target = next((m for m in rows if _norm(m["label"]) == _norm(model_label)), None)
+                if target is None:
+                    logger.warning(f"[{self.name}] model {model_label!r} is not in the picker "
+                                   f"(offered: {', '.join(m['label'] for m in rows) or 'none'})")
+                else:
+                    if not target.get("shown") and st.get("toggle"):
+                        await self._click_xy(page, *st["toggle"])
+                        await asyncio.sleep(0.6)
+                        st = await self._picker(page)
+                        target = next((m for m in st.get("models") or []
+                                       if _norm(m["label"]) == _norm(model_label)), target)
+                    await self._click_xy(page, target["x"], target["y"])
+                    await asyncio.sleep(0.8)
+                    st = await self._picker(page)
+                    if not st.get("open"):
+                        st = await self._open_picker(page, st)
+                    checked = [m["label"] for m in st.get("models") or [] if m.get("checked")]
+                    self._model_seen = checked[0] if checked else None
+            if effort and _norm(st.get("label")) != _norm(effort):
+                dots = st.get("dots") or []
+                idx = EFFORTS.index(effort)
+                if len(dots) == len(EFFORTS):
+                    await self._click_xy(page, *dots[idx])
+                    await asyncio.sleep(0.6)
+                else:
+                    logger.warning(f"[{self.name}] picker shows {len(dots)} power steps, "
+                                   f"expected {len(EFFORTS)}; leaving it as it is")
+        finally:
+            await self._escape(page)
+            await asyncio.sleep(0.4)
+        st = await self._picker(page)
+        shown = f"{self._model_seen or '?'} / {st.get('label', '?')}"
+        if effort and _norm(st.get("label")) != _norm(effort):
+            logger.warning(f"[{self.name}] picker reads {shown}, wanted {effort}")
+        else:
+            logger.info(f"[{self.name}] model picker set to {shown}")
+        return shown
+
+    async def read_limits(self, page) -> dict:
+        """The site's own usage counters ({limits_progress, blocked_features})."""
+        try:
+            raw = await asyncio.wait_for(
+                page.evaluate(_LIMITS_JS, await_promise=True, return_by_value=True), 15)
+            data = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            data = {"error": f"{type(e).__name__}: {e}"}
+        if data.get("error"):
+            logger.warning(f"[{self.name}] could not read the usage counters: {data['error']}")
+            return {}
+        img = next((x for x in data.get("limits_progress") or []
+                    if isinstance(x, dict) and x.get("feature_name") == "image_gen"), None)
+        self._last_limits = {"image_gen": img, "read_at": int(time.time()),
+                             "all": data.get("limits_progress") or []}
+        return data
+
+    async def prepare_page(self, page, options: dict) -> None:
+        model_label, effort = parse_variant(options.get("variant"))
+        model_label = model_label or DEFAULT_MODEL_LABEL
+        effort = effort or DEFAULT_EFFORT
+        if options.get("kind") == "image":
+            data = await self.read_limits(page)
+            refusal = quota_refusal(data.get("limits_progress"), reserve=IMAGE_RESERVE,
+                                    blocked_features=data.get("blocked_features"))
+            if refusal:
+                raise refusal
+        options["picker"] = await self.select_variant(page, model_label, effort)
+
+    async def answered_model(self, page) -> dict:
+        record = {}
+        if READ_ANSWERED_MODEL:
+            try:
+                raw = await asyncio.wait_for(
+                    page.evaluate(_ANSWERED_JS, await_promise=True, return_by_value=True), 15)
+                record = json.loads(raw) if isinstance(raw, str) else {}
+            except Exception as e:
+                record = {"error": f"{type(e).__name__}: {e}"}
+            if record.get("error"):
+                logger.info(f"[{self.name}] model record unavailable: {record['error']}")
+                record = {}
+        return record
+
+    def note_model_used(self, used: dict) -> None:
+        """Remember what answered, and forget the cached picker model when the
+        page sent a model of another version than the one we believe is
+        selected (the account's choice can change from another browser)."""
+        self._last_used = dict(used or {})
+        sent = (used or {}).get("requested_by_page")
+        if sent and self._model_seen and model_version(sent) != model_version(self._model_seen):
+            logger.info(f"[{self.name}] page sent {sent} while the picker was read as "
+                        f"{self._model_seen}; re-reading the picker next time")
+            self._model_seen = None
+
+    def status_extra(self) -> dict:
+        return {"model_setting": f"{DEFAULT_MODEL_LABEL} / {DEFAULT_EFFORT.capitalize()}",
+                "model_picker_seen": self._model_seen,
+                "last_model_used": self._last_used or None,
+                "image_reserve": IMAGE_RESERVE,
+                "image_quota": (dict(self._last_limits.get("image_gen") or {},
+                                     read_at=self._last_limits.get("read_at"))
+                                if self._last_limits else None)}
+
+    def image_prompt(self, prompt: str, size=None, background=None) -> str:
+        # Name the tool: a thinking model asked for "a misty forest at dawn"
+        # can answer in words. Neutral wording only; no style is added.
+        body = super().image_prompt(prompt, size=size, background=background)
+        return "Use the image generation tool to create this image.\n\n" + body
 
     async def get_response_text(self, page) -> str:
         # ChatGPT renders code blocks as CodeMirror editors (.cm-editor / .cm-content),

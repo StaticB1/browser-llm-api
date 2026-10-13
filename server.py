@@ -2,9 +2,11 @@
 OpenAI-compatible API server backed by browser automation.
 
 Providers are selected per-request via the OpenAI ``model`` field:
-  - "gemini-browser"   → gemini.google.com   (text + image generation)
-  - "chatgpt-browser"  → chatgpt.com          (text + image generation)
-An unknown/absent model falls back to DEFAULT_PROVIDER (env, default gemini-browser).
+  - "chatgpt-browser"  → chatgpt.com          (text + image generation; the default)
+  - "gemini-browser"   → gemini.google.com    (text; images only where IMAGE_PROVIDERS allows)
+An unknown/absent model falls back to DEFAULT_PROVIDER (env, default chatgpt-browser).
+ChatGPT's model and power level come from CHATGPT_MODEL / CHATGPT_EFFORT (default
+GPT-6 at High) or a request's ``model_variant``.
 
 Endpoints:
   GET  /                      (mini web UI — chat, image gen, gallery, status)
@@ -24,13 +26,13 @@ Example provider entry for an OpenAI-compatible client:
   {
     "models": {
       "providers": {
-        "gemini-browser": {
+        "browser-llm": {
           "baseUrl": "http://localhost:8081/v1",
           "apiKey": "local",
           "api": "openai-completions",
           "models": [
-            {"id": "gemini-browser",  "name": "Gemini (Browser)"},
-            {"id": "chatgpt-browser", "name": "ChatGPT (Browser)"}
+            {"id": "chatgpt-browser", "name": "ChatGPT (Browser)"},
+            {"id": "gemini-browser",  "name": "Gemini (Browser)"}
           ]
         }
       }
@@ -66,9 +68,10 @@ except ImportError:  # older venv without httpx: local providers still work
     httpx = None
 
 from providers import (
-    PROVIDERS, DEFAULT_PROVIDER, get_provider, patch_cdp, CHROME_ARGS,
-    CompletionTracker, RateLimited,
+    PROVIDERS, DEFAULT_PROVIDER, IMAGE_PROVIDERS, get_provider, patch_cdp, CHROME_ARGS,
+    CompletionTracker, RateLimited, UsageLimitReached,
 )
+from providers.limits import refusal_from_message
 import authz
 from _version import __version__
 
@@ -370,6 +373,10 @@ class ChatCompletionRequest(BaseModel):
     # Unset means "whatever BROWSER_LLM_EPHEMERAL says", so an install can make
     # it the default for clients that predate the field.
     ephemeral: Optional[bool] = None
+    # Not OpenAI: which of the site's own models and power levels to use for
+    # this request, e.g. "instant", "GPT-6/medium" (ChatGPT; see
+    # providers/chatgpt.py parse_variant). Unset = CHATGPT_MODEL/CHATGPT_EFFORT.
+    model_variant: Optional[str] = None
 
 
 class ConversationDeleteRequest(BaseModel):
@@ -389,7 +396,13 @@ class ImageGenRequest(BaseModel):
     prompt: str
     model: str = DEFAULT_PROVIDER
     n: Optional[int] = 1
+    # "WxH", "square", "landscape" or "portrait": asked for in words, since the
+    # sites' image tools make a few fixed sizes (crop to the exact pixels after).
     size: Optional[str] = None
+    # "transparent" asks the image tool for an alpha background (ChatGPT's
+    # tool supports it); "opaque"/"auto"/unset add nothing.
+    background: Optional[str] = None
+    model_variant: Optional[str] = None
     response_format: Optional[str] = "b64_json"  # "b64_json" | "url" (data: URL)
     # Reference image(s) -> image-to-image / edit. Same spec forms as
     # ChatCompletionRequest.images. `image` matches OpenAI's edits field name.
@@ -850,25 +863,63 @@ def _note_conversation(meta: Optional[dict], conv_id: str) -> None:
         meta["conversation_id"] = conv_id
 
 
+async def _read_model_used(provider, page, monitor, options: dict) -> dict:
+    """Which model answered: the site's own record when the provider can read
+    it, else the model the page asked its backend for. Never raises."""
+    used: dict = {}
+    sent = getattr(monitor, "sent_model", None) or {}
+    try:
+        record = await provider.answered_model(page) or {}
+    except Exception as e:
+        logger.debug(f"[{provider.name}] answered_model failed: {e}")
+        record = {}
+    if record.get("model_slug"):
+        used = {"model": record["model_slug"], "effort": record.get("thinking_effort"),
+                "resolved": record.get("resolved_model_slug"),
+                "source": "conversation record"}
+    elif sent.get("model"):
+        used = {"model": sent["model"], "effort": sent.get("thinking_effort"),
+                "source": "page request"}
+    if sent.get("model"):
+        used["requested_by_page"] = sent["model"]
+    if options.get("picker"):
+        used["picker"] = options["picker"]
+    if used:
+        effort = f" ({used['effort']})" if used.get("effort") else ""
+        logger.info(f"[{provider.name}] answered by {used.get('model')}{effort} per the "
+                    f"{used.get('source')}; picker {used.get('picker', '-')}")
+        note = getattr(provider, "note_model_used", None)
+        if note:
+            note(used)
+    return used
+
+
 async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
                    raw_uploads: Optional[list] = None,
                    allow_local_paths: bool = True,
                    ephemeral: bool = False,
-                   meta: Optional[dict] = None) -> AsyncGenerator[str, None]:
+                   meta: Optional[dict] = None,
+                   variant: Optional[str] = None) -> AsyncGenerator[str, None]:
     """Open the provider's chat, attach any input images, send the prompt, stream
     text deltas, then append any generated images as markdown links.
 
     ``ephemeral`` deletes the conversation from the account once the answer has
-    been read, for callers whose prompts are tooling rather than conversation."""
+    been read, for callers whose prompts are tooling rather than conversation.
+    ``variant`` is the request's model_variant (see Provider.prepare_page)."""
     browser = await get_browser(provider)
     try:
         async with _attachment_files(attachments, raw_uploads,
                                      allow_local_paths=allow_local_paths) as files:
-            page, monitor = await provider.open_and_send(browser, prompt, attachments=files)
+            options = {"kind": "chat", "variant": variant}
+            page, monitor = await provider.open_and_send(browser, prompt, attachments=files,
+                                                         options=options)
 
             async for delta in _stream_completion(provider, page, monitor):
                 yield delta
 
+            used = await _read_model_used(provider, page, monitor, options)
+            if meta is not None and used:
+                meta["model_used"] = used
             # Before the images, not after: the id becomes part of their names.
             conv_id = "" if ephemeral else await _read_conversation_id(provider, page)
             n = 0
@@ -894,17 +945,25 @@ async def drive_once(provider, prompt: str, attachments: Optional[list] = None, 
                      raw_uploads: Optional[list] = None,
                      allow_local_paths: bool = True,
                      ephemeral: bool = False,
-                     meta: Optional[dict] = None) -> tuple[str, list[dict]]:
+                     meta: Optional[dict] = None,
+                     variant: Optional[str] = None,
+                     kind: str = "chat") -> tuple[str, list[dict]]:
     """Non-streaming drive used by non-streaming chat and the images endpoints:
-    returns (text, images)."""
+    returns (text, images). ``kind`` "image" makes the provider read the
+    site's own image counter first (see Provider.prepare_page)."""
     browser = await get_browser(provider)
     try:
         async with _attachment_files(attachments, raw_uploads,
                                      allow_local_paths=allow_local_paths) as files:
-            page, monitor = await provider.open_and_send(browser, prompt, attachments=files)
+            options = {"kind": kind, "variant": variant}
+            page, monitor = await provider.open_and_send(browser, prompt, attachments=files,
+                                                         options=options)
             text = ""
             async for delta in _stream_completion(provider, page, monitor):
                 text += delta
+            used = await _read_model_used(provider, page, monitor, options)
+            if meta is not None and used:
+                meta["model_used"] = used
             conv_id = "" if ephemeral else await _read_conversation_id(provider, page)
             imgs = [_persist(im, provider, conv_id)
                     for im in await provider.get_images(page)]
@@ -1107,8 +1166,13 @@ async def _proxy_images(name: str, url: str, req: ImageGenRequest, *,
     if r.status_code != 200:
         err = RuntimeError(f"upstream returned {r.status_code}")
         _record_request(name, started, err)
-        raise HTTPException(status_code=r.status_code if r.status_code in (501, 502) else 502,
-                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}")
+        # 429 (a usage limit, with its Retry-After) and 403 (images barred on
+        # that provider) mean the same thing here as there: pass them on.
+        keep = r.status_code in (403, 429, 501, 502)
+        retry = r.headers.get("retry-after")
+        raise HTTPException(status_code=r.status_code if keep else 502,
+                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}",
+                            headers={"Retry-After": retry} if retry else None)
     _record_request(name, started)
     return JSONResponse(r.json())
 
@@ -1250,7 +1314,13 @@ async def api_status():
             # non-None ⇒ requests for this model are proxied upstream, the
             # local browser fields above don't apply
             "remote_upstream": REMOTES.get(name),
+            # may this provider make images here (IMAGE_PROVIDERS)?
+            "images_allowed": name in IMAGE_PROVIDERS,
         }
+        try:
+            providers[name].update(p.status_extra())
+        except Exception as e:
+            logger.debug(f"[{name}] status_extra failed: {e}")
     # Remote-only models (mapped in REMOTE_PROVIDERS but not a local provider)
     # still get a status entry so the UI can show them.
     for name, url in REMOTES.items():
@@ -1280,6 +1350,7 @@ async def api_status():
         "version": __version__,
         "uptime_seconds": int(time.time() - _STARTED_AT),
         "default_provider": DEFAULT_PROVIDER,
+        "image_providers": IMAGE_PROVIDERS,
         "image_saving": _SAVE_ENABLED,
         "image_dir": str(_image_dir),
         "display": os.environ.get("DISPLAY", ""),
@@ -1650,7 +1721,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     async for chunk in run_chat(provider, prompt, specs,
                                                 allow_local_paths=allow_paths,
                                                 ephemeral=_ephemeral(req),
-                                                meta=meta):
+                                                meta=meta, variant=req.model_variant):
                         yield _chunk(chunk, None)
             except Exception as e:
                 # Surface the failure in-band; a raised exception here would
@@ -1660,9 +1731,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 yield _chunk(f"\n\n[browser-llm error: {e}]", None)
             finally:
                 _record_request(provider.name, started, err)
-            conv_id = meta.get("conversation_id")
-            yield _chunk(None, "stop",
-                         {"conversation_id": conv_id} if conv_id else None)
+            extra = {k: meta[k] for k in ("conversation_id", "model_used") if meta.get(k)}
+            yield _chunk(None, "stop", extra or None)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -1675,10 +1745,13 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             text, imgs = await drive_once(provider, prompt, specs,
                                           allow_local_paths=allow_paths,
                                           ephemeral=_ephemeral(req),
-                                          meta=meta)
+                                          meta=meta, variant=req.model_variant)
         except HTTPException:
             _record_request(provider.name, started, RuntimeError("bad request"))
             raise
+        except UsageLimitReached as e:
+            _record_request(provider.name, started, e)
+            raise _limit_http(e)
         except Exception as e:
             _record_request(provider.name, started, e)
             logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
@@ -1709,6 +1782,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     # client that keeps its own copy can delete the real thread with it.
     if meta.get("conversation_id"):
         body["conversation_id"] = meta["conversation_id"]
+    # Not OpenAI: which of the site's models answered, from its own record.
+    if meta.get("model_used"):
+        body["model_used"] = meta["model_used"]
     return body
 
 
@@ -1723,12 +1799,54 @@ def _ref_specs(req: ImageGenRequest) -> list[str]:
     return [s for s in specs if s.strip()]
 
 
-def _image_payload(imgs: list[dict], response_format: Optional[str]) -> dict:
+def _pixel_size(data: bytes) -> Optional[tuple[int, int]]:
+    """(width, height) read from a PNG, JPEG or WebP header; None if unknown."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            kind = data[12:16]
+            if kind == b"VP8X":
+                return (int.from_bytes(data[24:27], "little") + 1,
+                        int.from_bytes(data[27:30], "little") + 1)
+            if kind == b"VP8 ":
+                return (int.from_bytes(data[26:28], "little") & 0x3FFF,
+                        int.from_bytes(data[28:30], "little") & 0x3FFF)
+            if kind == b"VP8L":
+                b = int.from_bytes(data[21:25], "little")
+                return (b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1
+        if data[:3] == b"\xff\xd8\xff":
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB,
+                              0xCD, 0xCE, 0xCF):
+                    return (int.from_bytes(data[i + 7:i + 9], "big"),
+                            int.from_bytes(data[i + 5:i + 7], "big"))
+                i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    except Exception:
+        return None
+    return None
+
+
+def _image_payload(imgs: list[dict], response_format: Optional[str],
+                   model_used: Optional[dict] = None) -> dict:
     data = []
     for im in imgs:
         entry = {}
         if im.get("b64"):
             entry["b64_json"] = im["b64"]
+            # The original as the site delivered it, never resized here.
+            try:
+                wh = _pixel_size(base64.b64decode(im["b64"]))
+            except Exception:
+                wh = None
+            if wh:
+                entry["width"], entry["height"] = wh
+            entry["mime"] = im.get("mime")
         if im.get("url"):
             entry["url"] = im["url"]
         elif im.get("src"):
@@ -1737,29 +1855,56 @@ def _image_payload(imgs: list[dict], response_format: Optional[str]) -> dict:
             entry["url"] = f"data:{im['mime']};base64,{im['b64']}"  # not saved to disk
         if im.get("path"):
             entry["path"] = im["path"]
+        if im.get("alt"):
+            entry["revised_prompt"] = im["alt"]
         data.append(entry)
-    return {"created": int(time.time()), "data": data}
+    out = {"created": int(time.time()), "data": data}
+    if model_used:
+        out["model_used"] = model_used
+    return out
+
+
+def _limit_http(e: UsageLimitReached) -> HTTPException:
+    """HTTP 429 for a site's usage limit, with Retry-After when it said when."""
+    secs = e.retry_after()
+    logger.warning(f"usage limit ({e.source}): {e}")
+    return HTTPException(status_code=429, detail=str(e),
+                         headers={"Retry-After": str(secs)} if secs is not None else None)
 
 
 async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[list],
                              response_format: Optional[str], *, allow_local_paths: bool,
-                             what: str = "image generation"):
+                             what: str = "image generation", size: Optional[str] = None,
+                             background: Optional[str] = None,
+                             variant: Optional[str] = None):
     """Shared body of /v1/images/generations and /v1/images/edits."""
     if not provider.supports_images:
         raise HTTPException(status_code=501,
                             detail=f"{provider.name} does not support image generation")
+    if provider.name not in IMAGE_PROVIDERS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{provider.name} may not make images on this install (IMAGE_PROVIDERS="
+                   f"{','.join(IMAGE_PROVIDERS) or 'none'}); use model "
+                   f"{IMAGE_PROVIDERS[0] if IMAGE_PROVIDERS else '(none configured)'}")
     _check_upload_support(provider, specs, raw)
     # Fail before queueing behind another request's (possibly minutes-long) drive.
     _prevalidate_specs(specs, allow_local_paths=allow_local_paths)
+    typed = provider.image_prompt(prompt, size=size, background=background)
 
+    meta: dict = {}
     async with _locks[provider.name]:
         started = time.monotonic()
         try:
-            _text, imgs = await drive_once(provider, prompt, specs, raw_uploads=raw,
-                                           allow_local_paths=allow_local_paths)
+            text, imgs = await drive_once(provider, typed, specs, raw_uploads=raw,
+                                          allow_local_paths=allow_local_paths,
+                                          meta=meta, variant=variant, kind="image")
         except HTTPException:
             _record_request(provider.name, started, RuntimeError("bad request"))
             raise
+        except UsageLimitReached as e:
+            _record_request(provider.name, started, e)
+            raise _limit_http(e)
         except Exception as e:
             _record_request(provider.name, started, e)
             logger.error(f"[{provider.name}] {what} failed: {e}", exc_info=True)
@@ -1767,11 +1912,18 @@ async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[l
         _record_request(provider.name, started)
 
     if not imgs:
+        # The site's own refusal ("You've hit the Plus plan limit for image
+        # generation ... resets in 23 hours") is a 429 with the reset time, so
+        # an agent stops and says so instead of retrying into the same wall.
+        refusal = refusal_from_message(text)
+        if refusal:
+            raise _limit_http(refusal)
+        said = f" It said: {text.strip()[:300]!r}" if text and text.strip() else ""
         raise HTTPException(
             status_code=502,
-            detail=f"{provider.name} did not return an image for this prompt",
+            detail=f"{provider.name} did not return an image for this prompt.{said}",
         )
-    return _image_payload(imgs, response_format)
+    return _image_payload(imgs, response_format, meta.get("model_used"))
 
 
 @app.post("/v1/images/generations")
@@ -1789,15 +1941,17 @@ async def images_generations(req: ImageGenRequest, request: Request):
 
     return await _run_image_request(get_provider(req.model), req.prompt, _ref_specs(req),
                                     None, req.response_format,
-                                    allow_local_paths=allow_paths)
+                                    allow_local_paths=allow_paths, size=req.size,
+                                    background=req.background, variant=req.model_variant)
 
 
 @app.post("/v1/images/edits")
 async def images_edits(request: Request):
     """Image + prompt → image (OpenAI's ``images.edits``). Accepts the official
     ``multipart/form-data`` upload (fields ``image`` — repeatable — plus
-    ``prompt``/``model``/``response_format``) or the same JSON body as
-    /v1/images/generations. ``mask``/``n``/``size`` are accepted and ignored."""
+    ``prompt``/``model``/``response_format``/``size``/``background``/
+    ``model_variant``) or the same JSON body as /v1/images/generations.
+    ``mask`` and ``n`` are accepted and ignored."""
     ctype = (request.headers.get("content-type") or "").lower()
     allow_paths = _client_may_send_paths(request)
     raw: list = []
@@ -1815,6 +1969,9 @@ async def images_edits(request: Request):
         prompt = str(form.get("prompt") or "").strip()
         model = str(form.get("model") or DEFAULT_PROVIDER)
         response_format = str(form.get("response_format") or "b64_json")
+        size = str(form.get("size") or "") or None
+        background = str(form.get("background") or "") or None
+        variant = str(form.get("model_variant") or "") or None
         for field in ("image", "image[]", "images", "images[]"):
             for item in form.getlist(field):
                 if hasattr(item, "read"):  # UploadFile
@@ -1834,6 +1991,7 @@ async def images_edits(request: Request):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"invalid request: {e}")
         prompt, model, response_format = req.prompt, req.model, req.response_format
+        size, background, variant = req.size, req.background, req.model_variant
         specs = _ref_specs(req)
 
     if not prompt.strip():
@@ -1850,12 +2008,14 @@ async def images_edits(request: Request):
                 f"data:{_MIME_BY_EXT.get(_sniff_ext(data) or 'png', 'image/png')};base64,"
                 f"{base64.b64encode(data).decode()}" for _fname, data in raw]
         proxied = ImageGenRequest(prompt=prompt, model=name, images=specs,
-                                  response_format=response_format)
+                                  response_format=response_format, size=size,
+                                  background=background, model_variant=variant)
         return await _proxy_images(name, REMOTES[name], proxied,
                                    path="/v1/images/edits", allow_local_paths=allow_paths)
 
     return await _run_image_request(get_provider(model), prompt, specs, raw, response_format,
-                                    allow_local_paths=allow_paths, what="image edit")
+                                    allow_local_paths=allow_paths, what="image edit",
+                                    size=size, background=background, variant=variant)
 
 
 # ---------------------------------------------------------------------------

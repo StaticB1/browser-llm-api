@@ -72,7 +72,7 @@ ICON_SVG = os.path.join(SCRIPT_DIR, "icon.svg")
 APP_ID = "browser-llm-desktop"
 APP_NAME = "Browser LLM"
 DEFAULT_BASE = os.environ.get("BROWSER_LLM_API", "http://localhost:8081")
-FALLBACK_MODELS = ["gemini-browser", "chatgpt-browser"]
+FALLBACK_MODELS = ["chatgpt-browser", "gemini-browser"]
 VSCODE_STORAGE = os.path.expanduser("~/.config/Code/User/globalStorage/storage.json")
 VSCODE_TITLE_SUFFIXES = (" - Visual Studio Code", " — Visual Studio Code",
                          " - Code - OSS", " - VSCodium")

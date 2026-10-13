@@ -201,6 +201,11 @@ class StreamMonitor:
         self.stream_done = asyncio.Event()
         self.ws_seen = False
         self._last_ws_frame: float | None = None
+        # What the PAGE asked its backend for, read from the tracked request's
+        # JSON body (ChatGPT: {"model": "gpt-6-thinking", "thinking_effort":
+        # "extended"}). The page's choice, not ours; the site may still route
+        # the turn to another model, which only the conversation record shows.
+        self.sent_model: dict = {}
 
     def attach(self, tab):
         try:
@@ -218,6 +223,18 @@ class StreamMonitor:
         url = event.request.url
         if self._fragments and any(k in url for k in self._fragments):
             self._tracked.add(event.request_id)
+            self._note_model(getattr(event.request, "post_data", None))
+
+    def _note_model(self, body) -> None:
+        if not body or not isinstance(body, str) or '"model"' not in body:
+            return
+        try:
+            data = json.loads(body)
+        except Exception:
+            return
+        if isinstance(data, dict) and isinstance(data.get("model"), str):
+            self.sent_model = {k: data[k] for k in ("model", "thinking_effort")
+                               if isinstance(data.get(k), str)}
 
     def _on_finished(self, event):
         if event.request_id in self._tracked:
@@ -410,6 +427,49 @@ class CompletionTracker:
         return chunk, None
 
 
+_NAMED_RATIOS = [(1, 1), (16, 9), (9, 16), (3, 2), (2, 3), (4, 3), (3, 4), (4, 5),
+                 (5, 4), (21, 9), (9, 21), (191, 100), (2, 1), (1, 2), (3, 1), (1, 3)]
+
+
+def parse_size(size) -> tuple[int, int] | None:
+    """'1600x900' (or '1600*900', '1600 x 900') -> (1600, 900); else None."""
+    m = re.match(r"^\s*(\d{2,5})\s*[x×*]\s*(\d{2,5})\s*$", str(size or ""), re.I)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def size_instruction(size) -> str:
+    """The size of an image request in words, or "" for none/auto.
+
+    ``size`` is ``WxH`` or one of square/landscape/portrait. The image tools
+    on these sites make a few fixed sizes (ChatGPT: 1254x1254 square on
+    13 Oct 2026), so the words ask for the orientation and the nearest aspect
+    ratio and keep the subject clear of the edges; the caller crops to the
+    exact pixels afterwards (gen_asset.py does)."""
+    s = str(size or "").strip().lower()
+    if not s or s == "auto":
+        return ""
+    if s in ("square", "landscape", "portrait"):
+        return f"Format: {s} orientation."
+    wh = parse_size(s)
+    if not wh:
+        return ""
+    w, h = wh
+    if abs(w - h) <= max(w, h) * 0.04:
+        orient = "square"
+    else:
+        orient = "landscape" if w > h else "portrait"
+    rw, rh = min(_NAMED_RATIOS, key=lambda r: abs(r[0] / r[1] - w / h))
+    if abs(rw / rh - w / h) > 0.03 * (w / h):
+        from math import gcd
+        g = gcd(w, h)
+        rw, rh = w // g, h // g
+    ratio = "1.91:1" if (rw, rh) == (191, 100) else f"{rw}:{rh}"
+    return (f"Size: the final asset is exactly {w}x{h} pixels, aspect ratio {ratio} "
+            f"({orient}). Make the image {orient} at that aspect ratio, or the "
+            f"closest one the image tool offers, and keep everything important "
+            f"away from the edges so a crop to exactly {w}x{h} loses nothing.")
+
+
 class Provider(ABC):
     # --- declarative config (override per provider) ---
     name: str = ""
@@ -471,6 +531,40 @@ class Provider(ABC):
 
     def new_monitor(self) -> StreamMonitor:
         return StreamMonitor(self.stream_url_fragments, self.ws_url_fragments)
+
+    # ------------------------------------------------------------------
+    # Per-request options (model choice, image requests)
+    # ------------------------------------------------------------------
+    async def prepare_page(self, page, options: dict) -> None:
+        """Called once the fresh chat page is visible, before anything is
+        attached or typed. ``options`` carries ``kind`` ("chat" or "image")
+        and ``variant`` (the request's ``model_variant``, or None). Default:
+        nothing. ChatGPT sets its model picker here and, for an image, reads
+        the site's own image counter, raising ``UsageLimitReached`` when too
+        few are left."""
+
+    async def answered_model(self, page) -> dict:
+        """Which model the site says answered, from its own record of the
+        conversation, read after the answer is in. {} when it cannot tell."""
+        return {}
+
+    def status_extra(self) -> dict:
+        """Extra fields for this provider's /api/status entry."""
+        return {}
+
+    def image_prompt(self, prompt: str, size: str | None = None,
+                     background: str | None = None) -> str:
+        """The prompt an image request types: the caller's words, then the
+        size and background asked for, in words, since the sites' image
+        tools take them from the conversation."""
+        lines = [prompt.strip()]
+        sized = size_instruction(size)
+        if sized:
+            lines.append(sized)
+        if (background or "").strip().lower() == "transparent":
+            lines.append("Background: transparent (a PNG with an alpha channel), "
+                         "with no backdrop, floor or shadow plate behind the subject.")
+        return "\n\n".join(lines)
 
     # ------------------------------------------------------------------
     # Uploads (generic; see the module docstring for the two mechanisms)
@@ -720,12 +814,49 @@ class Provider(ABC):
         return (f"; the page has no editable element at all (a sign-in or verification "
                 f"wall, or a page that did not load) at {str(st.get('url') or '')[:100]}")
 
-    async def open_and_send(self, browser, prompt: str, attachments: list = None):
+    async def composer_text(self, page) -> str | None:
+        """What the composer holds now, or None when it cannot be read."""
+        try:
+            v = await page.evaluate(
+                "(function(){var e=document.querySelector(%s);"
+                "return e?(e.value!==undefined?e.value:(e.innerText||'')):null;})()"
+                % json.dumps(self.input_selector))
+        except Exception:
+            return None
+        return v if isinstance(v, str) else None
+
+    async def _send_landed(self, page) -> bool | None:
+        """True once the page shows our turn or the composer has emptied,
+        False while neither, None when the provider cannot tell."""
+        turn = await self.has_user_turn(page)
+        if turn:
+            return True
+        left = await self.composer_text(page)
+        if left is not None and not left.strip():
+            return True
+        if turn is None and left is None:
+            return None
+        return False
+
+    async def _click_send(self, page) -> bool:
+        for sel in self.send_selectors:
+            try:
+                btn = await page.select(sel, timeout=3)
+                if btn:
+                    await btn.click()
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def open_and_send(self, browser, prompt: str, attachments: list = None,
+                            options: dict | None = None):
         """Open a fresh chat, attach any input images, type the prompt, submit.
         Returns (page, monitor).
 
         Generic across providers that use a contenteditable/textarea composer
         plus a send button. Override only if a site needs something special.
+        ``options`` goes to ``prepare_page`` (model choice, request kind).
         """
         page = await browser.get(self.chat_url)
         monitor = self.new_monitor()
@@ -734,6 +865,9 @@ class Provider(ABC):
         logger.info(f"[{self.name}] waiting for page to load...")
         await asyncio.sleep(self.load_wait)
         await self.ensure_visible(page)
+        # The caller's own dict, so what prepare_page notes (ChatGPT: the
+        # picker reading) reaches the caller.
+        await self.prepare_page(page, options if options is not None else {})
 
         if attachments:
             if not self.supports_upload:
@@ -761,18 +895,31 @@ class Provider(ABC):
         if attachments:
             await self.wait_uploads_ready(page, len(attachments))
 
-        sent = False
-        for sel in self.send_selectors:
-            try:
-                btn = await page.select(sel, timeout=3)
-                if btn:
-                    await btn.click()
-                    sent = True
-                    break
-            except Exception:
-                continue
-        if not sent:
+        if not await self._click_send(page):
             await input_box.send_keys("\n")
+
+        # A click can land while the page re-renders the button and do nothing
+        # (13 Oct 2026, ChatGPT: the prompt sat in the composer, the drive
+        # failed at "nostart" after 60 s, and the site kept the prompt as a
+        # draft). Confirm the send; if neither our turn nor an empty composer
+        # shows within a few seconds, click once more, then try Enter.
+        for retry in ("click", "enter", None):
+            landed = None
+            for _ in range(8):
+                await asyncio.sleep(0.75)
+                landed = await self._send_landed(page)
+                if landed is not False:
+                    break
+            if landed is not False or retry is None:
+                break
+            logger.warning(f"[{self.name}] the prompt is still in the composer after "
+                           f"sending; trying the send again ({retry})")
+            if retry == "click" and await self._click_send(page):
+                continue
+            try:
+                await input_box.send_keys("\n")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Enter fallback failed: {e}")
 
         return page, monitor
 
