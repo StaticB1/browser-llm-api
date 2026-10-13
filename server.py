@@ -20,7 +20,7 @@ Endpoints:
 Usage:
   python server.py            # listens on 0.0.0.0:8081
 
-OpenClaw ebenworks.json:
+Example provider entry for an OpenAI-compatible client:
   {
     "models": {
       "providers": {
