@@ -1,0 +1,16 @@
+name: Feature request
+description: Something the project should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: The task you are trying to do and where the project falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+      description: Optional. An API field, a command, a dashboard change.

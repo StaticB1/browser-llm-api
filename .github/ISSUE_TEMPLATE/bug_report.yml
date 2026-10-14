@@ -1,0 +1,41 @@
+name: Bug report
+description: Something does not work as the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not paste API keys, cookies, or private conversation text.
+        For a security problem, use a private security advisory instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include the exact error text.
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options: [chatgpt-browser, gemini-browser, both, not provider-specific]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `browser-llm version`, or the version at /version
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log
+      description: The lines around the failure, from `journalctl --user -u browser-llm-api` or the terminal running the server.
+      render: text
+  - type: textarea
+    id: page
+    attributes:
+      label: What the page showed
+      description: For empty answers or "input box not found", say whether the site's page showed a sign-in wall, a changed layout, or the answer itself.
