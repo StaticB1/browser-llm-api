@@ -6,13 +6,20 @@ Working instructions for this repository.
 
 Drives a **chat web UI through an automated Chrome browser**
 ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and exposes it as an
-**OpenAI-compatible HTTP API** — chat completions, image generation, **and image input** (vision +
-image-to-image). It uses a logged-in web session stored in a local Chrome profile,
-with **no official API key** for either backend. Prompts are typed into the page, input images are
-uploaded through the site's own file picker, and answers (text and generated images) are scraped
-back out of the DOM.
+**OpenAI-compatible HTTP API**: chat completions, image generation, and image input (vision +
+image-to-image), plus design tools built on ChatGPT's image tool. It uses a logged-in web session
+stored in a local Chrome profile, with **no official API key** for either backend. Prompts are typed
+into the page, input images are uploaded through the site's own file picker, and answers (text and
+generated images) are read back out of the DOM.
 
-A **web dashboard** (`webui/index.html`, single file, no build step) is served at
+**This install's own facts** (who decided what, its drop-ins, its LAN address, where the clone
+lives on this machine and why its old path is a symlink) are in **`CLAUDE.local.md`**, which is
+gitignored and loaded alongside this file. Read it before changing anything about the running
+service. This file stays generic, because the repository is public.
+
+@CLAUDE.local.md
+
+A **web dashboard** (`browser_llm/webui/index.html`, single file, no build step) is served at
 `http://localhost:8081/`. Layout and colour follow the conventions people know from ChatGPT: a
 chat-history sidebar, one centred reading column, plain assistant prose, grey user bubbles and a
 rounded composer. Four views, switched from the sidebar: Chat, Create image (generation and
@@ -41,7 +48,7 @@ make the file binary to grep and is invalid in HTML source. A rule sets
 attribute and the top-bar buttons stay visible with the sidebar open. Streaming uses an
 `AbortController`, so the send button becomes a stop button mid-answer.
 
-There is also an **embeddable chat widget** (`webui/widget.js`, served at `/widget.js`): a
+There is also an **embeddable chat widget** (`browser_llm/webui/widget.js`, served at `/widget.js`): a
 self-contained, Shadow-DOM-isolated floating chat bubble that any other page on the LAN can add with
 `<script src="http://<host>:8081/widget.js"></script>`. It auto-discovers this server as its API base
 from its own script URL (CORS is already open) and streams from `/v1/chat/completions`. Config via
@@ -60,225 +67,124 @@ Two providers, selected per-request by the OpenAI **`model`** field:
 
 | model | site | profile | images out | images in |
 |-------|------|---------|------------|-----------|
-| `chatgpt-browser` | chatgpt.com | `chatgpt_profile/` | yes, the image provider | yes (verified) |
+| `chatgpt-browser` | chatgpt.com | `chatgpt_profile/` | yes, the default image provider | yes (verified) |
 | `gemini-browser` | gemini.google.com | `gemini_profile/` | only if `IMAGE_PROVIDERS` names it | yes (chooser path) |
 
-Unknown/absent `model` → `DEFAULT_PROVIDER` (env, default `chatgpt-browser` since 13 Oct 2026).
-`IMAGE_PROVIDERS` (comma list; unset = every provider that can draw) gates image requests; others
-get 403.
-
-**Images must not use Gemini on this install (Eben's order, 13 Oct 2026, EBE-2054):** he paid for
-ChatGPT Plus and said "use gpt images the best as much as u can. Stop using gemini now." The
-service's drop-in `~/.config/systemd/user/browser-llm-api.service.d/30-chatgpt-plus.conf` sets
-`DEFAULT_PROVIDER=chatgpt-browser`, `IMAGE_PROVIDERS=chatgpt-browser`, `CHATGPT_MODEL=GPT-6`,
-`CHATGPT_EFFORT=high`, `CHATGPT_IMAGE_RESERVE=10` and `BROWSER_RECYCLE_AFTER_IMAGES=8`. Gemini
-stays available by name for text. The Plus limits, measured, are in README, "ChatGPT Plus limits".
+Unknown/absent `model` → `DEFAULT_PROVIDER` (default `chatgpt-browser`). `IMAGE_PROVIDERS` (comma
+list; unset = every provider that can draw) gates image requests; others get 403.
 
 This is inherently **fragile**: each provider depends on its site's live DOM/selectors, and ChatGPT
 additionally sits behind Cloudflare/anti-bot. A UI change can silently break extraction or submission.
 
-## Where the clone lives (2026-08-11)
+**Scope (2.0).** One person's or team's signed-in sessions on Linux, one request at a time per
+provider. Forwarding a model to another install (`REMOTE_PROVIDERS`) was removed in 2.0; another
+machine calls the API directly with `BROWSER_LLM_API_KEY`. Don't bring it back without a decision.
+
+## Layout (2.0)
 
 ```
-/home/eben/Downloads/Ebenworks (EW)/Open Source Projects/browser-llm-api   ← real directory
-/home/eben/Downloads/browser llm api                                       ← symlink to it
+browser_llm/                 # THE PACKAGE. Imports inside it are relative (from . import x).
+  __init__.py                #   loads .env FIRST (config.load_env), then exposes __version__.
+                             #   Every module reads env at import time, so the file must be
+                             #   applied before any submodule imports; that is why it is here.
+  __main__.py                #   python -m browser_llm == the browser-llm command.
+  cli.py                     #   `browser-llm serve|login|ask|image|design|mcp|health|version`.
+                             #   Dispatches to each module's main() with sys.argv set.
+  config.py                  #   .env loading (environment wins) and env(new, *old) for the
+                             #   2.0 names: BROWSER_LLM_IMAGE_DIR (was GEMINI_IMAGE_DIR/IMAGE_DIR),
+                             #   BROWSER_LLM_PUBLIC_URL (was GEMINI_PUBLIC_URL). Stdlib only.
+  _version.py                #   single source of truth for __version__ (pyproject reads it).
+  server.py                  #   FastAPI app, port 8081. Model→provider router, the generic
+                             #   completion loop, image persistence, attachment materialization +
+                             #   local-path policy, CDP patch. Serves "/" + /widget.js + /demo +
+                             #   /version + /api/status (+ per-provider telemetry) + /api/gallery +
+                             #   /api/design/kinds, /v1/images/edits (multipart or JSON), and the
+                             #   account-history endpoints behind _require_trusted +
+                             #   _history_provider. _gallery_target is the ONLY thing allowed to
+                             #   name a file for unlink. BROWSER_LLM_PREWARM=0 starts no browser.
+  authz.py                   #   stdlib-only access control: loopback + origin trust, which
+                             #   paths need the key. Separate so tests import it without the
+                             #   server's side effects.
+  providers/
+    __init__.py              #   PROVIDERS registry, get_provider, DEFAULT_PROVIDER, IMAGE_PROVIDERS
+    limits.py                #   UsageLimitReached, quota_refusal, refusal_from_message → HTTP 429
+    base.py                  #   Provider ABC, StreamMonitor, CompletionTracker, generic
+                             #   open_and_send, upload machinery (file input ranked: multi-file
+                             #   first, camera last; CDP chooser fallback), patch_cdp, RateLimited,
+                             #   history hooks (session_tab reuses the ONE tab).
+    gemini.py                #   shadow-DOM extraction, blob→b64 images, "Upload & tools" chooser
+    chatgpt.py               #   plain-DOM extraction; selector LISTS at the top (both page layouts);
+                             #   Create image mode; model picker; usage counter; history layer as
+                             #   in-page JS against the site's backend-api.
+  design.py                  #   KINDS (13) + compose() (STRUCTURAL rules, no style words);
+                             #   DIRECTION (--direction) per group; run_set() (one image per item,
+                             #   first + previous as references, manifest.json, resume, --redo,
+                             #   --directions/--pick, --lock, quota_plan refusal, preview.png);
+                             #   extract_tokens() and review() (JSON from ChatGPT). The prompt part
+                             #   is stdlib-only because server.py imports it.
+  gen_asset.py               #   one asset: POST generations/edits, then Pillow shaping (crop,
+                             #   favicon, knockout only if no alpha, --upscale). Raises
+                             #   GenAssetError (code 3 = limit), NEVER SystemExit: the MCP tool runs
+                             #   it on a worker thread, where SystemExit killed the thread silently.
+                             #   render_full() is shared by main() and the MCP tool; keep it so.
+                             #   Falls back to sys.path imports when copied alone into a project.
+  client.py                  #   stdlib client: ask(prompt, images=, ephemeral=, model_variant=)
+  mcp_server.py              #   MCP stdio JSON-RPC (no `mcp` package): ask, generate_image,
+                             #   design_set, design_tokens, design_review, list_models, health.
+                             #   Thin client of the HTTP API. tools/call on worker threads; main()
+                             #   joins them on EOF. stdout carries protocol frames ONLY: every log
+                             #   line goes to stderr or the client sees corrupt JSON.
+  login.py                   #   sign-in helper; cli() is `browser-llm login <provider>`.
+  webui/                     #   index.html (dashboard), widget.js, widget-demo.html. Shipped in
+                             #   the wheel (package-data); server finds them next to server.py.
+scripts/                     # each cd's to the checkout root ("$(dirname "$0")/..") first.
+  serve.sh                   #   venv python + display auto-detect; runs `python -m browser_llm
+                             #   serve`. Calls ensure-venv.sh and REFUSES to start without a venv;
+                             #   never falls back to system python3. Clears profile Singleton locks.
+  ensure-venv.sh             #   build/repair ./venv, pip install -e .; `check` = read-only probe.
+                             #   Every message to stderr (mcp.sh's stdout is the protocol channel).
+  mcp.sh                     #   ensure-venv, then exec python -m browser_llm mcp.
+  healthcheck.sh             #   watchdog: venv integrity + liveness + a daily model ping.
+  install-service.sh         #   venv + units from deploy/systemd/ + linger.
+  mode.sh                    #   service display: headless (Xvfb) / visible.
+deploy/systemd/              # browser-llm-api.service.template, browser-llm-health.{service.template,timer}
+desktop/                     # GTK3 tray app on SYSTEM python3 (PyGObject), stdlib only, a thin HTTP
+                             #   client. GTK3 on purpose: AppIndicator is GTK3-only.
+docs/                        # api, images-and-design, agent-image-guide, mcp, web-ui,
+                             #   configuration, running, architecture, quickstart, releasing,
+                             #   design-upgrade (the 0.5.0 audit and live test), img/
+tests/                       # unit tests, no browser, no network (see "Tests" below)
+gen_asset.py design.py client.py serve.sh mcp.sh healthcheck.sh
+                             # FORWARDING FILES. Outside callers run these by path (systemd units
+                             #   installed before 2.0, Claude's MCP config, skills, other repos'
+                             #   scripts, a co-maintainer's machine). Do not delete or "tidy" them;
+                             #   they are not in the wheel.
+CHANGELOG.md CONTRIBUTING.md SECURITY.md LICENSE README.md .env.example
+.github/                     # ci.yml (lint, tests, editable + wheel install, MCP handshake),
+                             #   issue and PR templates. Actions has been billing-locked on the
+                             #   owner's account since 2026-08-18; run the steps by hand.
+*_profile/                   # per-provider Chrome user-data dirs. Gitignored. NEVER move or commit:
+                             #   moving one signs that account out.
+.env CLAUDE.local.md         # gitignored, machine-local.
 ```
 
-Filed with the other Ebenworks MIT repos. The symlink at the old path is **permanent, not a
-migration leftover**: this repo is the image-asset tool every Claude Code session on the box uses, so
-its old path is quoted in other repos' scripts, in skill files and in conversation memories that
-nothing will ever rewrite. Deleting the symlink breaks those silently. Everything that could be
-repointed *was* — the systemd unit, the desktop launcher, the `design-with-chatgpt` skill,
-`statosports/scripts/generate-assets.sh`, `fsms_algorithm2, 3/docs/analysis/scripts/gen_figs*.sh`,
-`gpt_slides.py` — plus the Claude Code project key
-(`-home-eben-Downloads-Ebenworks--EW--Open-Source-Projects-browser-llm-api`, with the old key
-symlinked to it so transcripts and memories stayed in one place).
+**Tests:** `./venv/bin/python -m unittest discover -s tests` (no browser). test_completion_tracker,
+test_authz (key gating, origin trust), test_attachments (specs, limits, local-path + origin policy),
+test_mcp (framing, tools/list contract, error mapping, off-the-read-loop dispatch), test_history
+(trusted-caller gating, 501s, _gallery_target refusals), test_visibility (occlusion flag,
+ensure_visible), test_chatgpt_page (every selector list keeps both layouts), test_plus (limits →
+429, model_variant, size words, IMAGE_PROVIDERS 403, gen_asset sizes/variants/exit 3, draft
+replaced not appended), test_design (kinds' words with no style word unless --direction, set
+references/resume/redo/directions/pick, quota, tokens/review parsing, server kind fields,
+gen_asset --kind/--upscale, Create image mode, file-input ranking under node, partial attach,
+failed answer read logged), test_v2 (.env, renamed settings, the command). Ruff selects E/F/W only
+(bugbear's B904 would touch eight exception handlers for no behaviour change); keep it clean.
 
-Both paths contain a space, so **quote every path** in scripts and unit files, and note that a plain
-`#!` shebang cannot hold one: the venv's console scripts (`venv/bin/pip`, `uvicorn`, …) use pip's
-`#!/bin/sh` + `'''exec'` wrapper form instead. Don't "simplify" them back to a bare shebang.
+**Deps live in `./venv`** (system Python is PEP-668): `scripts/ensure-venv.sh` builds it and installs
+the package editable. Run with `./serve.sh` (foreground) or `scripts/install-service.sh` (service).
+Needs Google Chrome and the `xvfb` package. Python 3.12. Pillow is a core dependency since 2.0.
 
-## Layout
-
-```
-server.py            # FastAPI app, port 8081. Model→provider router, the generic
-                     #   completion loop, generic image persistence, attachment
-                     #   (image-input) materialization + local-path policy, CDP patch.
-                     #   main() is the `browser-llm` console entry point
-                     #   (BROWSER_LLM_HOST/PORT). Serves "/" + /widget.js + /demo +
-                     #   /version + /api/status (incl. per-provider telemetry:
-                     #   _metrics + _record_request) + /api/gallery, and
-                     #   /v1/images/edits (multipart or JSON). Also the account-history
-                     #   endpoints (/api/history, /api/conversation/{id},
-                     #   /api/conversations/delete, /api/gallery/delete) behind
-                     #   _require_trusted + _history_provider, and _gallery_target,
-                     #   which is the only thing allowed to name a file for unlink.
-_version.py          # single source of truth for __version__ (read by pyproject + server).
-pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm` +
-                     #   `browser-llm-mcp` entry points, and the ruff config.
-                     #   Flat layout — install editable from a clone (`pip install -e .`).
-                     #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
-                     #   exception handlers in server.py for no behaviour change. The repo
-                     #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 245 unit tests + an editable install + a live MCP
-                     #   handshake, on every push and PR. No browser, no network, no secrets,
-                     #   so a green build means the pure logic holds, NOT that the sites still
-                     #   scrape. Nothing here can catch a DOM change; only a real request can.
-SECURITY.md          # threat model + how to report. Both origin-trust holes (2026-08-11
-                     #   cross-origin, 2026-08-20 opaque `Origin: null`) are written up
-                     #   there as well as in the gotchas below.
-LICENSE              # MIT.
-README.md            # project overview / usage.
-QUICKSTART.md        # fast-path setup guide.
-authz.py             # stdlib-only access control + remote-upstream config: loopback + origin trust,
-                     #   API-key gating rules (which paths need the key), REMOTE_PROVIDERS parsing.
-                     #   Separate from server.py so tests import it without server's side effects.
-client.py            # tiny stdlib-only CLI/importable client (no deps): `./client.py "prompt"`
-                     #   or `from client import ask`. `--image FILE` (repeatable) sends
-                     #   images with the prompt. Env BROWSER_LLM_API/BROWSER_LLM_MODEL/
-                     #   BROWSER_LLM_API_KEY.
-mode.sh              # toggle the systemd service's Chrome visibility (headless/visible) via a
-                     #   drop-in override: `./mode.sh headless|visible`; `./mode.sh` shows current mode.
-webui/index.html     # web dashboard (single file, no build step): ChatGPT-shaped shell with
-                     #   a localStorage chat history sidebar (search, rename, delete,
-                     #   delete-all, export), streaming chat with a stop button and image
-                     #   attachments (click/paste/drop), image gen + image-to-image with
-                     #   elapsed timer, gallery, Server view (telemetry + embed snippet).
-                     #   Also imports the account's own conversations (kebab > Import
-                     #   history, stubs + lazy body load), multi-select for chats and for
-                     #   gallery images, and a delete that cascades to the saved images
-                     #   and the real conversation.
-webui/widget.js      # embeddable floating chat bubble (Shadow-DOM isolated, no build step);
-                     #   served at /widget.js; auto-discovers API base from its own <script src>.
-                     #   Image attach (click/paste/drop), data-attach="0" hides it; thread
-                     #   remembered per API base, data-persist="0" turns that off.
-webui/widget-demo.html # standalone demo page (served at /demo) embedding the widget.
-desktop/               # NATIVE Linux desktop app + tray widget (GTK3), a thin client of the
-                       #   HTTP API — NOT browser automation. Runs on SYSTEM python3 (has
-                       #   PyGObject); stdlib only, no venv/pip. GTK3 (not 4) on purpose:
-                       #   AppIndicator (the tray) is GTK3-only and can't share a process
-                       #   with GTK4. The tray widget's job: generate image assets for the
-                       #   focused VS Code project.
-  browser_llm_desktop.py # whole app: Api (stdlib urllib); ProjectManager (reads open VS Code
-                       #   windows from ~/.config/Code/User/globalStorage/storage.json, resolves
-                       #   the focused window via xdotool, auto-follows focus, remembers a save
-                       #   folder per project in ~/.local/share/browser-llm-desktop/projects.json);
-                       #   ChatStore (single SHARED + persisted conversation store — popup and
-                       #   window are both views, so enlarging never loses the chat; chats.json);
-                       #   ProjectImagePanel (gen or 📎 image-to-image -> save into
-                       #   project, pick&remember folder);
-                       #   ChatPanel, GalleryPanel/ImageViewer, StatusPanel, MainWindow (Chat/
-                       #   Images/Gallery/Status + History menu), QuickChatWindow (Image|Chat
-                       #   tabs), TrayApp.
-  icon.svg run.sh install-desktop.sh browser-llm-desktop.desktop.in README.md
-tests/               # unit tests (no browser needed):
-                     #   ./venv/bin/python -m unittest discover -s tests
-                     #   test_completion_tracker.py (done-decision incl. status
-                     #   placeholders), test_authz.py (key gating, origin trust,
-                     #   remote parsing), test_attachments.py (attachment specs/
-                     #   limits/local-path + origin policy/remote inlining),
-                     #   test_mcp.py (JSON-RPC framing, tools/list contract, error
-                     #   mapping, off-the-read-loop dispatch), test_history.py
-                     #   (trusted-caller gating, history-provider 501s, _gallery_target
-                     #   traversal/extension/symlink refusals, conversation-id shape),
-                     #   test_visibility.py (the occlusion flag in CHROME_ARGS,
-                     #   ensure_visible's restore-or-refuse, has_user_turn),
-                     #   test_chatgpt_page.py (every ChatGPT selector list keeps both
-                     #   layouts of the 11 Oct 2026 redesign; composer_hint),
-                     #   test_plus.py (EBE-2054: limits counter + refusal text → 429,
-                     #   model_variant/effort parsing, size words, pixel sizes,
-                     #   IMAGE_PROVIDERS 403, gen_asset size/original/variants/exit 3,
-                     #   draft replaced not appended, request bodies asked for),
-                     #   test_design.py (14 Oct 2026: every kind's words and no style
-                     #   word without --direction, set references/resume/redo,
-                     #   directions + pick, quota refusal, limit part-way, tokens and
-                     #   review parsing, the server's kind fields, gen_asset --kind and
-                     #   --upscale, the Create image mode with a stand-in page,
-                     #   file-input ranking run under node, an input that takes
-                     #   some of the files, a failed answer read logged)
-providers/
-  __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
-                     #   + IMAGE_PROVIDERS
-  limits.py          # UsageLimitReached, quota_refusal (site counter), parse_limit_message
-                     #   / refusal_from_message (site refusal text) → HTTP 429
-  base.py            # Provider ABC, StreamMonitor, CompletionTracker (done-decision),
-                     #   generic open_and_send(), generic file-upload/attach machinery
-                     #   (file input + CDP file-chooser interception), patch_cdp(),
-                     #   RateLimited, and the history hooks: session_tab() (reuses the
-                     #   ONE tab), conversation_id, list_conversations,
-                     #   fetch_conversation, delete_conversation, discard_conversation
-  gemini.py          # GeminiProvider — shadow-DOM extraction, blob→b64 images,
-                     #   upload via the "Upload & tools" menu + chooser interception
-  chatgpt.py         # ChatGPTProvider — plain-DOM extraction, oaiusercontent/blob images,
-                     #   upload via a hidden file input; excludes INPUT images
-                     #   from generated-image scans; shimmer-aware text/generating reads.
-                     #   Also the history layer, all of it in-page JS against the site's
-                     #   own backend-api: _LIST_JS, _ONE_JS, _CONV_ID_JS, _DELETE_JS
-login.py             # generic re-auth helper:  python login.py gemini|chatgpt
-mcp_server.py        # MCP stdio server (JSON-RPC 2.0, stdlib only, no `mcp` package):
-                     #   tools ask / generate_image / design_set / design_tokens /
-                     #   design_review / list_models / health. Thin client of
-                     #   the HTTP API — imports client.ask and gen_asset.render rather than
-                     #   reimplementing them. tools/call runs on a worker thread and main()
-                     #   joins in-flight threads on EOF (a dropped stdin must not lose a
-                     #   reply mid-image-gen). stdout carries protocol frames ONLY — every
-                     #   log line goes to stderr or the client sees corrupt JSON.
-                     #   Console entry point `browser-llm-mcp`. Tests: tests/test_mcp.py.
-gen_asset.py         # CLI wrapper: POST /v1/images/generations (model chatgpt-browser unless
-                     #   --model / BROWSER_LLM_IMAGE_MODEL; NOT the server's DEFAULT_PROVIDER),
-                     #   or /v1/images/edits with `--ref FILE` (image-to-image restyle), sending
-                     #   size, background and model_variant; then Pillow post-process (exact
-                     #   resize/crop, favicon, knockout only if no alpha came back) → asset file.
-                     #   --keep-original, --variants N (+ contact sheet). Raises GenAssetError
-                     #   (code 3 = usage limit, from HTTP 429), never SystemExit: the MCP tool
-                     #   runs it on a worker thread, where SystemExit killed the thread silently.
-                     #   `render()` is the whole wrapper as one call (generate → shape →
-                     #   write → return path); main() is just argparse over it, and
-                     #   mcp_server calls the same function. Keep them sharing it.
-design.py            # design with the image tool (14 Oct 2026). KINDS (13: section, page,
-                     #   hero-image, og-image, mobile-screen, component, brand-board, icon,
-                     #   logo-concept, illustration, diagram, texture, avatar) and compose(),
-                     #   which writes a kind's STRUCTURAL rules around the brief, with no
-                     #   style words; DIRECTION (--direction) adds an art-direction block per
-                     #   group, condensed from the imagegen-frontend-web, image-to-code,
-                     #   imagegen-frontend-mobile and brandkit skills; edit both together.
-                     #   The prompt part is stdlib-only because server.py imports it.
-                     #   run_set(): one image per section/screen, each with the set's first
-                     #   image + the one before as references; manifest.json after every
-                     #   image (resume, --redo), --directions N then --pick K, --lock, the
-                     #   quota_plan() refusal (code 3), preview.png. extract_tokens() and
-                     #   review() are ChatGPT text calls over images that must answer JSON.
-                     #   Console entry point `browser-llm-design`.
-AGENT_IMAGE_GUIDE.md # instructions to hand an AI agent for generating site image assets
-gemini_bot.py        # standalone single-prompt prototype (Gemini only). UNCHANGED, not part of the server.
-serve.sh             # run the server: venv python + display auto-detect (real $DISPLAY else Xvfb).
-                     #   Calls ensure-venv.sh first and REFUSES to start without a
-                     #   working venv — it never falls back to the system python3.
-ensure-venv.sh       # guarantee ./venv exists and imports the deps; rebuilds it if not.
-                     #   `check` subcommand is the read-only probe (exit 1 = broken).
-                     #   Every message goes to stderr, because mcp.sh's stdout is the
-                     #   MCP protocol channel.
-mcp.sh               # MCP stdio entry point: ensure-venv.sh, then exec mcp_server.py.
-                     #   ~/.claude.json points at THIS, not at venv/bin/python.
-healthcheck.sh       # watchdog: venv integrity + liveness + a daily model ping.
-                     #   Runs every 10 min from browser-llm-health.timer (a systemd
-                     #   --user unit, generated by hand, not by install-service.sh).
-                     #   Alerts are pluggable and off by default (BLM_ALERT_DIR
-                     #   writes a file into a queue folder, BLM_ALERT_CMD runs a
-                     #   command, notify-send is used when present). On this box a
-                     #   drop-in sets BLM_ALERT_DIR; that path is not in the repo.
-install-service.sh   # venv + deps + generate the systemd --user unit from the template
-browser-llm-api.service.template  # unit template; install-service.sh substitutes the clone path
-*_profile/           # per-provider Chrome user-data dirs. Gitignored. Never commit.
-```
-
-**Deps are installed in a local venv at `./venv`** (system Python is PEP-668
-externally-managed, so a venv is required): `./venv/bin/pip install -r requirements.txt`.
-Run the server with `./serve.sh` (foreground) or `./install-service.sh` (background
-service); both use `./venv/bin/python`. Also needs Google Chrome and the system `xvfb` package. Python 3.12.
-Pillow (in requirements.txt) is only needed by `gen_asset.py`.
-
-## The `Provider` abstraction (`providers/base.py`)
+## The `Provider` abstraction (`browser_llm/providers/base.py`)
 
 Adding/altering a backend means editing a provider, not `server.py`. A provider is mostly
 declarative — class attributes `name`, `chat_url`, `profile_dir`, `stream_url_fragments` (CDP
@@ -306,7 +212,7 @@ Everything downstream (`_stream_completion`, `run_chat`, `drive_once`, image per
 `StreamMonitor`, and the `CompletionTracker` that decides *when an answer is done*) is **generic
 and provider-parameterized** in `server.py`/`base.py`.
 
-## How a request flows (`server.py`)
+## How a request flows (`browser_llm/server.py`)
 
 1. `get_provider(req.model)` picks the provider.
 2. **One persistent Chrome per provider** (`_browsers[name]`, started lazily) with that provider's profile.
@@ -333,11 +239,9 @@ files, and the provider uploads them through the site's own file picker before s
   (sniffing the real extension from magic bytes) and deletes them after the drive; caller-supplied
   paths are used in place and never deleted. `MAX_ATTACHMENTS` (6), `MAX_ATTACHMENT_MB` (20).
 - **Local paths need a loopback *and* same-origin caller** (`_client_may_send_paths`): a keyed LAN
-  client could otherwise make the server upload any file off this box to ChatGPT — and so could any
+  client could otherwise make the server upload any file off the server's machine to ChatGPT — and so could any
   website open in the operator's browser, since CORS is wide open and a drive-by POST arrives from
   127.0.0.1 (see the origin gotcha below). `ALLOW_REMOTE_FILE_PATHS=1` opts out of both checks.
-  Proxied requests inline local paths as `data:` URLs (`_inline_paths_for_remote`) — a path is
-  meaningless on the upstream's filesystem.
 - **`_build_prompt` now returns `(prompt, specs)`** and annotates multi-turn text with
   `[N attached images]`, since every image lands in one composer message and the model otherwise
   can't tell which turn an image belonged to.
@@ -385,28 +289,29 @@ files, and the provider uploads them through the site's own file picker before s
 - **Storage** (`_persist`): images with inline `b64` are written to a **per-provider subfolder** of the base dir (`<IMAGE_DIR>/<provider>/<provider>_<ts>_<hash>.ext`, e.g. `chatgpt/…` vs `gemini/…`) and served at `/images/<provider>/<file>` (mounted `StaticFiles` serves nested dirs); the returned link uses `GEMINI_PUBLIC_URL`. The per-provider slug (`_provider_slug`) stops one provider's images from being mislabeled as another's. Remote-only images keep their `src`. If the dir isn't writable, saving is skipped (`_SAVE_ENABLED=False`).
 - **In chat**: `_compose()` returns image-only markdown when `image_text_is_caption` is False (Gemini — its image-prompt prose is internal thinking), or text + images when True (ChatGPT — real caption).
 - **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?, width, height, mime, revised_prompt?}], "model_used"}`. `n` ignored; `size`, `background` and `model_variant` are honoured (`Provider.image_prompt` writes size and background into the prompt in words, ChatGPT's adds "Use the image generation tool to create this image."; no style words, per the design-with-chatgpt rule). **501** if the provider doesn't support images, **403** if `IMAGE_PROVIDERS` leaves it out, **429** with `Retry-After` on a usage limit (`providers/limits.py`), **502** if it returned none otherwise (the detail quotes the page).
-- **Usage limits** (`providers/limits.py`, EBE-2054). Before an image, `ChatGPTProvider.prepare_page` POSTs `/backend-api/conversation/init` from inside the page and reads `limits_progress`; `quota_refusal` raises `UsageLimitReached` when `image_gen.remaining <= CHATGPT_IMAGE_RESERVE` or the feature is in `blocked_features`. After a request with no image, `refusal_from_message` matches ChatGPT's second-person refusal wording ("You've hit the Plus plan limit for image generation ... resets in 23 hours", "You're generating images too quickly ... wait for 3 minutes") and works out the reset. Both become 429. On 13 Oct 2026 the counter read 120 (24 h window) and did not drop after 7 images, so the text parser is the backstop that will actually fire.
+- **Usage limits** (`providers/limits.py`). Before an image, `ChatGPTProvider.prepare_page` POSTs `/backend-api/conversation/init` from inside the page and reads `limits_progress`; `quota_refusal` raises `UsageLimitReached` when `image_gen.remaining <= CHATGPT_IMAGE_RESERVE` or the feature is in `blocked_features`. After a request with no image, `refusal_from_message` matches ChatGPT's second-person refusal wording ("You've hit the Plus plan limit for image generation ... resets in 23 hours", "You're generating images too quickly ... wait for 3 minutes") and works out the reset. Both become 429. On 13 Oct 2026 the counter read 120 (24 h window) and did not drop after 7 images, so the text parser is the backstop that will actually fire.
 
 ## Design kinds, sets, tokens and review (added 2026-10-14)
 
-Eben asked for image generation "like Codex, Astra etc." for frontend, UI, UX and design work. What
-Codex does with GPT-6 Astra and Images 2.0 is image-first: one large readable image per section,
-references for consistency, then build and compare screenshots. This repo now does the same through
-the browser session; docs/design-upgrade.md is the audit, the plan and the live test. Eben decided
-each choice himself (three question rounds, 14 Oct 2026); the main ones:
+Image-first design, as Codex does with GPT-6 Astra and Images 2.0: one large readable image per
+section, references for consistency, then build and compare screenshots. docs/design-upgrade.md is
+the audit, the decisions and the live test; docs/images-and-design.md is the user guide.
 
 - **Prompts are structural by default and art-directed on request.** No style words unless
-  `--direction` (his CLAUDE.md bans steering adjectives; the skills he installed use them, so he
-  chose both, switchable). tests/test_design.py checks the word list against every kind.
+  `--direction`. tests/test_design.py checks a list of style words against every kind; a kind
+  that needs one is a design change, not a fix.
 - **Consistency comes from reference images, not one long conversation.** Each item is a fresh
-  chat with the first item and the previous one attached (6 attachments at most). Continuing one
-  thread so the image tool sees its own images is a possible phase 2; it needs a drive that opens
-  an existing conversation and ignores its earlier images, which the one-tab rule makes delicate.
-- **Upscaling is Pillow only** (Lanczos + unsharp mask), by his choice; no model download.
-- **A set refuses when it does not fit the day's images** unless `--partial`.
+  chat with the first item and the previous one attached (6 attachments at most), and the prompt
+  says not to repeat the references' components, photographs or text (the first live run copied
+  the hero's search bar into section 2 without that line). Continuing one thread so the image tool
+  sees its own images is a possible later step; it needs a drive that opens an existing
+  conversation and ignores its earlier images, which the one-tab rule makes delicate.
+- **Upscaling is Pillow only** (Lanczos + unsharp mask); no model download.
+- **A set refuses when it does not fit the day's images** unless `--partial`; the counter
+  overstates, so the site's 429 stays the real stop, and a stopped set resumes.
 - `/v1/images/*` take `kind`, `direction`, `theme`, `platform`, `system`, `copy_space` and answer
-  `prompt_sent` and `image_tool`. A kind is composed BEFORE a remote proxy, so an upstream that
-  predates `kind` still gets the full words.
+  `prompt_sent` and `image_tool`. Tokens ask ChatGPT for JSON and hand it colours measured from the
+  pixels; only interface colours belong in the list (photo tones go under imagery).
 
 ## Ephemeral conversations (added 2026-08-20)
 
@@ -451,8 +356,7 @@ generated and the thread on the site.
   short page instead, and `has_more` in the response is derived that way.
 - **Provider support is declared, not assumed:** `Provider.supports_history` (False in `base.py`,
   True for ChatGPT) and `site_origin`. Gemini exposes no readable list, so `/api/history` answers
-  501 and the dashboard hides Import for it. A remote-proxied model also answers 501: the history
-  lives in a browser profile on the upstream box.
+  501 and the dashboard hides Import for it. Forwarded models no longer exist (removed in 2.0).
 - **Deleting a chat cascades**, in the UI's own words on the toast: the local chat, its saved image
   files (`/api/gallery/delete`, matched out of the message text by the `/images/<provider>/<file>`
   paths) and the account's conversation (`/api/conversations/delete`). The confirm dialog names all
@@ -486,54 +390,58 @@ generated and the thread on the site.
 - **These four endpoints are same-origin only** (`_require_trusted`), because they read and delete
   someone's real history. Cross-origin gets 403 with an explanation. See the `Origin: null` gotcha
   below — that one is subtle and was live.
-- **The dashboard sends `ephemeral: false`** on every chat completion. It has to: this box sets
-  `BROWSER_LLM_EPHEMERAL=1` in a systemd drop-in, so without it every chat the dashboard started
+- **The dashboard sends `ephemeral: false`** on every chat completion. It has to: an install can set
+  `BROWSER_LLM_EPHEMERAL=1` for its tooling callers, and without the field every chat the dashboard started
   deleted itself on the site and the returned `conversation_id` pointed at nothing. The id now
   round-trips (`_note_conversation` → the closing SSE chunk / `body["conversation_id"]`) and is what
   makes a cascading delete possible for a chat you just had.
 
 ## Configuration (env vars)
 
+All of them can also come from a `.env` file (config.py; the environment wins). docs/configuration.md
+is the user-facing table; this one carries the reasons.
+
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `DEFAULT_PROVIDER` | `chatgpt-browser` | Provider used when `model` is unknown/absent. `serve.sh` exports the same default (it used to export `gemini-browser`, which beat the code). |
-| `IMAGE_PROVIDERS` | *(every provider that can draw)* | Comma list of providers allowed to make images; others get 403. This install: `chatgpt-browser`. |
+| `IMAGE_PROVIDERS` | *(every provider that can draw)* | Comma list of providers allowed to make images; others get 403. |
 | `CHATGPT_MODEL` | `GPT-6` | Picker row selected before each ChatGPT request. |
 | `CHATGPT_EFFORT` | `high` | Picker power slider: `instant` / `medium` / `high` (aliases fast, standard, extended). |
-| `CHATGPT_IMAGE_RESERVE` | `0` | Images on ChatGPT's own counter that requests here must leave for the account owner (this install: 10). |
+| `CHATGPT_IMAGE_RESERVE` | `0` | Images on ChatGPT's own counter that requests here must leave for the account owner. |
 | `CHATGPT_READ_MODEL` | `1` | Read the conversation record after each answer for `model_used` (one extra GET). |
 | `CHATGPT_IMAGE_TOOL` | `1` | Put the composer in the site's Create image mode before an image request; `0` = words only. |
-| `GEMINI_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images; each provider gets a subfolder (`chatgpt/`, `gemini/`). `IMAGE_DIR` also accepted. |
-| `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
+| `BROWSER_LLM_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images, one subfolder per provider. Pre-2.0 `GEMINI_IMAGE_DIR` / `IMAGE_DIR` still read (config.env logs once). `~` is expanded in code because .env and systemd expand nothing. |
+| `BROWSER_LLM_PUBLIC_URL` | `http://localhost:8081` | Base URL of returned image links. Pre-2.0 `GEMINI_PUBLIC_URL` still read. |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `8` | Recycle a provider's browser after this many image gens. Was 3 for the free plan's renderer bloat; on Plus the renderer stayed at 479-548 MB settled, 754-813 MB peak, over 7 images (13 Oct 2026). |
 | `MAX_ATTACHMENTS` | `6` | Most input images one request may attach. |
 | `MAX_ATTACHMENT_MB` | `20` | Per-attachment size ceiling (data URLs, downloads and local files alike). |
-| `BROWSER_LLM_HOST` | `127.0.0.1` | Interface to bind. Localhost-only by default (2026-08-11) — the server drives logged-in accounts, so LAN exposure is opt-in. This box's systemd override sets `0.0.0.0` explicitly, so the service is unaffected. |
+| `BROWSER_LLM_HOST` | `127.0.0.1` | Interface to bind. Localhost-only by default (2026-08-11): the server drives logged-in accounts, so LAN exposure is opt-in. |
 | `BROWSER_LLM_PORT` | `8081` | Port to bind. |
-| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | Let **non-loopback or cross-origin** clients attach server-side file paths. Off by default — it's a file-read primitive. |
 | `BROWSER_LLM_API_KEY` | *(unset)* | When set, **non-loopback** clients must send it (`Authorization: Bearer …` or `X-Api-Key`) on `/v1/*` and `/api/*`. Localhost stays open; pages/assets (`/`, `/widget.js`, `/images/*`, …) stay public. Makes binding to `0.0.0.0` sane. |
-| `REMOTE_PROVIDERS` | *(unset)* | `model=url[,model=url…]` — proxy those models to **another browser-llm-api instance** instead of a local browser (overrides the local provider of the same name). E.g. a second install without a ChatGPT login sets `chatgpt-browser=http://<host-with-login>:8081`. |
-| `REMOTE_API_KEY` | *(unset)* | Bearer key sent on proxied requests (the upstream's `BROWSER_LLM_API_KEY`). |
+| `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | Let **non-loopback or cross-origin** clients attach server-side file paths. Off by default — it's a file-read primitive. |
 | `BROWSER_LLM_EPHEMERAL` | `0` | Delete the conversation after any chat completion that doesn't set `ephemeral` itself. |
+| `BROWSER_LLM_PREWARM` | `1` | `0` starts no browser at startup: for a second instance (port 8097 works) that must not open Chrome over the service's windows, and for tests. |
+| `BROWSER_LLM_ENV_FILE` / `BROWSER_LLM_NO_DOTENV` | *(unset)* | Read this .env instead / read none. CI sets NO_DOTENV. |
+| `REMOTE_PROVIDERS`, `REMOTE_API_KEY` | — | Removed in 2.0. A server that still sets `REMOTE_PROVIDERS` logs a warning and ignores it. |
 
 ## Running
 
 ```bash
 ./serve.sh                                     # foreground → http://localhost:8081/v1
+./venv/bin/browser-llm health                  # one-screen state; every provider "idle" = safe to restart
 
-# background (systemd --user): venv + generated unit + linger, one command:
-./install-service.sh
+# background (systemd --user): venv + generated units + linger, one command:
+scripts/install-service.sh
 journalctl --user -u browser-llm-api -f        # logs live in the journal, NOT server.log
 
 # the watchdog (venv integrity + liveness + a daily model ping), every 10 min:
 systemctl --user list-timers browser-llm-health.timer
-./healthcheck.sh --deep                        # run it by hand, including the model ping
+scripts/healthcheck.sh --deep                  # run it by hand, including the model ping
 tail ~/.local/state/browser-llm-api/health.log # its log; silent when healthy
 
-# serve.sh auto-detects the display: real $DISPLAY (ChatGPT images work; the service's Xvfb :98
-# counts, measured 13 Oct 2026) else its own xvfb-run.
-# On a headless box, force a real display for ChatGPT image gen:
-DISPLAY=:1 ./serve.sh
+# serve.sh auto-detects the display: a working $DISPLAY (an Xvfb display counts) else its own xvfb-run.
+# a second server that opens no browser (dashboard work next to the service):
+BROWSER_LLM_PREWARM=0 BROWSER_LLM_PORT=8097 ./venv/bin/browser-llm serve
 ```
 
 ## Authentication — the #1 failure mode
@@ -548,48 +456,39 @@ sign-in:
 
 ```bash
 systemctl --user stop browser-llm-api
-DISPLAY=:1 ./venv/bin/python login.py gemini   # or: chatgpt — visible Chrome opens; sign in; auto-closes
+DISPLAY=:1 ./venv/bin/browser-llm login gemini   # or: chatgpt — visible Chrome opens; sign in; auto-closes
 systemctl --user start browser-llm-api
 ```
 
-**Why you must use `login.py`, not a normal Chrome:** `nodriver` launches Chrome with
+**Why you must use the login helper, not a normal Chrome:** `nodriver` launches Chrome with
 `--password-store=basic`, while a normal Chrome uses the system keyring. Cookies written by one
 **cannot be decrypted by the other**. The service's Chrome is also invisible (Xvfb), so you can't
 sign in there — the helper opens a real, visible window in the *same* cookie store.
 
-## Sharing a provider across machines (auth + remote proxying, added 2026-07-13)
+## Access from other machines (API key)
 
 - **Auth model:** localhost is always unauthenticated. With `BROWSER_LLM_API_KEY` set, non-loopback
   clients need the key on `/v1/*` + `/api/*`; pages/assets (`/`, `/ui`, `/widget.js`, `/demo`,
   `/version`, `/images/*`) stay public — image links must work in a bare `<img>`/browser, and the
   filenames are unguessable (uuid hex). CORS preflights (OPTIONS) are exempt — they can't carry auth
-  headers; the real request is still checked. Decision helpers live in `authz.py` (unit-tested,
-  `tests/test_authz.py`); the middleware in `server.py` is registered **after** CORSMiddleware so it
-  runs before it.
-- **Remote proxying:** `REMOTE_PROVIDERS="chatgpt-browser=http://<host>:8081"` +
-  `REMOTE_API_KEY=<upstream key>` makes this install forward that model verbatim to the other
-  instance (httpx, streaming relayed byte-for-byte; ~940s timeout ≥ the 900s max drive deadline). A
-  remote mapping **overrides** the local provider of the same name and shows up in `/v1/models`,
-  `/api/status` (`remote_upstream` field) and telemetry. Failures surface exactly like local ones:
-  502 with detail non-streaming, in-band `[browser-llm error: remote: …]` chunk streaming. The
-  proxy takes **no local lock** (the upstream's per-provider lock serializes), and lifespan skips
-  pre-warming a remote default. Requires `httpx` (in requirements.txt; guarded import — local-only
-  installs without it still run).
-- **Proxying image input:** attachments ride along in the forwarded JSON, but a **local file path is
-  rewritten to a `data:` URL first** (`_inline_paths_for_remote`, applied to `images`/`image` and to
-  every content part) — the upstream would otherwise resolve the path against *its own* filesystem.
-  `/v1/images/edits` proxies to the upstream's `/v1/images/edits` (multipart bytes are converted to
-  `data:` URLs), so an upstream older than 0.2.0 answers 404 there.
-- **This box (eben)** is set up as the upstream: systemd override
-  (`~/.config/systemd/user/browser-llm-api.service.d/override.conf`) binds `0.0.0.0`, sets the API
-  key + `GEMINI_PUBLIC_URL=http://192.168.1.34:8081`; ufw allows 8081 from 192.168.0.0/16 only.
+  headers; the real request is still checked. Decision helpers live in `browser_llm/authz.py`
+  (unit-tested, `tests/test_authz.py`); the middleware in `server.py` is registered **after**
+  CORSMiddleware so it runs before it.
+- **Another machine calls the API directly** with the key (`BROWSER_LLM_API` + `BROWSER_LLM_API_KEY`
+  on the client). Forwarding through a second install (`REMOTE_PROVIDERS`) was removed in 2.0.
+- **A leaked key** (an unknown caller in the journal): change `BROWSER_LLM_API_KEY`, restart once
+  nothing is in flight, and block the address at the firewall. Saved images carry their
+  conversation in the filename, so a caller's images can be traced and deleted.
 - **Web UI key:** open `http://<host>:8081/#key=<key>` once — stored in localStorage, attached to
-  all API fetches via a fetch wrapper. Widget: `data-key="<key>"` attr. `client.py`:
+  all API fetches via a fetch wrapper. Widget: `data-key="<key>"` attr. CLI and `client.ask`:
   `BROWSER_LLM_API_KEY` env.
-- The venv's `pip` script has a stale shebang (venv predates a folder rename) — use
-  `./venv/bin/python -m pip …`, not `./venv/bin/pip …`.
+- Use `./venv/bin/python -m pip …`, not `./venv/bin/pip …`: a venv that predates a folder rename
+  has a stale shebang in its pip script.
 
 ## Gotchas & conventions
+
+Module names below (`server.py`, `providers/chatgpt.py`, …) are inside `browser_llm/`; shell
+scripts are in `scripts/` (the top-level copies forward to them).
 
 - **Loopback is NOT the same as trusted (fixed 2026-08-11).** CORS is `allow_origins=["*"]` on
   purpose — the widget is embedded on other pages — so any website open in the operator's browser can
@@ -682,7 +581,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   GPT-image renders progressively on a `<canvas>`, which stalls indefinitely under Xvfb's software
   rendering (even with SwiftShader GL flags, which are set in `CHROME_ARGS` and help other cases).
   So: **ChatGPT text and Gemini run fine under the Xvfb systemd service, but ChatGPT *image* requests
-  must run with the server on a real display** (e.g. `DISPLAY=:1 ./venv/bin/python server.py`).
+  must run with the server on a real display** (e.g. `DISPLAY=:1 ./serve.sh`).
   Verified working on `:1` (produced a real 1536×1024 PNG in ~40s). Image gen on the free "Go" tier
   is also slow/variable (30s–4min+), hence the 420s completion deadline.
 - **ChatGPT specifics (verified 2026-10-12):** every selector is a LIST holding the layout before
@@ -743,14 +642,16 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 - **ChatGPT session cookie is chunked**: `__Secure-next-auth.session-token.0` / `.1` (no un-suffixed
   name). `login.py` prefix-matches it and waits for it (not the DOM) before closing, so the session
   actually persists. Gemini's path is behaviorally unchanged from the original.
-- **Service unit is generated, not committed** — `install-service.sh` fills
-  `browser-llm-api.service.template` (`__INSTALL_DIR__` → the clone path) into
-  `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `serve.sh` (venv python +
-  display auto-detect). No paths are hardcoded in the repo. `IMAGE_DIR` defaults to `~/Pictures/browser-llm`
-  (override with `GEMINI_IMAGE_DIR`); if it isn't writable, image saving silently disables.
+- **Service unit is generated, not committed** — `scripts/install-service.sh` fills
+  `deploy/systemd/browser-llm-api.service.template` (`__INSTALL_DIR__` → the clone path) into
+  `~/.config/systemd/user/browser-llm-api.service`; its `ExecStart` runs `scripts/serve.sh` (venv
+  python + display auto-detect). A unit installed before 2.0 runs the top-level `serve.sh`, which
+  forwards, so it keeps working without a reinstall. No paths are hardcoded in the repo. The image
+  folder defaults to `~/Pictures/browser-llm` (`BROWSER_LLM_IMAGE_DIR`); if it isn't writable,
+  image saving silently disables.
 - **A hidden page answers nothing, on both providers (fixed 2026-09-26).** On 2026-09-18 at 01:58 a
-  Claude session mirrored `:98` to the desktop with x11vnc for a sign-in, ran `xdotool windowmove
-  <id> 2400 1400` on both service windows (off a 1920x1080 screen) and maximised the automation
+  sign-in session mirrored the service's Xvfb display to the desktop, ran `xdotool windowmove
+  <id> 2400 1400` on both service windows (off a 1920x1080 screen) and maximised another
   Chrome over the rest. Chrome on X11 treats an off-screen or fully covered window as occluded and
   every page in it reads `document.visibilityState == "hidden"`; a hidden page gets no animation
   frames, so both sites took the typed prompt out of the composer and never rendered a turn (no
@@ -768,7 +669,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   watchdog now logs the server's own `detail` instead of "returned nothing". Chrome also persisted
   the parked position in `chatgpt_profile/Default/Preferences` and reopened at `+1890+1050` with
   a corner on-screen, so a restart alone would not have been a dependable fix. **Don't move or
-  cover the service windows on `:98`, and don't remove the flag.**
+  cover the service windows on its display, and don't remove the flag.**
 - **ChatGPT's "Create image" mode is a pill INSIDE the editor (measured live 14 Oct 2026, Plus,
   nothing sent).** The composer's + button (`aria-label="Add files and more"`) opens a menu whose
   "Create image" item inserts `span[data-inline-selection-pill][data-system-hint-type="picture_v2"]`
@@ -798,13 +699,13 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   cause (at most every 30 s). Read that line before guessing next time, and keep the page
   (`ephemeral: false`) to inspect its DOM.
 - **A restart serves whatever is on disk, and it cuts whatever is in flight (14 Oct 2026).**
-  The service runs this working tree. Another session restarted it at 15:12:41 to load a rotated
-  API key while providers/chatgpt.py was between edits. That time the file held only new constants
+  The service runs this working tree. A restart at 15:12:41, to load a changed setting, landed
+  while providers/chatgpt.py was between edits. That time the file held only new constants
   and chat kept working; a minute later the same restart would have loaded a `prepare_page` that
   called methods not yet written, and every chat or image drive would have raised AttributeError
   while history reads, which skip `prepare_page`, carried on and hid it. Make a provider change in
-  one write (or in a worktree) when someone else may restart the service. The other half: at 15:47
-  this session restarted it while `/api/status` showed ChatGPT `busy: true`, and cut an evaluation
+  one write (or in a worktree, as 2.0 was) when someone else may restart the service. The other
+  half: a restart at 15:47 went ahead while `/api/status` showed ChatGPT `busy: true`, and cut an evaluation
   request 35 s into its answer; the client still got a 200 with a partial reply. Before any
   restart, read `/api/status` and do not go ahead while any provider is busy.
 - **ChatGPT redesigned its page on 11 Oct 2026 and every request failed for 36 hours (fixed
@@ -836,15 +737,14 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   one browser per slot — a separate profile per tab — not a tab pool.** That is a much bigger
   change: profile cloning, a login per profile, and roughly a Chrome's worth of RAM each. Don't
   re-attempt the tab-pool version; the per-provider lock stays.
-- **Gemini image generation is dead on this box (2026-08-18).** Gemini *text* works, but any
+- **Gemini image generation failed for the account tested (2026-08-18).** Gemini *text* works, but any
   image request comes back in ~15s with no image and `/v1/images/generations` answers 502
   `"gemini-browser did not return an image"`. Asked in words, Gemini says: *"I can search for
   images, but can't create any for you at the moment. You might be signed out or image creation
   may not be available in your location yet."* Account/region, not a code bug — reproduced with
-  raw curl against the endpoint. Since 13 Oct 2026 it no longer matters here: the default is
-  `chatgpt-browser`, `IMAGE_PROVIDERS=chatgpt-browser` refuses Gemini images with 403, and Eben
-  ordered Gemini out of image work.
-- **ChatGPT image gen DID work under the Xvfb display `:98` on 2026-08-18** — a 512×512 knockout
+  raw curl against the endpoint. Since 13 Oct 2026 the default is `chatgpt-browser`; an install
+  can refuse Gemini images outright with `IMAGE_PROVIDERS=chatgpt-browser` (403).
+- **ChatGPT image gen DID work under an Xvfb display on 2026-08-18** — a 512×512 knockout
   PNG in ~90s via the service as installed. That contradicts the "requires a real display" note
   below, which was written before the SwiftShader flags landed in `CHROME_ARGS`. One dated
   observation, not a refutation: if canvas gen stalls again, a real display is still the fix.
@@ -852,7 +752,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   logged-in profile: `chatgpt.com/?model=gpt-5-thinking` and `?model=gpt-5-instant` both redirect
   to bare `chatgpt.com/`). Don't add a `?model=` shortcut believing it works; model selection
   clicks the picker (next note).
-- **The ChatGPT Plus model picker (measured 13 Oct 2026, EBE-2054).** `button[aria-label="Select
+- **The ChatGPT Plus model picker (measured 13 Oct 2026).** `button[aria-label="Select
   ChatGPT model"]` shows the power label ("High"; GPT-5.6 Sol shows "5.6 Instant", so
   `effort_matches` looks for the word). Its menu has `[data-model-picker-power-slider]` with three
   `span[data-selected]` dots (Instant, Medium, High) and `[role=menuitemradio]` model rows with
@@ -883,7 +783,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
 - **`usage` token counts are fake** — plain `.split()` word counts, not a real tokenizer.
 - **Stale lock after a crash**: a hard crash leaves `<profile>/SingletonLock`; `serve.sh` clears both
   profiles' locks on every start, so the service and a foreground run are both covered. Running
-  `server.py` directly, without `serve.sh`? delete `*_profile/Singleton*` yourself.
+  `browser-llm serve` directly, without `serve.sh`? delete `*_profile/Singleton*` yourself.
 - **Logs**: `server.py` writes `server.log` (mode `w`, wiped each start) + stderr; under systemd the
   journal is the real log. `gemini_bot.py` writes `gemini_session.log`.
 - **Dead browser/CDP connection used to wedge a provider until restart (fixed 2026-07-10):**

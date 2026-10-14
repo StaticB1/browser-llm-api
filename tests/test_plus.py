@@ -1,5 +1,5 @@
 """
-Tests for the ChatGPT Plus upgrade (EBE-2054, 13 Oct 2026): the image limit
+Tests for the ChatGPT Plus upgrade (0.5.0, 13 Oct 2026): the image limit
 read from the site's counter or its refusal text, the model choice a request
 can make, the size and background words an image request types, the pixel
 size reported back, the 403/429 answers of the image endpoint, gen_asset's

@@ -21,8 +21,8 @@ screenshot the build -> review it against the design -> fix.
 Prompts are written two ways. By default they carry the structure an image needs
 to be buildable (one section per image, readable text, a real grid, the set's
 design system) and no style words, so ChatGPT chooses the look. --direction adds
-an art-direction block per kind group, condensed from the imagegen-frontend-web,
-image-to-code, imagegen-frontend-mobile and brandkit skills (see DIRECTION).
+an art-direction block per kind group, condensed from art-direction guides for
+web, app and brand image generation (see DIRECTION).
 
 The prompt builder is stdlib-only: server.py imports it to serve the same kinds
 to the dashboard and to API clients that send ``kind``. The set runner, tokens
@@ -264,10 +264,9 @@ _PLATFORM = {
                "iOS and Android share.",
 }
 
-# --direction: art direction per kind group, condensed (14 Oct 2026) from the
-# imagegen-frontend-web, image-to-code, imagegen-frontend-mobile and brandkit
-# skills in ~/.claude/skills. Kept here rather than read from those files so
-# the repository works on any machine; edit both when one changes.
+# --direction: art direction per kind group, condensed (14 Oct 2026) from
+# art-direction guides for web, app and brand image generation (agent skills on
+# the maintainers' machines). Kept here so the repository works anywhere.
 DIRECTION = {
     "web": (
         "Design this like an award-winning studio site, not a template.\n"

@@ -94,7 +94,7 @@ class TestOriginIsTrusted(unittest.TestCase):
     def test_same_origin_trusted(self):
         self.assertTrue(authz.origin_is_trusted("http://localhost:8081", "localhost:8081"))
         self.assertTrue(authz.origin_is_trusted("http://127.0.0.1:8081", "127.0.0.1:8081"))
-        self.assertTrue(authz.origin_is_trusted("http://192.168.1.34:8081", "192.168.1.34:8081"))
+        self.assertTrue(authz.origin_is_trusted("http://192.168.1.20:8081", "192.168.1.20:8081"))
 
     def test_loopback_spellings_are_the_same_server(self):
         self.assertTrue(authz.origin_is_trusted("http://localhost:8081", "127.0.0.1:8081"))
@@ -105,7 +105,7 @@ class TestOriginIsTrusted(unittest.TestCase):
         self.assertFalse(authz.origin_is_trusted("https://evil.example", "localhost:8081"))
         self.assertFalse(authz.origin_is_trusted("http://evil.example:8081", "localhost:8081"))
         # a page served from another host on the LAN (e.g. the embedded widget)
-        self.assertFalse(authz.origin_is_trusted("http://192.168.1.99", "192.168.1.34:8081"))
+        self.assertFalse(authz.origin_is_trusted("http://192.168.1.99", "192.168.1.20:8081"))
 
     def test_port_mismatch_rejected(self):
         self.assertFalse(authz.origin_is_trusted("http://localhost:3000", "localhost:8081"))

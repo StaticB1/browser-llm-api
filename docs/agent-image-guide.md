@@ -8,10 +8,13 @@ boxes, lorem-picsum links, or empty `src`s.**
 
 The endpoint runs at `http://localhost:8081`.
 
-> **Provider:** images are drawn by ChatGPT (`chatgpt-browser`), on a ChatGPT Plus account
-> since 13 Oct 2026. On our install Gemini must not be used for images (Eben's order): the server
-> answers a Gemini image request with 403. `gen_asset.py` draws with ChatGPT unless you pass
-> `--model`.
+> **Provider:** images are drawn by ChatGPT (`chatgpt-browser`). An install can bar a provider
+> from images with `IMAGE_PROVIDERS`, and a barred one answers 403. The tools draw with ChatGPT
+> unless you pass `--model`.
+
+> **Commands:** `browser-llm` below is `<checkout>/venv/bin/browser-llm`. The same tool also
+> runs under its pre-2.0 path, `<checkout>/venv/bin/python <checkout>/gen_asset.py`, with the
+> same flags.
 
 ---
 
@@ -31,10 +34,11 @@ The endpoint runs at `http://localhost:8081`.
   A short client timeout is the #1 cause of "it failed" when the image was made fine.
 - **A timed-out call usually still produced the image.** The server writes the file to disk
   before the HTTP response, so on a timeout check the newest file in
-  `~/Pictures/browser-llm/chatgpt/` rather than retrying blindly.
-- **Limits.** Plus allows 120 images per 24 hours (the page's own counter, 13 Oct 2026), and our
-  install keeps 10 of them for the account owner. When the limit is reached the API answers
-  **HTTP 429** with `Retry-After`, and `gen_asset.py` exits with **code 3** and prints the reset
+  the server's image folder (`BROWSER_LLM_IMAGE_DIR`, default `~/Pictures/browser-llm`, in
+  its `chatgpt/` subfolder) rather than retrying blindly.
+- **Limits.** Plus allows 120 images per 24 hours (the page's own counter, 13 Oct 2026), and an
+  install can keep some for the account owner (`CHATGPT_IMAGE_RESERVE`). When the limit is reached
+  the API answers **HTTP 429** with `Retry-After`, and the tool exits with **code 3** and prints the reset
   time. **Stop, tell the user the reset time, and do not retry before it.** With `--variants`
   the alternatives already made are kept.
 - **Text in images:** ChatGPT writes short words fairly well, but check every letter. Put real
@@ -44,14 +48,14 @@ The endpoint runs at `http://localhost:8081`.
 
 ---
 
-## 2. Preferred path: `gen_asset.py`
+## 2. Preferred path: `browser-llm image`
 
 A wrapper that does **generate → crop/resize/convert/favicon → write the file**. Call it once
-per asset. (It lives at `gen_asset.py`; copy it into the project or call it by absolute path.
-Needs Python + Pillow.)
+per asset. It needs the checkout's venv (Python with Pillow). A copy of `browser_llm/gen_asset.py`
+also runs on its own in another project, without the design kinds.
 
 ```
-python3 gen_asset.py --prompt "<description>" --out <path> [shaping flags]
+browser-llm image --prompt "<description>" --out <path> [shaping flags]
 ```
 
 Flags:
@@ -88,34 +92,33 @@ From an MCP client, the `generate_image` tool takes the same options (`width`, `
 
 ---
 
-## 2b. Designing a page or an app flow: `design.py`
+## 2b. Designing a page or an app flow: `browser-llm design`
 
 When the job is a **design** (a landing page, an app flow, a component, a brand board) rather
 than one asset, generate the design as images first and build from them:
 
 1. **One image per section or screen.** Never squeeze a page into one image: the text gets too
-   small to read back. `design.py set` makes one large image per item.
+   small to read back. `browser-llm design set` makes one large image per item.
 2. **One design system.** Each item after the first is made with the first item and the one
    before it attached, so palette, type and spacing hold. Pass the user's logo or brand assets
    with `--ref`, and an approved design with `--lock`.
-3. **Read it back.** `design.py tokens` writes `tokens.json`, `tokens.css` and `DESIGN.md`.
+3. **Read it back.** `browser-llm design tokens` writes `tokens.json`, `tokens.css` and `DESIGN.md`.
    Build with those values and the images open side by side.
 4. **Check the build.** Screenshot it at the design's width (1440 for web sections) and run
-   `design.py review`; fix the high-severity differences and review again.
+   `browser-llm design review`; fix the high-severity differences and review again.
 
 ```bash
-D="/path/to/browser-llm-api"
-"$D/venv/bin/python" "$D/design.py" set --kind section \
+browser-llm design set --kind section \
   --brief "<product, audience, the action the page must get, facts and real copy>" \
   --section "Hero: <headline, button text>" --section "<name>: <content>" ... \
   --out designs/home --dry-run            # read the prompts first; spends nothing
-"$D/venv/bin/python" "$D/design.py" set ... --out designs/home     # ~1-1.5 min per image
-"$D/venv/bin/python" "$D/design.py" tokens designs/home/0*.png --out designs/home
-"$D/venv/bin/python" "$D/design.py" review --design designs/home/01-hero.png \
+browser-llm design set ... --out designs/home     # about a minute per image
+browser-llm design tokens designs/home/0*.png --out designs/home
+browser-llm design review --design designs/home/01-hero.png \
   --build shot-1440.png --width 1440 --out designs/home/review-hero.md
 ```
 
-Kinds (`design.py kinds`): `section`, `page`, `hero-image`, `og-image`, `mobile-screen`,
+Kinds (`browser-llm design kinds`): `section`, `page`, `hero-image`, `og-image`, `mobile-screen`,
 `component`, `brand-board`, `icon`, `logo-concept`, `illustration`, `diagram`, `texture`,
 `avatar`. Put the real words in each section's content: the image tool renders text well when it
 is given exact words, and invents filler when it is not. `--direction` adds an art-direction
@@ -140,53 +143,53 @@ towards the same look).
 
 **Hero / full-width background** — WebP, sized to the layout, with room for the headline:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "pine forest at dawn, wide shot, open sky across the top third for a headline" \
   --out src/assets/hero.webp --width 1920 --height 1080
 ```
 
 **Section background** — behind body text, so it must stay readable:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "soft gradient in pale blue and lavender, used behind paragraphs of dark text" \
   --out public/bg/features.webp --width 1600 --height 1000
 ```
 
 **Texture / pattern** — ask for "seamless / tileable" (tiling is approximate):
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "seamless light-grey concrete texture, tileable, low contrast" \
   --out public/textures/concrete.webp --width 1024 --height 1024
 ```
 
 **Avatar / mascot** — square PNG with a transparent background:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "friendly cartoon fox mascot, centred, full body" \
   --out public/avatar.png --square 256 --knockout-bg
 ```
 
 **Favicon / app icon** — one bold mark, centred:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "geometric mountain icon, one bold shape, centred, readable at 16 px" \
   --out public/favicon.ico --favicon --knockout-bg
 # also emit a large PNG for apple-touch-icon / PWA:
-python3 gen_asset.py \
+browser-llm image \
   --prompt "geometric mountain icon, one bold shape, centred, readable at 16 px" \
   --out public/icon-512.png --square 512 --knockout-bg
 ```
 
 **Illustration / spot image** — transparent PNG:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "illustration of a rocket launching, bright colours" \
   --out src/assets/rocket.png --square 512 --knockout-bg
 ```
 
 **OG / social share image** — 1200×630; try a few and pick one:
 ```
-python3 gen_asset.py \
+browser-llm image \
   --prompt "share image for a cloud backup product: a laptop on a desk with files flowing up into the sky" \
   --out public/og-image.jpg --width 1200 --height 630 --variants 3
 ```
@@ -200,12 +203,12 @@ asset instead of regenerating it from a description. Same post-processing flags 
 
 ```bash
 # the same hero at night, same composition
-python3 gen_asset.py --ref public/hero.webp --out public/hero-night.webp \
+browser-llm image --ref public/hero.webp --out public/hero-night.webp \
     --prompt "identical composition and layout, at night under moonlight" \
     --width 1600 --height 900
 
 # put a product cutout into a scene
-python3 gen_asset.py --ref teapot.png --out public/teapot-kitchen.png \
+browser-llm image --ref teapot.png --out public/teapot-kitchen.png \
     --prompt "place this exact teapot on a marble kitchen counter next to a bowl of lemons" \
     --width 1080 --height 1350
 ```

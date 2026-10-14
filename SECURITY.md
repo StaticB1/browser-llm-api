@@ -5,6 +5,13 @@ Gemini sessions as you, read what the model says back, and, if local-path attach
 them, get files off the machine uploaded to a third party. Treat the port the way you'd treat an
 unlocked browser, not the way you'd treat a stateless API.
 
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| 2.x | yes |
+| 0.x | no; upgrade to 2.x (see the changelog's upgrading notes) |
+
 ## Reporting a vulnerability
 
 Open a [security advisory](https://github.com/StaticB1/browser-llm-api/security/advisories/new), or
@@ -21,13 +28,13 @@ There is no bounty and this is a personal project, so expect a reply in days rat
 | Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. |
 | Local file paths as attachments | Loopback and same-origin only. `ALLOW_REMOTE_FILE_PATHS=1` opts out. |
 | Reading and deleting account history (`/api/history`, `/api/conversation/*`, `/api/conversations/delete`) | Same-origin only. These read and delete someone's real chat threads on the provider's site. |
-| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside `IMAGE_DIR` after symlinks, with a saved-image extension. |
+| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside the image folder (`BROWSER_LLM_IMAGE_DIR`) after symlinks, with a saved-image extension. |
 | Attachment size and count | `MAX_ATTACHMENT_MB` (20), `MAX_ATTACHMENTS` (6). |
 | Bulk delete size | 200 ids or files per call, so a slip in a client can't turn into thousands of site calls. |
 | Bind address | `127.0.0.1` by default. LAN exposure is opt-in via `BROWSER_LLM_HOST`. |
 
-The decision logic lives in `authz.py`, on its own so it can be unit-tested without starting the
-server: `tests/test_authz.py`, `tests/test_attachments.py` and `tests/test_history.py`.
+The decision logic lives in `browser_llm/authz.py`, on its own so it can be unit-tested without
+starting the server: `tests/test_authz.py`, `tests/test_attachments.py` and `tests/test_history.py`.
 
 ## Loopback is not the same as trusted
 
@@ -59,8 +66,10 @@ missing origin and an opaque one as the same thing.
   browser profile it drives is a real signed-in session.
 - The `*_profile/` directories hold live session cookies. They're gitignored; keep it that way, and
   don't copy them around.
-- `REMOTE_PROVIDERS` forwards prompts and attachments to another instance. Only point it at a host
-  you control, and set `REMOTE_API_KEY`.
+- If the key may have leaked, or the server logs requests from an address you don't recognise,
+  change `BROWSER_LLM_API_KEY`, restart, and block that address at the firewall. Requests show in
+  the journal with the caller's address, and saved images record the conversation they came from.
+- Keep the key in `.env` or a systemd drop-in, never in a committed file; `.env` is gitignored.
 
 ## Out of scope
 

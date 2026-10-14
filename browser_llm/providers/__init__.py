@@ -3,9 +3,8 @@ Provider registry. Selection is by the OpenAI ``model`` field on each request;
 DEFAULT_PROVIDER (env, default ``chatgpt-browser``) is used when the requested
 model is unknown or absent.
 
-ChatGPT is the default since 13 Oct 2026, when the account moved to Plus and
-Eben ordered Gemini out ("Stop using gemini now"). Gemini stays available by
-name for text; an install can bar it from images with IMAGE_PROVIDERS.
+ChatGPT is the default since 13 Oct 2026 (0.5.0). Gemini stays available by
+name; an install can bar it from images with IMAGE_PROVIDERS.
 """
 import os
 

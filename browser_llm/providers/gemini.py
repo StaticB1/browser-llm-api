@@ -79,7 +79,7 @@ class GeminiProvider(Provider):
     # from the "Upload & tools" menu, which would pop a native OS dialog. So this
     # provider relies on the generic file-chooser interception path: click the
     # menu, then the upload item, and answer the intercepted chooser over CDP.
-    # The menu labels are best-guess against a signed-in session (this box's
+    # The menu labels are best-guess against a signed-in session (the tested
     # Gemini profile was signed out when this was written) — the "Upload & tools"
     # button itself IS verified. Adjust the needles if uploads stop landing.
     supports_upload = True

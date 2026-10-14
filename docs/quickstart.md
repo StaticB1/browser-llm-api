@@ -1,120 +1,89 @@
 # Quickstart
 
-An OpenAI-compatible API at **`http://localhost:8081`** backed by ChatGPT (the default, and the
-only image provider on our install) and Gemini (text), through browser automation. Use it from
-any project for text, code/HTML, and images.
+An OpenAI-compatible API at `http://localhost:8081`, backed by your signed-in ChatGPT (the default, and the image provider) and Gemini sessions through browser automation. Use it from any project for text, code, HTML and images.
 
 ## 1. Start it
 
-**Always-on (recommended)** — install once; auto-starts with your desktop session:
 ```bash
-./install-service.sh
+scripts/install-service.sh      # always on: a systemd --user service plus a watchdog
+./serve.sh                      # or just run it in a terminal
+./venv/bin/browser-llm health   # is it up?
 ```
-**Or just run it in a terminal:**
-```bash
-./serve.sh
-```
-Check it's up: `curl -s localhost:8081/v1/models`
 
-> One-time per account (only if replies come back empty / a login wall shows):
-> `DISPLAY=:1 ./venv/bin/python login.py chatgpt`   (and/or `login.py gemini`)
+Once per account, or whenever replies come back empty behind a sign-in wall:
+
+```bash
+DISPLAY=:1 ./venv/bin/browser-llm login chatgpt      # and/or: gemini
+```
+
+The commands below assume `./venv/bin` is on your `PATH`, or that you run them as `./venv/bin/browser-llm`.
 
 ## 2. Use it
 
-**Web UI (easiest)** — open **`http://localhost:8081/`** in a browser: streaming chat,
-image generation, and a gallery of everything generated so far, with live provider status.
-Attach images with the 📎 button (or just paste / drag-drop them) to ask about a screenshot,
-or to edit an existing image.
+The dashboard: open `http://localhost:8081/` for streaming chat with history, image creation with design presets, and a gallery. Attach images with the plus button, by pasting, or by dropping them in.
 
-**Text / code / HTML** (via the bundled client):
+Text, code and HTML:
+
 ```bash
-./client.py "Explain CORS in two sentences"
-./client.py --stream "tell me a short story"
-./client.py --variant instant "one-line summary of TCP"   # faster than the default GPT-6 at High
-# write an HTML page straight to a file (strips ``` fences):
-./client.py --out index.html --strip-fences \
+browser-llm ask "Explain CORS in two sentences"
+browser-llm ask --stream "tell me a short story"
+browser-llm ask --variant instant "one-line summary of TCP"     # faster than GPT-6 at High
+browser-llm ask --out index.html --strip-fences \
   "Output ONLY a complete standalone HTML5 landing page for a bakery, inline CSS, no explanation"
+browser-llm ask --image screenshot.png "What's broken in this layout?"
 ```
 
-**Images** (raw):
+Image assets, cut to the exact size:
+
+```bash
+browser-llm image --prompt "flat vector fox mascot" --out avatar.png --square 256 --knockout-bg
+browser-llm image --prompt "misty forest at dawn, lots of sky" --out hero.webp --width 1600 --height 900
+browser-llm image --kind icon --prompt "a calendar with a check mark" --out icon.png --square 256
+browser-llm image --prompt "misty forest at dawn" --out hero.webp --width 1600 --height 900 --variants 3
+```
+
+Exit code 3 means ChatGPT's image limit is reached; the message gives the reset time. Stop there.
+
+A design, one image per section in one design system, then tokens, then a review of your build:
+
+```bash
+browser-llm design set --kind section --brief "what it is, for whom, the action" \
+  --section "Hero: headline '...', button '...'" --section "Pricing: ..." --out designs/home
+browser-llm design tokens designs/home/0*.png --out designs/home
+browser-llm design review --design designs/home/01-hero.png --build shot.png --width 1440
+```
+
+The raw API:
+
 ```bash
 curl -s localhost:8081/v1/images/generations -H 'Content-Type: application/json' \
   -d '{"prompt":"isometric 3d rocket icon","size":"1024x1024"}' | jq -r '.data[0].path'
-```
-
-**Send an image IN** (vision, or image-to-image editing):
-```bash
-./client.py --image screenshot.png "What's broken in this layout?"
-
-# edit an existing image (multipart, same shape as OpenAI's images.edit)
 curl -s localhost:8081/v1/images/edits -F image=@logo.png \
-  -F 'prompt=same logo, flat vector, navy background' | jq -r '.data[0].path'
+  -F 'prompt=the same logo as a flat vector on navy' | jq -r '.data[0].path'
 ```
 
-**Website image assets** (exact size, crop, favicon, transparency; `--ref` restyles an
-existing asset instead of starting from scratch):
+From a coding agent, over MCP:
+
 ```bash
-./venv/bin/python gen_asset.py --prompt "flat vector fox mascot" \
-  --out avatar.png --square 256 --knockout-bg
-./venv/bin/python gen_asset.py --prompt "misty forest at dawn, lots of sky" \
-  --out hero.webp --width 1600 --height 900
-# three alternatives side by side (hero-v1..v3.webp + hero-variants.png), originals kept:
-./venv/bin/python gen_asset.py --prompt "misty forest at dawn, lots of sky" \
-  --out hero.webp --width 1600 --height 900 --variants 3 --keep-original
-```
-ChatGPT is asked for the size and a transparent background in words, then the file is cropped
-to the exact pixels. Exit code 3 means ChatGPT's image limit is reached and the message gives
-the reset time: stop there and say so; don't retry before it.
-
-**Design a page or an app flow** (one image per section, one design system, then tokens and a
-review of your build; see README, "Designing with ChatGPT's image tool"):
-```bash
-./venv/bin/python design.py set --kind section --brief "what it is, for whom, the action" \
-  --section "Hero: headline '...', button '...'" --section "Pricing: ..." --out designs/home
-./venv/bin/python design.py tokens designs/home/0*.png --out designs/home
-./venv/bin/python design.py review --design designs/home/01-hero.png --build shot.png --width 1440
+claude mcp add browser-llm -- "$PWD/mcp.sh"
 ```
 
-**From a coding agent** (MCP — the agent gets real tools instead of a shell command):
-```bash
-claude mcp add browser-llm -- "$PWD/venv/bin/python" "$PWD/mcp_server.py"
-```
-Then ask it to look at a screenshot or make an asset: `ask` takes images and can write its answer
-straight to a file, `generate_image` writes the asset (or `variants` of it) and returns the path,
-the original's size and the model that drew it. Same config shape works in Claude Desktop, Cursor
-and Zed — see the README.
+From any Python project, with the standard OpenAI SDK:
 
-**From any Python project** (standard OpenAI SDK — no code changes, just the base URL):
 ```python
 from openai import OpenAI
 c = OpenAI(base_url="http://localhost:8081/v1", api_key="local")
 print(c.chat.completions.create(model="chatgpt-browser",
-      messages=[{"role":"user","content":"hi"}]).choices[0].message.content)
+      messages=[{"role": "user", "content": "hi"}]).choices[0].message.content)
 ```
-Any OpenAI-based tool works the same way — set base URL `http://localhost:8081/v1`,
-key `local`, model `chatgpt-browser` (or `gemini-browser` for text).
+
+Or the bundled client, which needs only the standard library: `from browser_llm.client import ask`.
 
 ## Good to know
 
-- **`model`** picks the backend: `chatgpt-browser` (default, override with `DEFAULT_PROVIDER`) or
-  `gemini-browser`. Images go to ChatGPT only on our install (Eben's order, 13 Oct 2026):
-  `IMAGE_PROVIDERS=chatgpt-browser`, so a Gemini image request gets 403.
-- **ChatGPT's model** is GPT-6 at High unless `CHATGPT_MODEL` / `CHATGPT_EFFORT` say otherwise;
-  one request can pick with `model_variant` (`"instant"`, `"GPT-5.6 Sol"`, `"GPT-6/medium"`).
-  Each answer reports `model_used`, read from the conversation's record on chatgpt.com.
-- **Plus limits** (measured 13 Oct 2026): 120 images per 24 hours, 80 file uploads per 3 hours.
-  Our install keeps 10 images back for Eben's own chats. A limit reached comes back as HTTP 429
-  with the reset time (README, "ChatGPT Plus limits").
-- **ChatGPT image gen needs an X display**, not Chrome's headless mode. The service's Xvfb
-  display `:98` works (8 images on 13 Oct 2026, 48–90 s each).
-- **One request at a time per provider** — calls queue, they don't run in parallel. ChatGPT and
-  Gemini do run concurrently with each other. Two conversations inside one provider is not
-  something browser automation can do: it was tried and the second one never completes. Latency is
-  real: on 13 Oct 2026 a one-line answer at High took 17–23 s and an image 48–90 s on Plus; long
-  answers take longer. Set generous client timeouts
-  (the bundled client defaults to 440 s).
-- **Empty replies?** the session expired → re-run `login.py <provider>` (see above).
-- **Verify generated code/HTML.** The answer is scraped from the rendered page, so long code
-  blocks can very occasionally drop or mangle a character. Fine for prose; eyeball generated code.
-- Manage the service: `systemctl --user {status,restart,stop} browser-llm-api` ·
-  logs: `journalctl --user -u browser-llm-api -f`
+- `model` picks the backend: `chatgpt-browser` (default) or `gemini-browser`. `IMAGE_PROVIDERS` decides which may make images.
+- ChatGPT's model is GPT-6 at High unless `CHATGPT_MODEL` and `CHATGPT_EFFORT` say otherwise. One request can choose with `model_variant`, and each answer reports `model_used`.
+- Limits: on ChatGPT Plus the page's counter allowed 120 images per 24 hours, measured in October 2026. A reached limit comes back as HTTP 429 with the reset time.
+- One request at a time per provider: calls queue; ChatGPT and Gemini run alongside each other. A one-line answer at High took 17 to 23 seconds and an image about a minute, so set generous client timeouts (the bundled client waits 440 seconds).
+- Empty replies usually mean the session expired: sign in again. [Running it](running.md#troubleshooting) has the rest.
+- Check generated code: the answer is read from the rendered page, so a very long code block can occasionally lose a character.

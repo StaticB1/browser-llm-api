@@ -4,7 +4,7 @@ Unit tests for image INPUT (attachments) — no browser, no network.
 Covers the pure layer that turns whatever a client sends (data: URL, bare
 base64, http(s) URL, local path, multipart bytes) into files on disk for the
 provider's file picker, plus multimodal message flattening and the local-path
-policy that keeps a LAN client from reading files off this box.
+policy that keeps a LAN client from reading files off the server's machine.
 """
 import base64
 import sys

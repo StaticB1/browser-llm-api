@@ -1,6 +1,6 @@
 # Designing with ChatGPT images: audit and upgrade
 
-14 October 2026. Written for Eben, who asked for image generation "like Codex, Astra" for frontend, UI, UX and design work.
+14 October 2026, version 0.5.0. The audit, decisions and measured results behind the design tools, written for the maintainers when image generation "like Codex and Astra" was asked for, for frontend, UI, UX and design work.
 
 The local ChatGPT bridge now designs the way Codex does with GPT-6 Astra and Images 2.0. It makes one large, readable image per website section or app screen and keeps the set in one design system by attaching earlier images as references. It then reads the design back out as tokens and compares a screenshot of the build with the design. Every image request now switches ChatGPT into its own Create image mode first. A live test on 14 October made a three-section landing page, its hero photograph, tokens, and two reviews of a hand-built hero, using six images. Every image ran in Create image mode, every word in the designs matched the brief, and one round of the review's fixes raised the build's match from 77 to 82 out of 100. The test also found two faults, which are fixed: sections copied parts of their references, and two references were uploaded as three images.
 
@@ -24,7 +24,7 @@ The workflow people describe with GPT-6 Astra in Codex is image-first. The model
 
 Three habits make it work, and the upgrade copies all three. One section goes in one image, because a whole page squeezed into one frame leaves the text too small to read back. Your own image-to-code skill states the same rule for Codex. Consistency comes from reference images, with earlier output fed back into each new request. And the loop closes with screenshots: build, capture at the design's width, compare, and fix.
 
-What the bridge cannot copy is the batch side of the paid API. It cannot request ten images in one call, run several at once, or set an exact pixel size. It drives one ChatGPT account through one browser tab, one image at a time. Each image takes about a minute, and the account allows 120 images a day, with 10 kept for you.
+What the bridge cannot copy is the batch side of the paid API. It cannot request ten images in one call, run several at once, or set an exact pixel size. It drives one ChatGPT account through one browser tab, one image at a time. Each image takes about a minute, and a Plus account allows 120 images a day, some of which an install can keep back for the account owner.
 
 The accounts above come from [Griffin Wooldridge's Astra web design test](https://griffinwooldridge.com/blog/gpt-6-astra-web-design-test), [Daniel Vaughan's guide to image generation in Codex](https://codex.danielvaughan.com/2026/04/27/codex-cli-image-generation-gpt-image-2-visual-development-workflows/), [a DEV Community post on GPT Image 2 inside Codex](https://dev.to/ji_ai/gpt-image-2-inside-codex-my-new-frontend-workflow-4d7n) and [the astra-frontend-design skill](https://github.com/Enixes/astra-frontend-design).
 
@@ -59,11 +59,11 @@ All of this reaches every entry point. The image API takes the kind options and 
 
 ## The decisions and what they cost
 
-You made each of these calls in the interview. The table records what each costs, so the choice can be revisited when the cost shows up.
+The maintainers made each of these calls before the build. The table records what each costs, so the choice can be revisited when the cost shows up.
 
 | Decision | What it costs |
 |---|---|
-| Prompts carry structure only, with art direction as a switch | Two prompt paths to keep in step. The condensed art direction will drift from your skill files unless both are edited together. |
+| Prompts carry structure only, with art direction as a switch | Two prompt paths to keep in step. The condensed art direction will drift from the image-generation guides it came from unless both are edited together. |
 | Consistency through reference images | Six attachments at most, so a long set keeps only the first and the previous image. Drift across ten sections is still possible. |
 | ChatGPT's own Create image mode, with a guard for text requests | One more page element to depend on. If the plus menu moves, requests fall back to words and say so in the response. |
 | Pillow upscaling only | Enlarged photographs look softer than with a trained upscaler. Nothing to install. |

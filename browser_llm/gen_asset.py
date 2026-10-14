@@ -4,8 +4,8 @@ Generate a website image asset via the local browser-LLM image API, then
 post-process it (resize / crop / convert / favicon / knockout) into exactly what
 the site needs.
 
-ChatGPT is the image provider (default model chatgpt-browser; since 13 Oct 2026
-on a Plus account, Eben's order: no images from Gemini). Its image tool makes a
+ChatGPT is the image provider (default model chatgpt-browser; an install can
+bar Gemini from images with IMAGE_PROVIDERS). Its image tool makes a
 few fixed sizes (1254x1254 square, measured 13 Oct 2026), so this script asks
 for the orientation and aspect ratio you need in words, then crops to the exact
 pixels. The untouched original stays where the server saved it and its path is
@@ -444,8 +444,8 @@ def main():
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--out", required=True, help="output file; format inferred from extension")
     ap.add_argument("--model", help=f"provider (default {DEFAULT_MODEL}, or "
-                    "$BROWSER_LLM_IMAGE_MODEL). Images come from ChatGPT; Gemini is "
-                    "barred from images on Eben's machine since 13 Oct 2026")
+                    "$BROWSER_LLM_IMAGE_MODEL). Images come from ChatGPT unless "
+                    "you name another provider the server allows")
     ap.add_argument("--variant", dest="model_variant",
                     help="ChatGPT model/power for this request, e.g. 'instant' or "
                          "'GPT-6/high' (default: the server's CHATGPT_MODEL/CHATGPT_EFFORT)")

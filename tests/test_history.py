@@ -41,7 +41,7 @@ class TrustedCallerTest(unittest.TestCase):
         self.assertTrue(server._trusted_caller(
             req("http://localhost:8081", "localhost:8081")))
         self.assertTrue(server._trusted_caller(
-            req("https://192.168.1.34:8081", "192.168.1.34:8081")))
+            req("https://192.168.1.20:8081", "192.168.1.20:8081")))
 
     def test_other_site_is_not(self):
         for origin in ("https://evil.example", "http://localhost:3000",
@@ -93,7 +93,7 @@ class GalleryTargetTest(unittest.TestCase):
         for ref in ("chatgpt/a.png",
                     "/images/chatgpt/a.png",
                     "http://localhost:8081/images/chatgpt/a.png",
-                    "http://192.168.1.34:8081/images/chatgpt/a.png?v=2",
+                    "http://192.168.1.20:8081/images/chatgpt/a.png?v=2",
                     "/images/chatgpt/a.png#top"):
             self.assertEqual(self.resolve(ref), want, ref)
 
@@ -107,7 +107,7 @@ class GalleryTargetTest(unittest.TestCase):
         # names a real file elsewhere resolves to a nonexistent path *inside*
         # the image dir; the endpoint then reports it missing.
         base = self.base.resolve()
-        for ref in ("/home/eben/.ssh/id_rsa.png", "file:///etc/shadow.png"):
+        for ref in ("/home/user/.ssh/id_rsa.png", "file:///etc/shadow.png"):
             got = self.resolve(ref)
             self.assertIsNotNone(got, ref)
             self.assertTrue(got.is_relative_to(base), got)

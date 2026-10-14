@@ -97,8 +97,10 @@ logger.addHandler(_sh)
 #   BROWSER_LLM_PUBLIC_URL — base URL images are served under (for the returned
 #                            links). Before 2.0: GEMINI_PUBLIC_URL (still read).
 # ---------------------------------------------------------------------------
-IMAGE_DIR = config.env("BROWSER_LLM_IMAGE_DIR", "GEMINI_IMAGE_DIR", "IMAGE_DIR",
-                       default=os.path.expanduser("~/Pictures/browser-llm"))
+# expanduser: a .env file and a systemd Environment= line expand nothing, so
+# "~/Pictures/browser-llm" would otherwise create a folder named "~".
+IMAGE_DIR = os.path.expanduser(config.env("BROWSER_LLM_IMAGE_DIR", "GEMINI_IMAGE_DIR", "IMAGE_DIR",
+                                          default="~/Pictures/browser-llm"))
 PUBLIC_URL = config.env("BROWSER_LLM_PUBLIC_URL", "GEMINI_PUBLIC_URL",
                         default="http://localhost:8081").rstrip("/")
 _image_dir = Path(IMAGE_DIR)
@@ -122,7 +124,7 @@ _EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
 #   MAX_ATTACHMENT_MB        — per-file size ceiling
 #   ALLOW_REMOTE_FILE_PATHS  — let NON-loopback clients attach server-side file
 #                              paths (off by default: a LAN client shouldn't be
-#                              able to upload arbitrary files off this box)
+#                              able to upload arbitrary files off this machine)
 # ---------------------------------------------------------------------------
 _MAX_ATTACHMENTS = max(1, int(os.environ.get("MAX_ATTACHMENTS", "6")))
 _MAX_ATTACHMENT_BYTES = int(float(os.environ.get("MAX_ATTACHMENT_MB", "20")) * 1024 * 1024)
@@ -1492,14 +1494,14 @@ async def list_models():
 
 def _client_may_send_paths(request: Request) -> bool:
     """Local-path attachments are a file-read primitive, so only loopback callers
-    get them by default (the web UI, desktop app and CLI on this box). A LAN
+    get them by default (the web UI, desktop app and CLI on this machine). A LAN
     client with the API key must send bytes instead — unless the operator opts in
     with ALLOW_REMOTE_FILE_PATHS=1.
 
     Loopback is necessary but not sufficient: CORS is open so the widget can be
     embedded anywhere, which means a page on ANY site can make the operator's
     browser POST here, arriving from 127.0.0.1. Without the origin check that
-    drive-by could name any path on this box and read back what the model saw."""
+    drive-by could name any path on this machine and read back what the model saw."""
     if _ALLOW_REMOTE_FILE_PATHS:
         return True
     client = request.client.host if request.client else None

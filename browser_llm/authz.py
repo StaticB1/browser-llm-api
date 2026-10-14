@@ -15,7 +15,7 @@ request (see ALLOW_REMOTE_FILE_PATHS). Attaching a path makes the browser upload
 that file, so remote callers must send bytes instead. That decision also needs
 ``origin_is_trusted``: a request from a *page on another site* reaches the server
 over loopback like any local client, so loopback alone would let any website the
-operator visits read files off this box (see that function).
+operator visits read files off the server's machine (see that function).
 
 Kept separate from server.py so tests can import these helpers without
 server.py's import-time side effects (log-file truncation, CDP patch).
