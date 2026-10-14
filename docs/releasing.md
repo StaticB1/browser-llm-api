@@ -29,4 +29,6 @@ A release is a version bump, a changelog entry, a tag, and a GitHub release with
    ```
 8. Restart running installs once nothing is in flight (`browser-llm health` shows every provider idle).
 
+Repository settings on GitHub (description, topics, private vulnerability reporting, branch clean-up) are kept in `scripts/github-settings.sh`. An admin runs it after a change to any of them; `--dry-run` shows what it would do.
+
 The CI workflow runs the same checks on every push. When it cannot run, run steps 3 and 4 by hand and say so in the release notes.

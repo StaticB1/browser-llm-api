@@ -147,6 +147,8 @@ scripts/                     # each cd's to the checkout root ("$(dirname "$0")/
   healthcheck.sh             #   watchdog: venv integrity + liveness + a daily model ping.
   install-service.sh         #   venv + units from deploy/systemd/ + linger.
   mode.sh                    #   service display: headless (Xvfb) / visible.
+  github-settings.sh         #   repo description, topics, vulnerability reporting, branch clean-up.
+                             #   Needs an ADMIN (push access gets 404); --dry-run shows the calls.
 deploy/systemd/              # browser-llm-api.service.template, browser-llm-health.{service.template,timer}
 desktop/                     # GTK3 tray app on SYSTEM python3 (PyGObject), stdlib only, a thin HTTP
                              #   client. GTK3 on purpose: AppIndicator is GTK3-only.
