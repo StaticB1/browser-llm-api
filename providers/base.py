@@ -95,9 +95,14 @@ def patch_cdp() -> None:
 
 # Nth <input type="file"> in the page (shadow-piercing), best candidate first:
 # an image-only input beats an accept-anything input, which beats one that only
-# takes e.g. PDFs. Returns the element itself (we need its objectId, not a copy).
+# takes e.g. PDFs. A camera input (`capture`) goes last, and when more than one
+# file is being sent an input without `multiple` ranks below every one with it:
+# on 14 Oct 2026 ChatGPT's first input was "Take a photo" (accept image/*,
+# capture, single file), it took one of two references, and the second input
+# then got both, so ChatGPT received three images. Returns the element itself
+# (we need its objectId, not a copy).
 _NTH_FILE_INPUT_JS = """
-((n) => {
+((n, many) => {
   const found = [];
   const walk = (root) => {
     if (!root || !root.querySelectorAll) return;
@@ -107,13 +112,16 @@ _NTH_FILE_INPUT_JS = """
   walk(document);
   const score = (i) => {
     const a = (i.getAttribute('accept') || '').toLowerCase();
-    if (a.indexOf('image') >= 0) return 2;
-    if (!a) return 1;
-    return 0;
+    let s = a.indexOf('image') >= 0 ? 2 : (!a ? 1 : 0);
+    if (i.hasAttribute('capture')) s -= 3;
+    if (many && !i.multiple) s -= 10;
+    return s;
   };
-  found.sort((x, y) => score(y) - score(x));
-  return found[n] || null;
-})(%d)
+  // A stable sort: equal scores keep document order.
+  const ranked = found.map((e, k) => [e, k])
+    .sort((x, y) => (score(y[0]) - score(x[0])) || (x[1] - y[1]));
+  return ranked[n] ? ranked[n][0] : null;
+})(%d, %s)
 """
 
 _COUNT_FILE_INPUTS_JS = """
@@ -607,12 +615,14 @@ class Provider(ABC):
             count = int(await page.evaluate(_COUNT_FILE_INPUTS_JS) or 0)
         except Exception:
             count = 0
+        many = "true" if len(paths) > 1 else "false"
         for i in range(min(count, 4)):
             remote = None
             try:
-                remote = await eval_handle(page, _NTH_FILE_INPUT_JS % i)
+                remote = await eval_handle(page, _NTH_FILE_INPUT_JS % (i, many))
                 if not remote or not remote.object_id:
                     continue
+                before = await self.attachment_count(page)
                 await page.send(cdp.dom.set_file_input_files(
                     files=list(paths), object_id=remote.object_id))
                 logger.info(f"[{self.name}] attached {len(paths)} file(s) via file input #{i}")
@@ -622,8 +632,25 @@ class Provider(ABC):
                 # requiring idle would time out on a slow upload and re-attach
                 # the same files to the next input (two chips, image sent twice).
                 # open_and_send waits for idle before submitting.
-                if await self.wait_uploads_ready(page, len(paths), timeout=15.0,
+                if await self.wait_uploads_ready(page, before + len(paths), timeout=15.0,
                                                  require_idle=False):
+                    return True
+                got = (await self.attachment_count(page)) - before
+                if 0 < got < len(paths):
+                    # The input took some of the files: a single-file input.
+                    # Giving all of them to the next input would attach the
+                    # first ones twice, so hand this one the rest, one each.
+                    logger.warning(f"[{self.name}] file input #{i} took {got} of "
+                                   f"{len(paths)} file(s); adding the rest one at a time")
+                    for p in paths[got:]:
+                        n0 = await self.attachment_count(page)
+                        await page.send(cdp.dom.set_file_input_files(
+                            files=[p], object_id=remote.object_id))
+                        if not await self.wait_uploads_ready(page, n0 + 1, timeout=15.0,
+                                                             require_idle=False):
+                            logger.warning(f"[{self.name}] {p} did not show as attached; "
+                                           f"sending without it rather than twice")
+                            break
                     return True
                 logger.warning(f"[{self.name}] file input #{i} showed no attachment; trying next")
             except Exception as e:
@@ -695,6 +722,17 @@ class Provider(ABC):
                 page.remove_handler(cdp.page.FileChooserOpened, _on_chooser)
             except Exception:
                 pass
+
+    async def attachment_count(self, page) -> int:
+        """Attachment chips in the composer now (0 when unreadable or when the
+        provider declares no ``attachment_ready_js``)."""
+        if not self.attachment_ready_js:
+            return 0
+        try:
+            raw = await page.evaluate(self.attachment_ready_js)
+            return int(json.loads(raw).get("ready") or 0) if isinstance(raw, str) else 0
+        except Exception:
+            return 0
 
     async def wait_uploads_ready(self, page, n: int, timeout: float = None,
                                  require_idle: bool = True) -> bool:

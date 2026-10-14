@@ -33,6 +33,14 @@ Examples:
   python3 gen_asset.py --ref public/hero.webp --out public/hero-night.webp \
       --prompt "same composition at night, keep the layout identical" --width 1600 --height 900
 
+  # A design kind wraps the prompt in that kind's rules and sizes (design.py kinds):
+  python3 gen_asset.py --kind hero-image --copy-space left \
+      --prompt "a quiet harbour town at first light" --out public/hero.webp --width 1920 --height 1080
+  python3 gen_asset.py --kind icon --prompt "a calendar with a check mark" --out public/i-cal.png \
+      --square 256
+  # --direction adds the art direction for the kind's group; --upscale 2 enlarges
+  # with Lanczos and a light sharpen (Pillow; for a mockup kept at native size).
+
 Constraints to respect:
   * One image at a time per provider: the server queues requests. An image
     takes 30 s to 2 min on Plus (53 s measured 13 Oct 2026).
@@ -53,7 +61,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 _BASE = (os.environ.get("BROWSER_LLM_API") or os.environ.get("GEMINI_API")
          or "http://localhost:8081").rstrip("/")
@@ -79,6 +87,17 @@ class GenAssetError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+
+
+def _design():
+    """design.py beside this file (stdlib only). Imported lazily: this script
+    is sometimes copied into a project on its own, and works there without
+    kinds."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import design
+    return design
 
 
 def _ref_spec(path_or_url):
@@ -147,6 +166,8 @@ def generate_raw(prompt, model=None, timeout=440, refs=None, size=None,
                             "generation timed out server-side)")
     item = dict(data[0])  # providers may return several; the first is used
     item["model_used"] = d.get("model_used")
+    item["prompt_sent"] = d.get("prompt_sent")
+    item["image_tool"] = d.get("image_tool")
     if item.get("b64_json"):
         raw = base64.b64decode(item["b64_json"])
     elif item.get("path") and os.path.isfile(item["path"]):
@@ -262,17 +283,52 @@ def _write(img, out, fmt, favicon, quality):
         img.save(out)
 
 
+def upscale_image(img, factor):
+    """Enlarge by ``factor`` with Lanczos, then a light unsharp mask so the
+    result is not soft. Pillow only: no model, no GPU."""
+    if not factor or factor <= 1:
+        return img
+    big = img.resize((round(img.width * factor), round(img.height * factor)), Image.LANCZOS)
+    if big.mode == "RGBA":
+        rgb = big.convert("RGB").filter(ImageFilter.UnsharpMask(radius=1.2, percent=60,
+                                                                threshold=2))
+        rgb.putalpha(big.getchannel("A"))
+        return rgb
+    return big.filter(ImageFilter.UnsharpMask(radius=1.2, percent=60, threshold=2))
+
+
 def render_full(prompt, out, model=None, refs=None, timeout=440, width=None, height=None,
                 square_size=None, fit="cover", fmt=None, favicon=False, knockout=False,
-                quality=88, keep_original=False, variant=None, size=None):
+                quality=88, keep_original=False, variant=None, size=None, kind=None,
+                direction=False, theme=None, platform=None, system=None, copy_space=None,
+                upscale=None, alternative=None):
     """Generate → shape → write. Returns a dict: ``out`` (the shaped asset),
     ``original`` (the untouched file as ChatGPT delivered it: the server's
     saved copy, or a copy beside ``out`` with keep_original), ``original_size``
-    (its pixels), ``size`` (the asset's pixels) and ``model_used``.
+    (its pixels), ``size`` (the asset's pixels), ``model_used``, ``prompt``
+    (the words this script sent) and ``prompt_sent`` (what the server typed).
 
-    Crop/resize first, knockout after, format last."""
+    ``kind`` (design.py) wraps the prompt in that kind's rules and brings its
+    size and background unless they are given.
+
+    Crop/resize first, knockout after, upscale after that, format last."""
+    ext = (fmt or out.rsplit(".", 1)[-1]).lower()
+    if kind:
+        dz = _design()
+        kd = dz.kind_defaults(kind)
+        prompt = dz.compose(kind, prompt, direction=direction, theme=theme, platform=platform,
+                            system=system, copy_space=copy_space,
+                            ref_roles=["user"] * len(refs) if refs else None,
+                            alternative=alternative)
+        if not (width or height or square_size or size):
+            size = kd["size"]
+            if kd["exact"]:
+                width, height = (int(v) for v in kd["size"].split("x"))
+        if kd["background"] == "transparent" and ext in ("png", "webp", "ico"):
+            knockout = True
     what = f"editing {len(refs)} ref(s)" if refs else "generating"
-    print(f"[gen_asset] {what} ({model or DEFAULT_MODEL}): {prompt[:70]}…", file=sys.stderr)
+    first = prompt.strip().splitlines()[0] if prompt.strip() else ""
+    print(f"[gen_asset] {what} ({model or DEFAULT_MODEL}): {first[:70]}…", file=sys.stderr)
     raw, mime, item = generate_raw(
         prompt, model=model, timeout=timeout, refs=refs,
         size=size or size_request(width, height, square_size),
@@ -300,7 +356,10 @@ def render_full(prompt, out, model=None, refs=None, timeout=440, width=None, hei
     if knockout and not has_transparency(img):
         img = knockout_bg(img)
 
-    fmt = (fmt or out.rsplit(".", 1)[-1]).lower()
+    if upscale and upscale > 1:
+        img = upscale_image(img, upscale)
+
+    fmt = ext
     _write(img, out, fmt, favicon, quality)
 
     used = item.get("model_used") or {}
@@ -309,7 +368,8 @@ def render_full(prompt, out, model=None, refs=None, timeout=440, width=None, hei
           f"{'; drawn via ' + str(used.get('model')) if used.get('model') else ''}",
           file=sys.stderr)
     return {"out": out, "original": original, "original_size": list(original_size),
-            "size": list(img.size), "model_used": used or None}
+            "size": list(img.size), "model_used": used or None, "prompt": prompt,
+            "prompt_sent": item.get("prompt_sent"), "image_tool": item.get("image_tool")}
 
 
 def render(prompt, out, **kw):
@@ -352,11 +412,15 @@ def render_variants(prompt, out, n, **kw):
     stem, ext = os.path.splitext(out)
     made, stop = [], None
     for k in range(1, n + 1):
-        brief = prompt if n == 1 else (
-            f"{prompt}\n\nThis is alternative {k} of {n}: choose your own composition "
-            f"for it.")
+        if kw.get("kind"):
+            # The kind's own wording for "direction k of n".
+            brief, extra = prompt, ({"alternative": (k, n)} if n > 1 else {})
+        else:
+            brief, extra = (prompt if n == 1 else (
+                f"{prompt}\n\nThis is alternative {k} of {n}: choose your own composition "
+                f"for it.")), {}
         try:
-            made.append(render_full(brief, f"{stem}-v{k}{ext}", **kw))
+            made.append(render_full(brief, f"{stem}-v{k}{ext}", **kw, **extra))
         except GenAssetError as e:
             stop = e
             break
@@ -408,12 +472,36 @@ def main():
                     help="make N finished alternatives: <name>-v1 ... -vN plus "
                          "<name>-variants.png to compare them")
     ap.add_argument("--quality", type=int, default=88)
+    try:
+        kinds = list(_design().KINDS)
+    except Exception:  # copied without design.py: no kinds
+        kinds = None
+    ap.add_argument("--kind", choices=kinds,
+                    help="design kind: wraps --prompt in the kind's rules and sets its size "
+                         "and background (list them: design.py kinds)")
+    ap.add_argument("--direction", action="store_true",
+                    help="with --kind: add the art direction for the kind's group")
+    ap.add_argument("--theme", choices=["light", "dark"])
+    ap.add_argument("--platform", choices=["ios", "android", "neutral"])
+    ap.add_argument("--system", help="with --kind: design system text to follow exactly")
+    ap.add_argument("--system-file", help="with --kind: read the design system from a file")
+    ap.add_argument("--copy-space", choices=["left", "right", "center", "top", "bottom"],
+                    help="with --kind hero-image: where the HTML headline goes")
+    ap.add_argument("--upscale", type=float, metavar="FACTOR",
+                    help="enlarge the result (Lanczos + light sharpen), e.g. 2")
     args = ap.parse_args()
+    system = args.system
+    if args.system_file:
+        with open(args.system_file) as f:
+            system = f.read()
 
     kw = dict(model=args.model, refs=args.refs, timeout=args.timeout, width=args.width,
               height=args.height, square_size=args.square, fit=args.fit, fmt=args.format,
               favicon=args.favicon, knockout=args.knockout, quality=args.quality,
-              keep_original=args.keep_original, variant=args.model_variant, size=args.size)
+              keep_original=args.keep_original, variant=args.model_variant, size=args.size,
+              kind=args.kind, direction=args.direction, theme=args.theme,
+              platform=args.platform, system=system, copy_space=args.copy_space,
+              upscale=args.upscale)
     try:
         if args.variants > 1:
             res = render_variants(args.prompt, args.out, args.variants, **kw)

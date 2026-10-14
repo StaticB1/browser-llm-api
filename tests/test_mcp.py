@@ -75,7 +75,8 @@ class MCPProtocolTest(unittest.TestCase):
         mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = self.sent.by_id(2)["result"]["tools"]
         self.assertEqual({t["name"] for t in tools},
-                         {"ask", "generate_image", "list_models", "health"})
+                         {"ask", "generate_image", "design_set", "design_tokens",
+                          "design_review", "list_models", "health"})
         for t in tools:
             self.assertTrue(t["description"], f"{t['name']} needs a description")
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -87,6 +88,10 @@ class MCPProtocolTest(unittest.TestCase):
         self.assertEqual(by_name["ask"]["inputSchema"]["required"], ["prompt"])
         self.assertEqual(by_name["generate_image"]["inputSchema"]["required"],
                          ["prompt", "out"])
+        self.assertEqual(by_name["design_set"]["inputSchema"]["required"],
+                         ["brief", "out_dir"])
+        self.assertEqual(by_name["design_tokens"]["inputSchema"]["required"],
+                         ["images", "out_dir"])
 
     def test_tools_list_is_json_serialisable(self):
         json.dumps(mcp_server.TOOLS)  # a client can only receive what encodes

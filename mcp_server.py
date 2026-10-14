@@ -14,7 +14,12 @@ frames only, everything human-readable goes to stderr.
 
 Tools:
   ask             prompt (+ images, + system) -> text
-  generate_image  prompt (+ reference images, sizing) -> a written file path
+  generate_image  prompt (+ reference images, sizing, design kind) -> a written file path
+  design_set      brief + sections/screens -> one image each, one design system
+                  (design.py), with a manifest and a stacked preview
+  design_tokens   design images -> tokens.json, tokens.css, DESIGN.md
+  design_review   design image + build screenshot -> differences and fixes,
+                  or one screenshot -> a critique
   list_models     which providers are configured and reachable
   health          is the API up, is a request in flight, is the session alive
 
@@ -36,6 +41,12 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from client import ask as _ask  # noqa: E402  (stdlib-only sibling module)
+
+try:
+    from design import kind_names as _kind_names  # noqa: E402  (stdlib-only too)
+    _KINDS = _kind_names()
+except Exception:  # an install without design.py still serves the other tools
+    _KINDS = []
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "browser-llm"
@@ -176,8 +187,133 @@ TOOLS = [
                 },
                 "quality": {"type": "integer"},
                 "timeout": {"type": "integer"},
+                "kind": {"type": "string", "enum": _KINDS,
+                         "description": "Design kind: the prompt becomes the brief inside "
+                                        "the kind's rules (one website section, an app "
+                                        "screen in a phone frame, a text-free hero image, "
+                                        "an icon on transparency ...) and the kind's size "
+                                        "and background apply."},
+                "direction": {"type": "boolean",
+                              "description": "With kind: add the art-direction block for "
+                                             "the kind's group (otherwise ChatGPT picks "
+                                             "the style)."},
+                "theme": {"type": "string", "enum": ["light", "dark"]},
+                "platform": {"type": "string", "enum": ["ios", "android", "neutral"],
+                             "description": "kind mobile-screen only."},
+                "system": {"type": "string",
+                           "description": "Design system text to follow exactly: colours "
+                                          "with hex, typefaces, radius."},
+                "copy_space": {"type": "string",
+                               "enum": ["left", "right", "center", "top", "bottom"],
+                               "description": "kind hero-image only: where the HTML "
+                                              "headline will sit."},
+                "upscale": {"type": "number",
+                            "description": "Enlarge the result by this factor (Lanczos + "
+                                           "light sharpen)."},
             },
             "required": ["prompt", "out"],
+        },
+    },
+    {
+        "name": "design_set",
+        "description": (
+            "Design a whole page or app flow with ChatGPT's image tool, Codex-style: ONE "
+            "large readable image per section or screen, made one after another, each "
+            "carrying the first image and the one before it as references so the set "
+            "keeps one design system. Writes NN-name.png files, manifest.json and "
+            "preview.png into out_dir. About 1 to 1.5 min per image; the call refuses if "
+            "the set does not fit in ChatGPT's remaining daily images (partial=true "
+            "overrides). Calling it again resumes a stopped set. directions=3 first makes "
+            "three candidates for section 1 and stops; call again with pick=K. Use "
+            "dry_run=true to see every prompt without spending an image. For sets over "
+            "6 images prefer the CLI (design.py set) in the background: an MCP client "
+            "may time out the call, although the set keeps going and resumes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "brief": {"type": "string",
+                          "description": "The product, its audience, what the page or app "
+                                         "must make them do, and facts to show."},
+                "kind": {"type": "string", "enum": _KINDS,
+                         "description": "Default section. mobile-screen for app flows."},
+                "sections": {
+                    "type": "array",
+                    "items": {"type": ["string", "object"]},
+                    "description": "In order. 'Name: content' strings or {name, content}. "
+                                   "Content holds the real words: headline, buttons, "
+                                   "items, numbers.",
+                },
+                "out_dir": {"type": "string", "description": "Absolute output folder."},
+                "system": {"type": "string",
+                           "description": "Design system text to follow exactly (or the "
+                                          "text of a DESIGN.md)."},
+                "theme": {"type": "string", "enum": ["light", "dark"]},
+                "platform": {"type": "string", "enum": ["ios", "android", "neutral"]},
+                "direction": {"type": "boolean",
+                              "description": "Add art direction (otherwise ChatGPT picks "
+                                             "the style)."},
+                "copy_space": {"type": "string",
+                               "enum": ["left", "right", "center", "top", "bottom"]},
+                "refs": {"type": "array", "items": {"type": "string"},
+                         "description": "Your own references for every image: logo, brand "
+                                        "assets, a screenshot of the current site."},
+                "lock": {"type": "string",
+                         "description": "An approved image that sets the design system "
+                                        "for every item."},
+                "directions": {"type": "integer",
+                               "description": "Make N candidates for item 1 first, then "
+                                              "stop for pick."},
+                "pick": {"type": "integer", "description": "Continue with direction K."},
+                "redo": {"type": "array", "items": {"type": "string"},
+                         "description": "Items (index or name) to make again."},
+                "partial": {"type": "boolean"},
+                "dry_run": {"type": "boolean"},
+                "model_variant": {"type": "string"},
+            },
+            "required": ["brief", "out_dir"],
+        },
+    },
+    {
+        "name": "design_tokens",
+        "description": (
+            "Read the design system out of design images (up to 6): colours (checked "
+            "against colours measured from the pixels), typefaces, type scale, spacing, "
+            "radii, shadows, components and a per-section layout description. Writes "
+            "tokens.json, tokens.css (custom properties) and DESIGN.md into out_dir for "
+            "the coding step. One ChatGPT text call, a few minutes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "images": {"type": "array", "items": {"type": "string"},
+                           "description": "Absolute paths, in page order."},
+                "out_dir": {"type": "string"},
+                "model_variant": {"type": "string"},
+            },
+            "required": ["images", "out_dir"],
+        },
+    },
+    {
+        "name": "design_review",
+        "description": (
+            "Compare a screenshot of the build with its design image and list every "
+            "difference with the fix (match score, severity, CSS-level fix), or give a "
+            "critique of one screenshot. Writes <out>.md and <out>.json. Take the build "
+            "screenshot at the design's width (1440 for web sections)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "design": {"type": "string", "description": "The design image."},
+                "build": {"type": "string", "description": "The build screenshot."},
+                "critique": {"type": "string",
+                             "description": "Instead of design+build: one image to critique."},
+                "out": {"type": "string", "description": "Review file path (.md)."},
+                "width": {"type": "integer", "description": "The screenshot's viewport width."},
+                "notes": {"type": "string", "description": "Context for the reviewer."},
+                "model_variant": {"type": "string"},
+            },
         },
     },
     {
@@ -243,6 +379,13 @@ def tool_generate_image(args):
         quality=int(args.get("quality") or 88),
         keep_original=bool(args.get("keep_original")),
         variant=args.get("model_variant") or None,
+        kind=args.get("kind") or None,
+        direction=bool(args.get("direction")),
+        theme=args.get("theme") or None,
+        platform=args.get("platform") or None,
+        system=args.get("system") or None,
+        copy_space=args.get("copy_space") or None,
+        upscale=float(args["upscale"]) if args.get("upscale") else None,
     )
 
     def line(r):
@@ -262,6 +405,68 @@ def tool_generate_image(args):
     return line(gen_asset.render_full(args["prompt"], out, **kw))
 
 
+def tool_design_set(args):
+    import design
+
+    if not str(args.get("brief") or "").strip():
+        raise ValueError("brief is required")
+    spec = {k: args[k] for k in ("brief", "kind", "sections", "system", "theme", "platform",
+                                 "direction", "copy_space", "refs", "lock") if args.get(k)}
+    out_dir = os.path.abspath(os.path.expanduser(args["out_dir"]))
+    res = design.run_set(spec, out_dir, dry_run=bool(args.get("dry_run")),
+                         partial=bool(args.get("partial")),
+                         directions=int(args.get("directions") or 0),
+                         pick=args.get("pick") or None, redo=args.get("redo") or None,
+                         variant=args.get("model_variant") or None,
+                         timeout=DEFAULT_TIMEOUT, log=log)
+    if res["status"] == "dry-run":
+        parts = [f"[{st['state']}] {st['file']} (refs: "
+                 f"{', '.join(os.path.basename(r) for r in st['refs']) or 'none'})\n"
+                 f"{st['prompt']}" for st in res["steps"]]
+        return "\n\n".join(parts) + f"\n\n{res['planned']} image(s) to make."
+    if res["status"] == "pick":
+        return ("Made the candidate directions; open the sheet and call design_set again "
+                "with the same arguments plus pick=K.\n"
+                + "\n".join(res["directions"])
+                + (f"\nsheet {res['sheet']}" if res.get("sheet") else ""))
+    lines = [f"made {res['made']} image(s) this call; manifest {res['manifest']}"]
+    lines += res["files"]
+    if res.get("preview"):
+        lines.append(f"preview {res['preview']}")
+    lines.append("Open the images and the preview before building from them; "
+                 "design_tokens reads the design system out of them.")
+    return "\n".join(lines)
+
+
+def tool_design_tokens(args):
+    import design
+
+    images = [os.path.abspath(os.path.expanduser(p)) for p in args.get("images") or []]
+    out_dir = os.path.abspath(os.path.expanduser(args["out_dir"]))
+    res = design.extract_tokens(images, out_dir, variant=args.get("model_variant") or None,
+                                log=log)
+    t = res["tokens"]
+    return (f"wrote {res['files']['md']}, {res['files']['css']} and {res['files']['json']}: "
+            f"{len(t.get('colors') or [])} colours, {len(t.get('type_scale') or [])} type "
+            f"styles, {len(t.get('components') or [])} components. Read DESIGN.md before "
+            f"building; sizes are estimates.")
+
+
+def tool_design_review(args):
+    import design
+
+    def path(k):
+        v = args.get(k)
+        return os.path.abspath(os.path.expanduser(v)) if v else None
+
+    res = design.review(design=path("design"), build=path("build"),
+                        critique=path("critique"), out=path("out"),
+                        notes=args.get("notes"), width=args.get("width"),
+                        variant=args.get("model_variant") or None, log=log)
+    with open(res["files"]["md"]) as f:
+        return f.read() + f"\n(also {res['files']['json']})"
+
+
 def tool_list_models(_args):
     d = _get("/v1/models")
     return "\n".join(m["id"] for m in d.get("data", [])) or "(none configured)"
@@ -279,6 +484,9 @@ def tool_health(_args):
 HANDLERS = {
     "ask": tool_ask,
     "generate_image": tool_generate_image,
+    "design_set": tool_design_set,
+    "design_tokens": tool_design_tokens,
+    "design_review": tool_design_review,
     "list_models": tool_list_models,
     "health": tool_health,
 }

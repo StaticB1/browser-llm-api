@@ -66,6 +66,15 @@ ChatGPT is asked for the size and a transparent background in words, then the fi
 to the exact pixels. Exit code 3 means ChatGPT's image limit is reached and the message gives
 the reset time: stop there and say so; don't retry before it.
 
+**Design a page or an app flow** (one image per section, one design system, then tokens and a
+review of your build; see README, "Designing with ChatGPT's image tool"):
+```bash
+./venv/bin/python design.py set --kind section --brief "what it is, for whom, the action" \
+  --section "Hero: headline '...', button '...'" --section "Pricing: ..." --out designs/home
+./venv/bin/python design.py tokens designs/home/0*.png --out designs/home
+./venv/bin/python design.py review --design designs/home/01-hero.png --build shot.png --width 1440
+```
+
 **From a coding agent** (MCP — the agent gets real tools instead of a shell command):
 ```bash
 claude mcp add browser-llm -- "$PWD/venv/bin/python" "$PWD/mcp_server.py"

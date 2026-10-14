@@ -52,6 +52,11 @@ IMAGE_RESERVE = max(0, int(os.environ.get("CHATGPT_IMAGE_RESERVE", "0") or 0))
 # site really used (one GET per request). Off: report what the page sent.
 READ_ANSWERED_MODEL = os.environ.get("CHATGPT_READ_MODEL", "1").strip().lower() \
     not in ("0", "false", "no", "off")
+# Put the composer into the site's own "Create image" mode before an image
+# request, so the image tool is certain rather than asked for in words. Off:
+# words only ("Use the image generation tool ..."), as before 14 Oct 2026.
+IMAGE_TOOL_MODE = os.environ.get("CHATGPT_IMAGE_TOOL", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
 
 
 def _norm(s) -> str:
@@ -198,6 +203,31 @@ _USER_TURN_SEL = ", ".join([
     '[data-user-message-bubble]',
 ])
 
+# The composer's tool mode, measured live on 14 Oct 2026 (Plus). The + button
+# (aria-label "Add files and more") opens a menu whose "Create image" item puts
+# an inline pill INTO the ProseMirror editor at the caret:
+# span[data-inline-selection-pill][data-system-hint-type="picture_v2"], with
+# contenteditable=false and the text "Create image". Three facts follow, each
+# measured on the live tab without sending:
+#   * selecting the editor's contents and inserting text (type_prompt's draft
+#     guard) deletes the pill, and so does select-all + Backspace;
+#   * choosing the tool after the prompt is typed drops the pill wherever the
+#     caret is, which was mid-word ("line tw<pill>o"); so the tool goes in FIRST
+#     on an empty composer, and the prompt is inserted after it, at the end;
+#   * the pill is part of the draft and survives a reload, so a text request
+#     clears any pill before it types.
+# Attaching a file after choosing the tool leaves the pill in place.
+_TOOL_PILL_SEL = ", ".join([
+    '[data-inline-selection-pill]',
+    '[data-system-hint-type]',
+])
+_IMAGE_PILL_SEL = ", ".join([
+    '[data-system-hint-type="picture_v2"]',
+    '[data-inline-selection-pill][data-system-hint-label="Create image"]',
+])
+_PLUS_LABELS = ["Add files and more"]
+_IMAGE_TOOL_LABELS = ["Create image"]
+
 # In-page helpers shared by the reads below (ES5, pasted inside each IIFE):
 # _turns() = the assistant turns in document order, _body(turn) = the answer's
 # markdown root, _COMPOSER = the composer selector list.
@@ -218,6 +248,65 @@ _PAGE_HELPERS_JS = """
       ||turn.querySelector('.prose')||turn;
   };
 """.replace("__COMPOSER__", json.dumps(_COMPOSER_SEL))
+
+# The editor's tool pills and its text with the pills left out. textContent of
+# a clone: the pill's own label ("Create image") must not count as typed text.
+_TOOL_STATE_JS = r"""
+(function(){
+  var ed=document.querySelector(__COMPOSER__);
+  if(!ed) return JSON.stringify({editor:false});
+  var c=ed.cloneNode(true);
+  Array.prototype.forEach.call(c.querySelectorAll(__PILLS__), function(p){ p.remove(); });
+  return JSON.stringify({editor:true,
+    pills: ed.querySelectorAll(__PILLS__).length,
+    image: ed.querySelectorAll(__IMAGE__).length,
+    text: c.textContent || ''});
+})()
+""".replace("__COMPOSER__", json.dumps(_COMPOSER_SEL)).replace(
+    "__PILLS__", json.dumps(_TOOL_PILL_SEL)).replace("__IMAGE__", json.dumps(_IMAGE_PILL_SEL))
+
+# Centre of the + button, and of the menu's "Create image" item once it is open.
+_PLUS_RECT_JS = r"""
+(function(){
+  var L=__LABELS__, bs=document.querySelectorAll('form button, button');
+  for(var i=0;i<bs.length;i++){
+    if(L.indexOf(bs[i].getAttribute('aria-label')||'')<0) continue;
+    var r=bs[i].getBoundingClientRect();
+    if(r.width) return JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2});
+  }
+  return '{}';
+})()
+""".replace("__LABELS__", json.dumps(_PLUS_LABELS))
+# The item reads "Create image" over a subtitle ("Visualize anything"); match
+# the label at the start whether or not a line break separates the two. Open
+# menus are searched first, so a sidebar entry with the same words never wins.
+_IMAGE_ITEM_RECT_JS = r"""
+(function(){
+  var L=__LABELS__;
+  var starts=function(el){
+    var t=(el.innerText||'').replace(/\s+/g,' ').trim();
+    for(var j=0;j<L.length;j++){
+      var l=L[j];
+      if(t===l || t.indexOf(l+' ')===0) return true;
+      if(t.indexOf(l)===0 && /[A-Z]/.test(t.charAt(l.length))) return true;
+    }
+    return false;
+  };
+  var scopes=['[role=menu]','[data-radix-popper-content-wrapper]','[role=dialog]','body'];
+  for(var k=0;k<scopes.length;k++){
+    var roots=document.querySelectorAll(scopes[k]);
+    for(var m=0;m<roots.length;m++){
+      var bs=roots[m].querySelectorAll('[role=menuitem], [role=option], button');
+      for(var i=0;i<bs.length;i++){
+        if(!starts(bs[i]) || bs[i].closest('form')) continue;  // not the pill itself
+        var r=bs[i].getBoundingClientRect();
+        if(r.width) return JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2});
+      }
+    }
+  }
+  return '{}';
+})()
+""".replace("__LABELS__", json.dumps(_IMAGE_TOOL_LABELS))
 
 
 # Shared image predicates. `_isGenImg` matches ChatGPT's generated-image URLs;
@@ -384,6 +473,96 @@ class ChatGPTProvider(Provider):
     _SELECT_ALL_JS = """(elem) => { elem.focus();
         const r = document.createRange(); r.selectNodeContents(elem);
         const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }"""
+    _CARET_END_JS = """(elem) => { elem.focus();
+        const r = document.createRange(); r.selectNodeContents(elem); r.collapse(false);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }"""
+
+    # ---- composer tool mode ("Create image") -------------------------------
+    async def _tool_state(self, page) -> dict:
+        """{editor, pills, image, text}: the editor's tool pills, whether one is
+        the image tool, and its text without them. {} when unreadable."""
+        try:
+            raw = await page.evaluate(_TOOL_STATE_JS)
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            return {}
+
+    async def _point(self, page, js) -> dict:
+        try:
+            raw = await page.evaluate(js)
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            return {}
+
+    async def composer_text(self, page) -> str | None:
+        # Without the pills: a pill left after sending must not read as an
+        # unsent prompt in _send_landed, nor as typed text in type_prompt.
+        st = await self._tool_state(page)
+        if st.get("editor"):
+            return st.get("text") or ""
+        return await super().composer_text(page)
+
+    async def clear_composer(self, page) -> bool:
+        """Empty the editor, tool pills included. Select-all + Backspace, which
+        was measured to drop a pill (an insert alone leaves an empty editor's
+        pill alone). Up to three passes; True once it is empty."""
+        from nodriver import cdp
+        for _ in range(3):
+            st = await self._tool_state(page)
+            if not st.get("editor"):
+                return False
+            if not st.get("pills") and not _norm(st.get("text")):
+                return True
+            try:
+                ed = await page.select(self.input_selector, timeout=5)
+                await ed.apply(self._SELECT_ALL_JS)
+                await asyncio.sleep(0.15)
+                for kind in ("keyDown", "keyUp"):
+                    await page.send(cdp.input_.dispatch_key_event(
+                        type_=kind, key="Backspace", code="Backspace",
+                        windows_virtual_key_code=8))
+            except Exception as e:
+                logger.warning(f"[{self.name}] clearing the composer failed: {e}")
+                return False
+            await asyncio.sleep(0.4)
+        st = await self._tool_state(page)
+        return bool(st.get("editor")) and not st.get("pills") and not _norm(st.get("text"))
+
+    async def select_image_tool(self, page) -> bool:
+        """Choose "Create image" from the composer's + menu, on an emptied
+        composer so the pill lands first. True once the pill is in. A failure
+        is logged and returns False: the request still goes, in words."""
+        if not await self.clear_composer(page):
+            logger.warning(f"[{self.name}] the composer did not empty before choosing "
+                           f"Create image")
+        if (await self._tool_state(page)).get("image"):
+            return True
+        plus = await self._point(page, _PLUS_RECT_JS)
+        if not plus.get("x"):
+            logger.warning(f"[{self.name}] no + button ({_PLUS_LABELS}) to choose Create "
+                           f"image from; the prompt asks for the tool in words")
+            return False
+        await self._click_xy(page, plus["x"], plus["y"])
+        item = {}
+        for _ in range(8):
+            await asyncio.sleep(0.3)
+            item = await self._point(page, _IMAGE_ITEM_RECT_JS)
+            if item.get("x"):
+                break
+        if not item.get("x"):
+            await self._escape(page)
+            logger.warning(f"[{self.name}] the + menu has no {_IMAGE_TOOL_LABELS} item; "
+                           f"the prompt asks for the tool in words")
+            return False
+        await self._click_xy(page, item["x"], item["y"])
+        for _ in range(10):
+            await asyncio.sleep(0.3)
+            if (await self._tool_state(page)).get("image"):
+                logger.info(f"[{self.name}] composer is in Create image mode")
+                return True
+        await self._escape(page)
+        logger.warning(f"[{self.name}] chose Create image but no pill appeared")
+        return False
 
     async def type_prompt(self, page, input_box, prompt: str) -> None:
         # Measured 12 Oct 2026 on the composer of 11 Oct: a "\n" sent as a CDP
@@ -395,6 +574,22 @@ class ChatGPTProvider(Provider):
         # the whole composer first drops any draft the site restored.
         from nodriver import cdp
         want = _norm(prompt)
+        if (await self._tool_state(page)).get("pills"):
+            # Tool mode (select_image_tool ran on an emptied composer): the
+            # pill sits in the editor and select-all would delete it, so put
+            # the caret at the end and insert after it.
+            await input_box.apply(self._CARET_END_JS)
+            await asyncio.sleep(0.15)
+            await page.send(cdp.input_.insert_text(text=prompt))
+            await asyncio.sleep(0.3)
+            st = await self._tool_state(page)
+            got = _norm(st.get("text"))
+            if st.get("pills") and (not got or got == want):
+                return
+            logger.warning(f"[{self.name}] after typing in tool mode the composer holds "
+                           f"{len(got)} chars (want {len(want)}), pill "
+                           f"{'kept' if st.get('pills') else 'gone'}; typing it again "
+                           f"without the tool, the prompt still names it")
         for attempt in (1, 2):
             await input_box.apply(self._SELECT_ALL_JS)
             await asyncio.sleep(0.15)
@@ -532,6 +727,14 @@ class ChatGPTProvider(Provider):
             if refusal:
                 raise refusal
         options["picker"] = await self.select_variant(page, model_label, effort)
+        if options.get("kind") == "image" and IMAGE_TOOL_MODE:
+            options["image_tool"] = await self.select_image_tool(page)
+        elif (await self._tool_state(page)).get("pills"):
+            # A pill is part of the draft and survives a reload: a "Create
+            # image" left by an image request that failed before sending would
+            # turn this text request into a picture.
+            logger.info(f"[{self.name}] clearing a tool pill left in the composer")
+            await self.clear_composer(page)
 
     async def answered_model(self, page) -> dict:
         record = {}
@@ -725,9 +928,30 @@ class ChatGPTProvider(Provider):
                     return (canvasTxt.length>40 && canvasTxt.length>msg.length) ? canvasTxt : msg;
                 })()
             """)
-            return result if isinstance(result, str) else ""
-        except Exception:
+            if isinstance(result, str):
+                return result
+            self._note_read_failure(result)
             return ""
+        except Exception as e:
+            self._note_read_failure(e)
+            return ""
+
+    # On 14 Oct 2026 two answers at GPT-6 High came back "Done (empty). 0 chars"
+    # although the conversation record said gpt-6-thinking had answered. The
+    # read above turns a script error (nodriver hands back the exception details
+    # instead of a string) or a Python exception into "", which is exactly what
+    # an empty answer looks like, and said nothing. Not reproduced since; this
+    # makes the next one name its cause. At most one line per 30 s, because the
+    # read runs on every poll.
+    _read_failure_logged = 0.0
+
+    def _note_read_failure(self, what) -> None:
+        now = time.monotonic()
+        if now - self._read_failure_logged < 30:
+            return
+        self._read_failure_logged = now
+        logger.warning(f"[{self.name}] answer read failed, so the answer reads as empty: "
+                       f"{type(what).__name__}: {str(what)[:300]}")
 
     async def is_generating(self, page) -> bool:
         try:

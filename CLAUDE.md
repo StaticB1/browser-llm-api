@@ -120,7 +120,7 @@ pyproject.toml       # packaging: metadata, deps, dynamic version, `browser-llm`
                      #   Ruff selects E/F/W only: bugbear's B904 would mean touching eight
                      #   exception handlers in server.py for no behaviour change. The repo
                      #   is clean at that setting — keep it that way, CI fails otherwise.
-.github/workflows/ci.yml  # lint + the 160 unit tests + an editable install + a live MCP
+.github/workflows/ci.yml  # lint + the 245 unit tests + an editable install + a live MCP
                      #   handshake, on every push and PR. No browser, no network, no secrets,
                      #   so a green build means the pure logic holds, NOT that the sites still
                      #   scrape. Nothing here can catch a DOM change; only a real request can.
@@ -188,7 +188,14 @@ tests/               # unit tests (no browser needed):
                      #   test_plus.py (EBE-2054: limits counter + refusal text → 429,
                      #   model_variant/effort parsing, size words, pixel sizes,
                      #   IMAGE_PROVIDERS 403, gen_asset size/original/variants/exit 3,
-                     #   draft replaced not appended, request bodies asked for)
+                     #   draft replaced not appended, request bodies asked for),
+                     #   test_design.py (14 Oct 2026: every kind's words and no style
+                     #   word without --direction, set references/resume/redo,
+                     #   directions + pick, quota refusal, limit part-way, tokens and
+                     #   review parsing, the server's kind fields, gen_asset --kind and
+                     #   --upscale, the Create image mode with a stand-in page,
+                     #   file-input ranking run under node, an input that takes
+                     #   some of the files, a failed answer read logged)
 providers/
   __init__.py        # PROVIDERS registry + get_provider(model) + DEFAULT_PROVIDER
                      #   + IMAGE_PROVIDERS
@@ -209,7 +216,8 @@ providers/
                      #   own backend-api: _LIST_JS, _ONE_JS, _CONV_ID_JS, _DELETE_JS
 login.py             # generic re-auth helper:  python login.py gemini|chatgpt
 mcp_server.py        # MCP stdio server (JSON-RPC 2.0, stdlib only, no `mcp` package):
-                     #   tools ask / generate_image / list_models / health. Thin client of
+                     #   tools ask / generate_image / design_set / design_tokens /
+                     #   design_review / list_models / health. Thin client of
                      #   the HTTP API — imports client.ask and gen_asset.render rather than
                      #   reimplementing them. tools/call runs on a worker thread and main()
                      #   joins in-flight threads on EOF (a dropped stdin must not lose a
@@ -227,6 +235,20 @@ gen_asset.py         # CLI wrapper: POST /v1/images/generations (model chatgpt-b
                      #   `render()` is the whole wrapper as one call (generate → shape →
                      #   write → return path); main() is just argparse over it, and
                      #   mcp_server calls the same function. Keep them sharing it.
+design.py            # design with the image tool (14 Oct 2026). KINDS (13: section, page,
+                     #   hero-image, og-image, mobile-screen, component, brand-board, icon,
+                     #   logo-concept, illustration, diagram, texture, avatar) and compose(),
+                     #   which writes a kind's STRUCTURAL rules around the brief, with no
+                     #   style words; DIRECTION (--direction) adds an art-direction block per
+                     #   group, condensed from the imagegen-frontend-web, image-to-code,
+                     #   imagegen-frontend-mobile and brandkit skills; edit both together.
+                     #   The prompt part is stdlib-only because server.py imports it.
+                     #   run_set(): one image per section/screen, each with the set's first
+                     #   image + the one before as references; manifest.json after every
+                     #   image (resume, --redo), --directions N then --pick K, --lock, the
+                     #   quota_plan() refusal (code 3), preview.png. extract_tokens() and
+                     #   review() are ChatGPT text calls over images that must answer JSON.
+                     #   Console entry point `browser-llm-design`.
 AGENT_IMAGE_GUIDE.md # instructions to hand an AI agent for generating site image assets
 gemini_bot.py        # standalone single-prompt prototype (Gemini only). UNCHANGED, not part of the server.
 serve.sh             # run the server: venv python + display auto-detect (real $DISPLAY else Xvfb).
@@ -365,6 +387,27 @@ files, and the provider uploads them through the site's own file picker before s
 - **Endpoint** `POST /v1/images/generations`: `{"created", "data":[{b64_json?, url?, path?, width, height, mime, revised_prompt?}], "model_used"}`. `n` ignored; `size`, `background` and `model_variant` are honoured (`Provider.image_prompt` writes size and background into the prompt in words, ChatGPT's adds "Use the image generation tool to create this image."; no style words, per the design-with-chatgpt rule). **501** if the provider doesn't support images, **403** if `IMAGE_PROVIDERS` leaves it out, **429** with `Retry-After` on a usage limit (`providers/limits.py`), **502** if it returned none otherwise (the detail quotes the page).
 - **Usage limits** (`providers/limits.py`, EBE-2054). Before an image, `ChatGPTProvider.prepare_page` POSTs `/backend-api/conversation/init` from inside the page and reads `limits_progress`; `quota_refusal` raises `UsageLimitReached` when `image_gen.remaining <= CHATGPT_IMAGE_RESERVE` or the feature is in `blocked_features`. After a request with no image, `refusal_from_message` matches ChatGPT's second-person refusal wording ("You've hit the Plus plan limit for image generation ... resets in 23 hours", "You're generating images too quickly ... wait for 3 minutes") and works out the reset. Both become 429. On 13 Oct 2026 the counter read 120 (24 h window) and did not drop after 7 images, so the text parser is the backstop that will actually fire.
 
+## Design kinds, sets, tokens and review (added 2026-10-14)
+
+Eben asked for image generation "like Codex, Astra etc." for frontend, UI, UX and design work. What
+Codex does with GPT-6 Astra and Images 2.0 is image-first: one large readable image per section,
+references for consistency, then build and compare screenshots. This repo now does the same through
+the browser session; docs/design-upgrade.md is the audit, the plan and the live test. Eben decided
+each choice himself (three question rounds, 14 Oct 2026); the main ones:
+
+- **Prompts are structural by default and art-directed on request.** No style words unless
+  `--direction` (his CLAUDE.md bans steering adjectives; the skills he installed use them, so he
+  chose both, switchable). tests/test_design.py checks the word list against every kind.
+- **Consistency comes from reference images, not one long conversation.** Each item is a fresh
+  chat with the first item and the previous one attached (6 attachments at most). Continuing one
+  thread so the image tool sees its own images is a possible phase 2; it needs a drive that opens
+  an existing conversation and ignores its earlier images, which the one-tab rule makes delicate.
+- **Upscaling is Pillow only** (Lanczos + unsharp mask), by his choice; no model download.
+- **A set refuses when it does not fit the day's images** unless `--partial`.
+- `/v1/images/*` take `kind`, `direction`, `theme`, `platform`, `system`, `copy_space` and answer
+  `prompt_sent` and `image_tool`. A kind is composed BEFORE a remote proxy, so an upstream that
+  predates `kind` still gets the full words.
+
 ## Ephemeral conversations (added 2026-08-20)
 
 `"ephemeral": true` on a chat completion deletes the conversation once the answer has been read, for
@@ -459,6 +502,7 @@ generated and the thread on the site.
 | `CHATGPT_EFFORT` | `high` | Picker power slider: `instant` / `medium` / `high` (aliases fast, standard, extended). |
 | `CHATGPT_IMAGE_RESERVE` | `0` | Images on ChatGPT's own counter that requests here must leave for the account owner (this install: 10). |
 | `CHATGPT_READ_MODEL` | `1` | Read the conversation record after each answer for `model_used` (one extra GET). |
+| `CHATGPT_IMAGE_TOOL` | `1` | Put the composer in the site's Create image mode before an image request; `0` = words only. |
 | `GEMINI_IMAGE_DIR` | `~/Pictures/browser-llm` | Base dir for saved images; each provider gets a subfolder (`chatgpt/`, `gemini/`). `IMAGE_DIR` also accepted. |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | Base URL used to build returned image links. |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `8` | Recycle a provider's browser after this many image gens. Was 3 for the free plan's renderer bloat; on Plus the renderer stayed at 479-548 MB settled, 754-813 MB peak, over 7 images (13 Oct 2026). |
@@ -585,7 +629,7 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (160 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (245 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
@@ -725,6 +769,44 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   the parked position in `chatgpt_profile/Default/Preferences` and reopened at `+1890+1050` with
   a corner on-screen, so a restart alone would not have been a dependable fix. **Don't move or
   cover the service windows on `:98`, and don't remove the flag.**
+- **ChatGPT's "Create image" mode is a pill INSIDE the editor (measured live 14 Oct 2026, Plus,
+  nothing sent).** The composer's + button (`aria-label="Add files and more"`) opens a menu whose
+  "Create image" item inserts `span[data-inline-selection-pill][data-system-hint-type="picture_v2"]`
+  (contenteditable=false, text "Create image") at the caret. Three traps, each reproduced: selecting
+  the editor's contents and inserting text, which is exactly type_prompt's draft guard, deletes the
+  pill, and so does select-all + Backspace; choosing the tool after typing drops the pill wherever
+  the caret is (it landed mid-word, "line tw<pill>o"); and the pill is part of the draft, so it
+  survives a reload and would turn the next text request into a picture. Hence the order in
+  `prepare_page`: empty the composer, choose the tool, attach files (an attachment leaves the pill
+  alone), then `type_prompt` inserts at the END without select-all; a text request clears any
+  pill first. `composer_text` leaves pills out, or `_send_landed` would read a leftover pill as an
+  unsent prompt. A failure to find the menu item logs and sends in words (`image_tool: false`).
+- **Several attachments went to a single-file camera input first (fixed 14 Oct 2026).** File
+  inputs were ranked by `accept` alone, so ChatGPT's four tied and document order won: "Take a
+  photo" (accept image/*, `capture`, no `multiple`) came first. Given a design set's two
+  references it took one, the chip count stalled at 1 of 2, and `_attach_via_input` handed BOTH
+  files to the next input: ChatGPT received three images (seen live in the user turn). Now a
+  `capture` input ranks last, an input without `multiple` ranks below every one with it when
+  more than one file goes, and an input that takes some of the files gets the rest one at a
+  time instead of the next input getting all of them. Verified live: "attached 2 file(s) via
+  file input #0", two images in the sent turn.
+- **Open: empty answers at GPT-6 High (14 Oct 2026, not reproduced).** Two 3,568-character
+  prompts from an evaluation script came back "Done (empty). 0 chars" after 3-5 minutes while
+  the conversation record said gpt-6-thinking (extended) answered; the same prompt at Medium
+  returned 10,915 chars, and a 17,336-char tokens answer at High read fine. `get_response_text`
+  used to turn a script error into "" without a word; it now logs "answer read failed" with the
+  cause (at most every 30 s). Read that line before guessing next time, and keep the page
+  (`ephemeral: false`) to inspect its DOM.
+- **A restart serves whatever is on disk, and it cuts whatever is in flight (14 Oct 2026).**
+  The service runs this working tree. Another session restarted it at 15:12:41 to load a rotated
+  API key while providers/chatgpt.py was between edits. That time the file held only new constants
+  and chat kept working; a minute later the same restart would have loaded a `prepare_page` that
+  called methods not yet written, and every chat or image drive would have raised AttributeError
+  while history reads, which skip `prepare_page`, carried on and hid it. Make a provider change in
+  one write (or in a worktree) when someone else may restart the service. The other half: at 15:47
+  this session restarted it while `/api/status` showed ChatGPT `busy: true`, and cut an evaluation
+  request 35 s into its answer; the client still got a 200 with a partial reply. Before any
+  restart, read `/api/status` and do not go ahead while any provider is busy.
 - **ChatGPT redesigned its page on 11 Oct 2026 and every request failed for 36 hours (fixed
   2026-10-12).** The new page dropped `#prompt-textarea`, `data-message-author-role` and nearly every
   `data-testid` at once, so the composer, the send and stop buttons, the answer turn, the upload input

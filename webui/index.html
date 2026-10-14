@@ -326,6 +326,30 @@
   .frow input[type=text]{flex:1;min-width:220px}
   .frow input[type=text]:focus,.frow select:focus{border-color:var(--text3)}
   .imgcard{border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-bottom:18px}
+  /* Design presets on Create image: a kind wraps the prompt in that kind's rules
+     on the server (design.py); the prompt actually typed comes back and is shown
+     under the result. */
+  .presets{display:flex;gap:12px 14px;align-items:flex-end;flex-wrap:wrap;margin-top:14px}
+  .fld{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--text2);
+    letter-spacing:.02em}
+  .fld select{height:36px;border-radius:10px;border:1px solid var(--line);background:var(--bg);
+    color:var(--text);padding:0 10px;outline:none;font-size:14px;min-width:132px}
+  .fld select:focus{border-color:var(--text3)}
+  .presets .chk{margin-top:0;height:36px}
+  .presets .bt[aria-expanded="true"]{background:var(--hover)}
+  #imgsys{display:block;width:100%;min-height:104px;margin-top:12px;border:1px solid var(--line);
+    border-radius:11px;background:var(--bg);color:var(--text);padding:10px 12px;resize:vertical;
+    outline:none;font:13px/1.55 var(--mono)}
+  #imgsys:focus{border-color:var(--text3)}
+  #imgsys::placeholder{color:var(--text3)}
+  .kindabout{margin:12px 0 0}
+  .kindabout:empty{display:none}
+  .imgcard .meta{padding:10px 14px;font-size:13px;color:var(--text2);border-top:1px solid var(--line)}
+  .imgcard details{border-top:1px solid var(--line)}
+  .imgcard summary{padding:10px 14px;font-size:13px;color:var(--text2);cursor:pointer}
+  .imgcard summary:hover{color:var(--text)}
+  .imgcard details pre{margin:0;padding:0 14px 14px;white-space:pre-wrap;word-break:break-word;
+    font:12px/1.6 var(--mono);color:var(--text2)}
   .imgcard img{width:100%;display:block}
   .imgcard .cap{padding:10px 14px;font:12px/1.5 var(--mono);color:var(--text2);
     border-top:1px solid var(--line);word-break:break-all}
@@ -365,6 +389,9 @@
     body[data-sb="on"] aside{transform:none}
     body[data-sb="on"] .scrim{display:block}
     .col,.wide{padding-left:14px;padding-right:14px}
+    .presets .fld{flex:1 1 140px}
+    .presets .fld:first-child{flex-basis:100%}
+    .fld select{width:100%;min-width:0}
     .cmpwrap{padding:6px 12px 12px}
     .hero h1{font-size:23px}
   }
@@ -549,11 +576,49 @@
               <input type="file" id="imgfile" accept="image/*" multiple hidden>
               <button class="bt solid" id="imggen">Generate</button>
             </div>
+            <div class="presets" id="imgpresets">
+              <label class="fld"><span>Kind</span>
+                <select id="imgkind"><option value="">Free prompt</option></select></label>
+              <label class="fld"><span>Shape</span>
+                <select id="imgsize">
+                  <option value="">Kind default</option>
+                  <option value="1024x1024">Square</option>
+                  <option value="1600x900">16:9 wide</option>
+                  <option value="1536x1024">3:2</option>
+                  <option value="1200x630">1.91:1 share card</option>
+                  <option value="1080x1350">4:5 portrait</option>
+                  <option value="1024x1536">2:3 tall</option>
+                  <option value="1080x1920">9:16 phone</option>
+                </select></label>
+              <label class="fld"><span>Theme</span>
+                <select id="imgtheme">
+                  <option value="">Any</option><option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select></label>
+              <label class="fld" id="imgplatwrap" hidden><span>Platform</span>
+                <select id="imgplatform">
+                  <option value="">Either</option><option value="ios">iOS</option>
+                  <option value="android">Android</option>
+                </select></label>
+              <label class="fld" id="imgcopywrap" hidden><span>Headline space</span>
+                <select id="imgcopy">
+                  <option value="">Model decides</option><option value="left">Left</option>
+                  <option value="right">Right</option><option value="center">Centre</option>
+                  <option value="top">Top</option><option value="bottom">Bottom</option>
+                </select></label>
+              <label class="chk" title="Adds an art-direction block for this kind. Off, ChatGPT chooses the style.">
+                <input type="checkbox" id="imgdir"> Art direction</label>
+              <button class="bt" id="imgsysbtn" type="button" aria-expanded="false"
+                aria-controls="imgsys">Design system</button>
+            </div>
+            <textarea id="imgsys" hidden aria-label="Design system to follow" autocomplete="off" spellcheck="false" placeholder="Primary #0A2540, Inter 600 headings, 12px radius. A DESIGN.md from design.py tokens works…"></textarea>
+            <p class="hint kindabout" id="imgabout"></p>
             <div class="attrow" id="imgattach" style="padding-top:12px"></div>
             <div class="prog" id="imgprog"><span class="spin"></span><span id="imgprogtxt"></span></div>
             <p class="hint" style="margin:14px 0 0">
-              A generation takes 30 seconds to 4 minutes on the free tiers. Results are saved to
-              disk and appear in the Gallery.
+              An image takes about a minute on ChatGPT Plus, one at a time. Results are saved
+              to disk and appear in the Gallery. For a whole page or app flow in one design
+              system, use <code>design.py set</code> or the MCP tool <code>design_set</code>.
             </p>
           </div>
           <div id="imgout"></div>
@@ -1822,6 +1887,64 @@ $$("#chips .chip").forEach(b => b.onclick = () => {
 const imgAttach = attachStore("#imgattach", n => $("#imgclip").classList.toggle("on", n > 0));
 wireAttach(imgAttach, "#imgclip", "#imgfile", "#view-image", "#imgprompt");
 
+/* Design presets. The kinds come from the server (design.py), so the dashboard,
+   the CLI and the MCP tools offer the same list. The last choices are a
+   per-browser convenience under blm.imgpreset. */
+let designKinds = [];
+const PRESET_KEY = "blm.imgpreset";
+function savePreset(){
+  try{
+    localStorage.setItem(PRESET_KEY, JSON.stringify({
+      kind: $("#imgkind").value, size: $("#imgsize").value, theme: $("#imgtheme").value,
+      platform: $("#imgplatform").value, copy: $("#imgcopy").value,
+      dir: $("#imgdir").checked, sys: $("#imgsys").value}));
+  }catch(_){}
+}
+function paintPreset(){
+  const id = $("#imgkind").value;
+  const k = designKinds.find(x => x.id === id);
+  $("#imgplatwrap").hidden = id !== "mobile-screen";
+  $("#imgcopywrap").hidden = id !== "hero-image";
+  $("#imgdir").disabled = !id;
+  $("#imgdir").parentElement.style.opacity = id ? "" : ".55";
+  $("#imgabout").textContent = k
+    ? k.about + " Default " + k.size + (k.background ? ", " + k.background + " background" : "") + "."
+    : "";
+  $("#imgprompt").placeholder = k
+    ? "The brief: what it is, who it is for, the real words to show…"
+    : "isometric 3d rocket icon, bold colour, solid background";
+}
+async function loadKinds(){
+  try{
+    const j = await (await fetch("/api/design/kinds")).json();
+    designKinds = j.kinds || [];
+  }catch(_){ designKinds = []; }
+  const groups = {};
+  designKinds.forEach(k => (groups[k.group_label] = groups[k.group_label] || []).push(k));
+  $("#imgkind").innerHTML = '<option value="">Free prompt</option>' +
+    Object.entries(groups).map(([g, ks]) => '<optgroup label="' + esc(g) + '">' +
+      ks.map(k => '<option value="' + esc(k.id) + '">' + esc(k.label) + "</option>").join("") +
+      "</optgroup>").join("");
+  let saved = {};
+  try{ saved = JSON.parse(localStorage.getItem(PRESET_KEY) || "{}") || {}; }catch(_){}
+  if (saved.kind && designKinds.some(k => k.id === saved.kind)) $("#imgkind").value = saved.kind;
+  ["size", "theme", "platform"].forEach(f => { if (saved[f]) $("#img" + f).value = saved[f]; });
+  if (saved.copy) $("#imgcopy").value = saved.copy;
+  $("#imgdir").checked = !!saved.dir;
+  if (saved.sys) $("#imgsys").value = saved.sys;
+  paintPreset();
+}
+["#imgkind", "#imgsize", "#imgtheme", "#imgplatform", "#imgcopy", "#imgdir"].forEach(s =>
+  $(s).addEventListener("change", () => { paintPreset(); savePreset(); }));
+$("#imgsys").addEventListener("input", savePreset);
+$("#imgsysbtn").onclick = () => {
+  const open = $("#imgsys").hidden;
+  $("#imgsys").hidden = !open;
+  $("#imgsysbtn").setAttribute("aria-expanded", String(open));
+  if (open) $("#imgsys").focus();
+};
+loadKinds();
+
 $("#imggen").onclick = async () => {
   const prompt = $("#imgprompt").value.trim();
   if (!prompt) return;
@@ -1837,6 +1960,16 @@ $("#imggen").onclick = async () => {
   try{
     const body = {model, prompt};
     if (refs.length) body.images = refs;
+    const kind = $("#imgkind").value;
+    if (kind){
+      body.kind = kind;
+      if ($("#imgdir").checked) body.direction = true;
+      if (kind === "mobile-screen" && $("#imgplatform").value) body.platform = $("#imgplatform").value;
+      if (kind === "hero-image" && $("#imgcopy").value) body.copy_space = $("#imgcopy").value;
+    }
+    if ($("#imgtheme").value) body.theme = $("#imgtheme").value;
+    if ($("#imgsize").value) body.size = $("#imgsize").value;
+    if ($("#imgsys").value.trim()) body.system = $("#imgsys").value.trim();
     const res = await fetch(refs.length ? "/v1/images/edits" : "/v1/images/generations", {
       method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
     });
@@ -1846,7 +1979,16 @@ $("#imggen").onclick = async () => {
       const src = d.url || (d.b64_json ? "data:image/png;base64," + d.b64_json : "");
       const card = document.createElement("div");
       card.className = "imgcard";
-      card.innerHTML = '<img src="' + esc(src) + '" alt="generated image">' +
+      const used = (j.model_used || {}).model;
+      const bits = [];
+      if (d.width && d.height) bits.push(d.width + " × " + d.height);
+      if (used) bits.push("drawn by " + used);
+      if (j.image_tool === true) bits.push("Create image mode");
+      else if (j.image_tool === false) bits.push("asked in words (the mode could not be set)");
+      card.innerHTML = '<img src="' + esc(src) + '" alt="' + esc(d.revised_prompt || prompt) + '">' +
+        (bits.length ? '<div class="meta">' + esc(bits.join(" · ")) + "</div>" : "") +
+        (j.prompt_sent ? "<details><summary>Prompt sent</summary><pre>" + esc(j.prompt_sent) +
+          "</pre></details>" : "") +
         (d.path ? '<div class="cap">' + esc(d.path) + "</div>" : "");
       $("#imgout").prepend(card);
     }

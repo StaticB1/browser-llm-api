@@ -73,6 +73,7 @@ from providers import (
 )
 from providers.limits import refusal_from_message
 import authz
+import design
 from _version import __version__
 
 # ---------------------------------------------------------------------------
@@ -408,6 +409,40 @@ class ImageGenRequest(BaseModel):
     # ChatCompletionRequest.images. `image` matches OpenAI's edits field name.
     image: Optional[Union[str, list[str]]] = None
     images: Optional[list[str]] = None
+    # A design kind from design.py ("section", "mobile-screen", "icon", ...):
+    # the prompt becomes the brief inside that kind's structural rules, and the
+    # kind's size and background apply unless given. `direction` adds the art
+    # direction for the kind's group; theme / platform / system / copy_space
+    # are the same options as `design.py prompt`.
+    kind: Optional[str] = None
+    direction: Optional[bool] = None
+    theme: Optional[str] = None
+    platform: Optional[str] = None
+    system: Optional[str] = None
+    copy_space: Optional[str] = None
+
+
+_DESIGN_FIELDS = ("kind", "direction", "theme", "platform", "system", "copy_space")
+
+
+def _design_prompt(prompt: str, fields: dict, n_refs: int, size: Optional[str],
+                   background: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
+    """(prompt, size, background) after applying a design ``kind``, or the
+    inputs unchanged when there is none. 400 for an unknown kind."""
+    kind = str(fields.get("kind") or "").strip().lower()
+    if not kind:
+        return prompt, size, background
+    try:
+        d = design.kind_defaults(kind)
+        text = design.compose(
+            kind, prompt, direction=str(fields.get("direction") or "").lower()
+            in ("1", "true", "yes", "on"),
+            theme=fields.get("theme"), platform=fields.get("platform"),
+            system=fields.get("system"), copy_space=fields.get("copy_space"),
+            ref_roles=["user"] * n_refs or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return text, size or d["size"], background or d["background"]
 
 # ---------------------------------------------------------------------------
 # Browser state — one persistent instance per provider, one request at a time
@@ -968,6 +1003,8 @@ async def drive_once(provider, prompt: str, attachments: Optional[list] = None, 
             options = {"kind": kind, "variant": variant}
             page, monitor = await provider.open_and_send(browser, prompt, attachments=files,
                                                          options=options)
+            if meta is not None and "image_tool" in options:
+                meta["image_tool"] = options["image_tool"]
             text = ""
             async for delta in _stream_completion(provider, page, monitor):
                 text += delta
@@ -1290,6 +1327,13 @@ async def widget_js():
         return FileResponse(_WIDGET_FILE, media_type="application/javascript",
                             headers={"Cache-Control": "no-cache"})
     raise HTTPException(status_code=404, detail="widget.js not found")
+
+
+@app.get("/api/design/kinds")
+async def api_design_kinds():
+    """The design kinds (design.py) for the dashboard's presets row: id,
+    label, group, default size and background, text policy, one-line about."""
+    return {"kinds": design.kinds_catalog(), "direction_groups": sorted(design.DIRECTION)}
 
 
 @app.get("/api/status")
@@ -1843,7 +1887,7 @@ def _pixel_size(data: bytes) -> Optional[tuple[int, int]]:
 
 
 def _image_payload(imgs: list[dict], response_format: Optional[str],
-                   model_used: Optional[dict] = None) -> dict:
+                   model_used: Optional[dict] = None, extra: Optional[dict] = None) -> dict:
     data = []
     for im in imgs:
         entry = {}
@@ -1871,6 +1915,9 @@ def _image_payload(imgs: list[dict], response_format: Optional[str],
     out = {"created": int(time.time()), "data": data}
     if model_used:
         out["model_used"] = model_used
+    for k, v in (extra or {}).items():
+        if v is not None:
+            out[k] = v
     return out
 
 
@@ -1933,7 +1980,11 @@ async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[l
             status_code=502,
             detail=f"{provider.name} did not return an image for this prompt.{said}",
         )
-    return _image_payload(imgs, response_format, meta.get("model_used"))
+    # prompt_sent: the exact words typed into the site, so a caller can see
+    # (and a design manifest can keep) what the image was made from.
+    # image_tool: whether the composer was in the site's own image mode.
+    return _image_payload(imgs, response_format, meta.get("model_used"),
+                          {"prompt_sent": typed, "image_tool": meta.get("image_tool")})
 
 
 @app.post("/v1/images/generations")
@@ -1945,14 +1996,22 @@ async def images_generations(req: ImageGenRequest, request: Request):
         raise HTTPException(status_code=400, detail="prompt is empty")
 
     allow_paths = _client_may_send_paths(request)
+    specs = _ref_specs(req)
+    prompt, size, background = _design_prompt(
+        req.prompt, req.model_dump(include=set(_DESIGN_FIELDS)), len(specs),
+        req.size, req.background)
     name = _resolve_model(req.model)
     if name in REMOTES:
-        return await _proxy_images(name, REMOTES[name], req, allow_local_paths=allow_paths)
+        # Composed here, so an upstream that predates `kind` still gets the words.
+        sent = req.model_copy(update={"prompt": prompt, "size": size,
+                                      "background": background,
+                                      **{f: None for f in _DESIGN_FIELDS}})
+        return await _proxy_images(name, REMOTES[name], sent, allow_local_paths=allow_paths)
 
-    return await _run_image_request(get_provider(req.model), req.prompt, _ref_specs(req),
+    return await _run_image_request(get_provider(req.model), prompt, specs,
                                     None, req.response_format,
-                                    allow_local_paths=allow_paths, size=req.size,
-                                    background=req.background, variant=req.model_variant)
+                                    allow_local_paths=allow_paths, size=size,
+                                    background=background, variant=req.model_variant)
 
 
 @app.post("/v1/images/edits")
@@ -1982,6 +2041,7 @@ async def images_edits(request: Request):
         size = str(form.get("size") or "") or None
         background = str(form.get("background") or "") or None
         variant = str(form.get("model_variant") or "") or None
+        dfields = {f: (str(form.get(f) or "") or None) for f in _DESIGN_FIELDS}
         for field in ("image", "image[]", "images", "images[]"):
             for item in form.getlist(field):
                 if hasattr(item, "read"):  # UploadFile
@@ -2002,6 +2062,7 @@ async def images_edits(request: Request):
             raise HTTPException(status_code=400, detail=f"invalid request: {e}")
         prompt, model, response_format = req.prompt, req.model, req.response_format
         size, background, variant = req.size, req.background, req.model_variant
+        dfields = req.model_dump(include=set(_DESIGN_FIELDS))
         specs = _ref_specs(req)
 
     if not prompt.strip():
@@ -2010,6 +2071,8 @@ async def images_edits(request: Request):
         raise HTTPException(status_code=400,
                             detail="no image supplied — send `image` (multipart file, "
                                    "data: URL, http(s) URL, or local path)")
+    prompt, size, background = _design_prompt(prompt, dfields, len(specs) + len(raw),
+                                              size, background)
 
     name = _resolve_model(model)
     if name in REMOTES:

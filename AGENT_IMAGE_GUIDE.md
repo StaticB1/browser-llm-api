@@ -72,13 +72,62 @@ Flags:
 | `--quality N` | JPEG/WebP quality (default 88) |
 | `--model NAME` | provider; default `chatgpt-browser` |
 | `--timeout SEC` | how long to wait for generation (default 440) |
+| `--kind KIND` | wrap the prompt in a design kind's rules, size and background (see 2b) |
+| `--direction` | with `--kind`: add the art direction for the kind's group |
+| `--theme light\|dark`, `--platform ios\|android\|neutral`, `--copy-space left\|right\|center\|top\|bottom` | kind options |
+| `--system TEXT`, `--system-file FILE` | design-system text the image must follow exactly (a `DESIGN.md` works) |
+| `--upscale F` | enlarge the result by F with Lanczos and a light sharpen |
 
 It prints the output path, the original's size and the model that drew it. Open the file and
 **regenerate with a refined prompt if it's off** — output is non-deterministic. Exit codes: 0
 done, 1 failed, 3 image limit reached.
 
 From an MCP client, the `generate_image` tool takes the same options (`width`, `height`,
-`square`, `knockout_bg`, `keep_original`, `variants`, `refs`, `model_variant`).
+`square`, `knockout_bg`, `keep_original`, `variants`, `refs`, `model_variant`, `kind`,
+`direction`, `theme`, `platform`, `system`, `copy_space`, `upscale`).
+
+---
+
+## 2b. Designing a page or an app flow: `design.py`
+
+When the job is a **design** (a landing page, an app flow, a component, a brand board) rather
+than one asset, generate the design as images first and build from them:
+
+1. **One image per section or screen.** Never squeeze a page into one image: the text gets too
+   small to read back. `design.py set` makes one large image per item.
+2. **One design system.** Each item after the first is made with the first item and the one
+   before it attached, so palette, type and spacing hold. Pass the user's logo or brand assets
+   with `--ref`, and an approved design with `--lock`.
+3. **Read it back.** `design.py tokens` writes `tokens.json`, `tokens.css` and `DESIGN.md`.
+   Build with those values and the images open side by side.
+4. **Check the build.** Screenshot it at the design's width (1440 for web sections) and run
+   `design.py review`; fix the high-severity differences and review again.
+
+```bash
+D="/path/to/browser-llm-api"
+"$D/venv/bin/python" "$D/design.py" set --kind section \
+  --brief "<product, audience, the action the page must get, facts and real copy>" \
+  --section "Hero: <headline, button text>" --section "<name>: <content>" ... \
+  --out designs/home --dry-run            # read the prompts first; spends nothing
+"$D/venv/bin/python" "$D/design.py" set ... --out designs/home     # ~1-1.5 min per image
+"$D/venv/bin/python" "$D/design.py" tokens designs/home/0*.png --out designs/home
+"$D/venv/bin/python" "$D/design.py" review --design designs/home/01-hero.png \
+  --build shot-1440.png --width 1440 --out designs/home/review-hero.md
+```
+
+Kinds (`design.py kinds`): `section`, `page`, `hero-image`, `og-image`, `mobile-screen`,
+`component`, `brand-board`, `icon`, `logo-concept`, `illustration`, `diagram`, `texture`,
+`avatar`. Put the real words in each section's content: the image tool renders text well when it
+is given exact words, and invents filler when it is not. `--direction` adds an art-direction
+block; leave it off unless the person asked for that look or the first round came back generic.
+`--directions 3` makes three candidates for the first item and stops so you (or the person) can
+choose; continue with `--pick K`.
+
+A set refuses to start when it does not fit in what is left of the day's images (exit code 3,
+with the numbers); `--partial` overrides. A set stopped by the limit keeps what it made: run the
+same command after the reset and it continues. The MCP tools `design_set`, `design_tokens` and
+`design_review` do the same; prefer the CLI in the background for sets over six images, because
+an MCP client may time the call out (the set keeps going and resumes).
 
 ---
 

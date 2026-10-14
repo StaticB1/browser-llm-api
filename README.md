@@ -288,7 +288,14 @@ draws a few fixed shapes near the asked ratio (13 Oct 2026: 1254x1254 square, 16
 1731x909 for 1.91:1, 1122x1402 for 4:5), so `gen_asset.py` crops to the exact pixels afterwards.
 Asked for a transparent background it returned a real RGBA PNG (63% of pixels fully clear in the
 test). Each data item carries `width`, `height` and `mime` of the original as delivered, and
-`revised_prompt` when the page gives one; the response carries `model_used`.
+`revised_prompt` when the page gives one; the response carries `model_used`, `prompt_sent` (the
+exact words typed into the site) and `image_tool`.
+
+**Create image mode.** Before an image request the ChatGPT provider opens the composer's **+** menu
+and picks **Create image**, the site's own image mode, so the image tool is certain rather than
+asked for in words (`image_tool: true` in the response). If the menu has moved, the request still
+goes, in words, with `image_tool: false`. `CHATGPT_IMAGE_TOOL=0` turns the mode off. The mode is
+a pill inside the composer that survives a reload, so a text request clears any pill left behind.
 
 Internally the server waits for the `<img>` to finish rendering, then reads it to base64 from inside the page, writes it to `GEMINI_IMAGE_DIR`, and returns base64 + URL + path. The endpoint returns **501** if the provider can't generate images, **403** if `IMAGE_PROVIDERS` leaves it out, **429** when the site's image limit is reached (see below), and **502** if it returned none for another reason (the detail quotes what the page said).
 
@@ -322,6 +329,68 @@ A 429 detail ends with "Stop and say so; do not retry before then." `gen_asset.p
 ./venv/bin/python gen_asset.py --prompt "friendly cartoon fox mascot, flat vector, centered, solid white background" \
     --out public/avatar.png --square 256 --knockout-bg
 ```
+
+## Designing with ChatGPT's image tool
+
+`design.py` turns the image endpoint into a design tool, in the way Codex uses GPT-6 Astra with
+Images 2.0: describe the product, get **one large, readable image per section or screen**, keep the
+set in one design system, read the design system back out as tokens, build, then have ChatGPT
+compare a screenshot of the build with the design.
+
+**Kinds.** A kind wraps your brief in the rules that make an image buildable and gives it a size
+and background. The prompt carries structure only (one section per image, text readable at half
+size, a column grid, real words from the brief, no boxes inside boxes) and no style words, so
+ChatGPT chooses the look. `--direction` adds an art-direction block per group, condensed from the
+imagegen-frontend-web, image-to-code, imagegen-frontend-mobile and brandkit skills.
+
+| group | kinds |
+|---|---|
+| Web | `section` (one section at desktop width), `page` (one tall image, text gets small), `hero-image` (no text, room for an HTML headline), `og-image` (1200x630, exact crop) |
+| App | `mobile-screen` (one screen in a phone frame, iOS/Android/neutral), `component` (one component with its states) |
+| Brand | `brand-board` (3x3 identity board), `icon` (transparent), `logo-concept` (four concepts, 2x2) |
+| Content | `illustration` (transparent), `diagram` (exact labels only), `texture`, `avatar` (transparent) |
+
+```bash
+./venv/bin/python design.py kinds                                # the list above, with sizes
+./venv/bin/python design.py prompt --kind section --brief "..."  # see the words; no image made
+
+# A whole landing page: one image per section, each made with the first section and the one
+# before it attached as references, so the palette, type and spacing hold across the set.
+./venv/bin/python design.py set --kind section --theme dark \
+    --brief "Roam, a travel app for people who want quiet places; it must get them to plan a trip" \
+    --section "Hero: headline 'Go somewhere quiet', one button 'Plan a trip'" \
+    --section "How it works: three steps, pick a mood, get three places, book the stay" \
+    --section "Pricing: Free and Plus at \$6 a month" \
+    --out designs/roam              # writes 01-hero.png ..., manifest.json, preview.png
+
+# Start from three candidate directions for the first section, then continue with one:
+./venv/bin/python design.py set ... --out designs/roam --directions 3     # stops; open the sheet
+./venv/bin/python design.py set ... --out designs/roam --directions 3 --pick 2
+
+# Read the design system back out for the coding step: tokens.json, tokens.css, DESIGN.md
+./venv/bin/python design.py tokens designs/roam/0*.png --out designs/roam
+
+# After building: compare a 1440-wide screenshot with the design, or critique one screenshot
+./venv/bin/python design.py review --design designs/roam/01-hero.png \
+    --build shots/hero-1440.png --width 1440 --out designs/roam/review-hero.md
+./venv/bin/python design.py review --critique shots/home.png --out shots/home-critique.md
+```
+
+- **Sets resume.** `manifest.json` records every finished image with its prompt; running the same
+  command again skips finished items, makes changed ones again, and `--redo 3` forces one.
+  `--dry-run` prints every prompt without spending an image. `--lock approved.png` makes an image
+  you already approved the style source for every item; `--ref logo.png` attaches your own
+  references to every image (six attachments at most, references first).
+- **Quota.** Before a set starts it compares the images it will make with ChatGPT's counter minus
+  the owner's reserve, and refuses with the numbers unless `--partial`. The counter can overstate
+  what is left (it did not drop on 13 Oct 2026), so the site's own refusal, a 429, stays the real
+  stop; a set stopped by it keeps what it made and resumes. Exit code 3 in both cases.
+- **The API takes the same options.** `POST /v1/images/generations` and `/v1/images/edits` accept
+  `kind`, `direction`, `theme`, `platform`, `system` (design-system text to follow exactly) and
+  `copy_space`; `GET /api/design/kinds` lists the kinds. `gen_asset.py --kind icon` does the same
+  from the asset wrapper, and `--upscale 2` enlarges a result with Lanczos and a light sharpen.
+- **The dashboard** has a presets row on Create image (kind, shape, theme, platform, headline
+  space, art direction, a design-system box) and shows the prompt sent under each result.
 
 ## Image input (vision + image-to-image)
 
@@ -418,6 +487,7 @@ than conversation; pass `keep_chat: true` when the person asked to see the threa
 | `CHATGPT_EFFORT` | `high` | ChatGPT power slider: `instant`, `medium` or `high` |
 | `CHATGPT_IMAGE_RESERVE` | `0` | images on ChatGPT's daily counter that requests here must leave unused |
 | `CHATGPT_READ_MODEL` | `1` | read the conversation record after each answer to report `model_used` (one extra GET) |
+| `CHATGPT_IMAGE_TOOL` | `1` | put the composer in ChatGPT's own Create image mode before an image request; `0` asks for the tool in words only |
 | `GEMINI_IMAGE_DIR` (`IMAGE_DIR`) | `~/Pictures/browser-llm` | base dir for saved images (per-provider subfolders) |
 | `GEMINI_PUBLIC_URL` | `http://localhost:8081` | base URL used to build returned image links |
 | `BROWSER_RECYCLE_AFTER_IMAGES` | `8` | recycle a provider's browser after this many image gens |
@@ -500,7 +570,10 @@ Or, in a client that reads a JSON config (Claude Desktop, Cursor, Zed):
 | tool | does |
 |------|------|
 | `ask` | prompt (+ `images`, `system`, `model`) → the reply. `out` writes it to a file and returns the path, which keeps a large HTML answer out of the agent's context; `strip_fences` drops ``` lines. The conversation is deleted afterwards unless `keep_chat` is set. |
-| `generate_image` | prompt (+ `refs` for image-to-image) → a written asset, with the same resize/crop/favicon/knockout shaping as `gen_asset.py`. |
+| `generate_image` | prompt (+ `refs` for image-to-image) → a written asset, with the same resize/crop/favicon/knockout shaping as `gen_asset.py`. `kind`, `direction`, `theme`, `platform`, `system`, `copy_space` and `upscale` work as in `design.py`. |
+| `design_set` | brief + `sections` → one image per section or screen in one design system, with `manifest.json` and `preview.png`; `directions`/`pick`, `lock`, `refs`, `redo`, `partial`, `dry_run`. Resumes when called again. Prefer the CLI in the background for sets over six images: an MCP client may time the call out, though the set keeps going. |
+| `design_tokens` | design images → `tokens.json`, `tokens.css` and `DESIGN.md`, with colours checked against the pixels. |
+| `design_review` | design image + build screenshot → differences with fixes and a match score, or `critique` of one screenshot. |
 | `list_models` | the provider ids this server can drive. |
 | `health` | reachable? which providers are logged in? a request in flight? |
 
@@ -518,8 +591,9 @@ that host has one.
 - **`desktop/`** — native Linux desktop app + tray widget (GTK3). See [`desktop/README.md`](desktop/README.md).
 - **`login.py`** — interactive re-auth helper: `python login.py gemini|chatgpt`.
 - **`client.py`** — tiny stdlib CLI/import client for the API (`./client.py "prompt"`, `--image FILE` to send images, or `from client import ask`).
-- **`mcp_server.py`** — MCP (Model Context Protocol) stdio server, stdlib only: exposes `ask`, `generate_image`, `list_models` and `health` as native tools to Claude Code, Claude Desktop, Cursor or Zed. `main()` is the `browser-llm-mcp` console entry point.
-- **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow); `--ref FILE` restyles an existing asset instead of generating from scratch.
+- **`mcp_server.py`** — MCP (Model Context Protocol) stdio server, stdlib only: exposes `ask`, `generate_image`, `design_set`, `design_tokens`, `design_review`, `list_models` and `health` as native tools to Claude Code, Claude Desktop, Cursor or Zed. `main()` is the `browser-llm-mcp` console entry point.
+- **`gen_asset.py`** — CLI to generate + post-process a website image asset (needs Pillow); `--ref FILE` restyles an existing asset instead of generating from scratch; `--kind` applies a design kind.
+- **`design.py`** — design kinds and their prompts (stdlib; the server imports them), sets of section or screen images in one design system, design tokens read back out of images, and build-against-design review. `main()` is the `browser-llm-design` console entry point.
 - **`serve.sh`** / **`install-service.sh`** / **`mode.sh`** / **`browser-llm-api.service.template`** — run the server and manage it as a background `systemd --user` service (generated for this clone).
 - **`ensure-venv.sh`** — guarantees `./venv` exists and can import the dependencies, rebuilding it if not. Every entry point calls it, so a lost venv is a self-repair rather than an outage. `./ensure-venv.sh check` is the read-only probe.
 - **`mcp.sh`** — MCP stdio entry point (ensure the venv, then exec `mcp_server.py`). Point your MCP client at this rather than at `venv/bin/python`, so a rebuilt venv never breaks the handshake.
@@ -551,8 +625,13 @@ traversal, a symlink out of the image dir and a non-image extension are all refu
 The MCP layer is covered too: protocol framing, the `tools/list` contract, error mapping and the
 off-the-read-loop dispatch that keeps a four-minute image generation from stalling a ping.
 
+So is the design layer: every kind's words (and that none carries a style word unless
+`--direction` is on), the references each item of a set gets, resume and `--redo`, directions and
+`--pick`, the quota refusal, a limit hit part-way, tokens and review parsing, the server's `kind`
+fields, and the provider's Create image mode with a stand-in page.
+
 ```bash
-./venv/bin/python -m unittest discover -s tests -v     # 119 tests, ~0.03s
+./venv/bin/python -m unittest discover -s tests -v     # 245 tests, ~3s
 ruff check .                                           # lint, config in pyproject.toml
 ```
 
