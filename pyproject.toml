@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]   # SPDX license expression (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "browser-llm-api"
-description = "OpenAI-compatible API (chat, vision, image generation + editing) backed by an automated Chrome browser session — no API key, drives gemini.google.com / chatgpt.com."
+description = "OpenAI-compatible API over your signed-in ChatGPT and Gemini web sessions, with design tools that make website sections, app screens and brand images with ChatGPT's image tool."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -12,13 +12,16 @@ authors = [
     { name = "staticB1", email = "bsiwonde@gmail.com" },
     { name = 'Ebenezer "Ebstar" Tarubinga', email = "ebstarmusic@gmail.com" },
 ]
-keywords = ["llm", "openai", "gemini", "chatgpt", "browser-automation", "nodriver", "fastapi"]
+keywords = ["llm", "openai", "gemini", "chatgpt", "browser-automation", "nodriver", "fastapi", "image-generation", "design", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Console",
     "Environment :: Web Environment",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 dynamic = ["version"]
@@ -28,35 +31,37 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "pydantic>=2",
-    "httpx>=0.27",              # remote-provider proxying (REMOTE_PROVIDERS)
+    "httpx>=0.27",              # downloads http(s) image attachments
     "python-multipart>=0.0.9",  # multipart uploads on /v1/images/edits
+    "Pillow>=10",               # image shaping, design sets, measured colours
 ]
 
 [project.optional-dependencies]
-# gen_asset.py post-processes generated images (resize/crop/favicon/knockout).
+# Before 2.0 Pillow was optional; the extra stays so old install lines still work.
 assets = ["Pillow>=10"]
 
 [project.scripts]
-browser-llm = "server:main"
-browser-llm-mcp = "mcp_server:main"
-browser-llm-design = "design:main"
+browser-llm = "browser_llm.cli:main"
+browser-llm-mcp = "browser_llm.mcp_server:main"
+browser-llm-design = "browser_llm.design:main"
 
 [project.urls]
 Homepage = "https://github.com/StaticB1/browser-llm-api"
 Repository = "https://github.com/StaticB1/browser-llm-api"
 Issues = "https://github.com/StaticB1/browser-llm-api/issues"
+Changelog = "https://github.com/StaticB1/browser-llm-api/blob/master/CHANGELOG.md"
 
-# Flat layout: top-level modules + the providers package. The web UI + widget
-# in webui/ are resolved relative to server.py at runtime, so install editable
-# from a clone (`pip install -e .`) — that keeps the source (and webui/) in place.
-[tool.setuptools]
-py-modules = ["server", "authz", "client", "login", "gen_asset", "design", "mcp_server", "gemini_bot", "_version"]
-
+# One package, browser_llm/, with the dashboard and widget shipped inside it.
+# The top-level gen_asset.py, design.py, client.py and *.sh are forwarding files
+# for callers that use the old paths; they are not part of the wheel.
 [tool.setuptools.packages.find]
-include = ["providers*"]
+include = ["browser_llm*"]
+
+[tool.setuptools.package-data]
+browser_llm = ["webui/*.html", "webui/*.js"]
 
 [tool.setuptools.dynamic]
-version = { attr = "_version.__version__" }
+version = { attr = "browser_llm._version.__version__" }
 
 [tool.ruff]
 line-length = 110

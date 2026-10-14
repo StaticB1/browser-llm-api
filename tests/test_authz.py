@@ -1,11 +1,11 @@
-"""Tests for authz.py — API-key gating decisions + REMOTE_PROVIDERS parsing.
+"""Tests for authz.py — API-key gating and origin-trust decisions.
 
 Pure stdlib, no browser, no server import (server.py has import-time side
 effects like log truncation).  Run:  ./venv/bin/python -m unittest discover -s tests
 """
 import unittest
 
-import authz
+from browser_llm import authz
 
 
 class TestIsLoopback(unittest.TestCase):
@@ -125,28 +125,6 @@ class TestSplitHostport(unittest.TestCase):
         self.assertEqual(authz._split_hostport("localhost"), ("localhost", ""))
         self.assertEqual(authz._split_hostport("[::1]:8081"), ("[::1]", "8081"))
         self.assertEqual(authz._split_hostport("[::1]"), ("[::1]", ""))
-
-
-class TestParseRemoteProviders(unittest.TestCase):
-    def test_single(self):
-        self.assertEqual(
-            authz.parse_remote_providers("chatgpt-browser=http://192.168.1.34:8081"),
-            {"chatgpt-browser": "http://192.168.1.34:8081"})
-
-    def test_multiple_with_spaces_and_trailing_slash(self):
-        self.assertEqual(
-            authz.parse_remote_providers(
-                " chatgpt-browser = http://a:8081/ , gemini-browser=https://b "),
-            {"chatgpt-browser": "http://a:8081", "gemini-browser": "https://b"})
-
-    def test_malformed_entries_skipped(self):
-        self.assertEqual(
-            authz.parse_remote_providers("nourl, =http://x, bad=ftp://x, ok=http://y"),
-            {"ok": "http://y"})
-
-    def test_empty(self):
-        self.assertEqual(authz.parse_remote_providers(None), {})
-        self.assertEqual(authz.parse_remote_providers(""), {})
 
 
 if __name__ == "__main__":

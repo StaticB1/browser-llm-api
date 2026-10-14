@@ -7,7 +7,7 @@ Run from the repo root:
 """
 import unittest
 
-from providers.base import CompletionTracker
+from browser_llm.providers.base import CompletionTracker
 
 NO_IMG = {"loaded": 0, "pending": 0, "creating": False}
 

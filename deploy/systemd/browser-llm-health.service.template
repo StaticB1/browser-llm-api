@@ -1,9 +1,9 @@
 [Unit]
 Description=browser-llm-api watchdog — venv integrity, liveness, and a daily model ping
-Documentation=file://__INSTALL_DIR__/healthcheck.sh
+Documentation=file://__INSTALL_DIR__/scripts/healthcheck.sh
 
 [Service]
 Type=oneshot
 WorkingDirectory=__INSTALL_DIR__
-ExecStart="__INSTALL_DIR__/healthcheck.sh" --quiet
+ExecStart="__INSTALL_DIR__/scripts/healthcheck.sh" --quiet
 TimeoutStartSec=600

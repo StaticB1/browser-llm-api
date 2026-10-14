@@ -27,11 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import HTTPException  # noqa: E402
 from PIL import Image  # noqa: E402
 
-import design  # noqa: E402
-import gen_asset  # noqa: E402
-import server  # noqa: E402
-import providers.chatgpt as chatgpt  # noqa: E402
-from providers.chatgpt import ChatGPTProvider  # noqa: E402
+from browser_llm import design  # noqa: E402
+from browser_llm import gen_asset  # noqa: E402
+from browser_llm import server  # noqa: E402
+import browser_llm.providers.chatgpt as chatgpt  # noqa: E402
+from browser_llm.providers.chatgpt import ChatGPTProvider  # noqa: E402
 
 # The design-with-chatgpt skill's banned steering words, plus a few more style
 # words: structural prompts must leave the look to ChatGPT.
@@ -171,14 +171,14 @@ class Parts(unittest.TestCase):
 
 
 class Quota(unittest.TestCase):
-    def status(self, remaining, reserve=10, remote=None):
-        prov = {"image_reserve": reserve, "remote_upstream": remote,
+    def status(self, remaining, reserve=10):
+        prov = {"image_reserve": reserve,
                 "image_quota": {"remaining": remaining,
                                 "reset_after": "2026-10-15T03:44:09+00:00"}
                 if remaining is not None else None}
         return {"providers": {"chatgpt-browser": prov}}
 
-    def test_fits_short_unknown_remote(self):
+    def test_fits_short_and_unknown(self):
         ok, msg = design.quota_plan(5, self.status(120), "chatgpt-browser")
         self.assertTrue(ok)
         self.assertIn("120 left", msg)
@@ -187,8 +187,6 @@ class Quota(unittest.TestCase):
         self.assertIn("only 5 usable", msg)
         self.assertIn("--partial", msg)
         self.assertTrue(design.quota_plan(50, self.status(None), "chatgpt-browser")[0])
-        self.assertTrue(design.quota_plan(50, self.status(0, remote="http://h:8081"),
-                                          "chatgpt-browser")[0])
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +452,7 @@ class ServerKinds(unittest.IsolatedAsyncioTestCase):
         req = server.ImageGenRequest(prompt="a calendar with a check", kind="icon",
                                      model="chatgpt-browser")
         with mock.patch.object(server, "_run_image_request", run), \
-                mock.patch.object(server, "_client_may_send_paths", lambda r: False), \
-                mock.patch.object(server, "REMOTES", {}):
+                mock.patch.object(server, "_client_may_send_paths", lambda r: False):
             await server.images_generations(req, request=None)
         self.assertIn("Create ONE icon.", seen["prompt"])
         self.assertIn("Brief: a calendar with a check", seen["prompt"])
@@ -469,24 +466,6 @@ class ServerKinds(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as caught:
             server._design_prompt("x", {"kind": "poster"}, 0, None, None)
         self.assertEqual(caught.exception.status_code, 400)
-
-    async def test_a_remote_gets_the_composed_words_not_the_kind(self):
-        seen = {}
-
-        async def proxy(name, url, req, **kw):
-            seen["req"] = req
-            return {}
-
-        req = server.ImageGenRequest(prompt="harbour", kind="hero-image", copy_space="left",
-                                     model="chatgpt-browser")
-        with mock.patch.object(server, "_proxy_images", proxy), \
-                mock.patch.object(server, "_client_may_send_paths", lambda r: False), \
-                mock.patch.object(server, "REMOTES", {"chatgpt-browser": "http://h:8081"}):
-            await server.images_generations(req, request=None)
-        sent = seen["req"]
-        self.assertIsNone(sent.kind)
-        self.assertIn("Keep the left half calm", sent.prompt)
-        self.assertEqual(sent.size, "1600x900")
 
     async def test_response_carries_prompt_sent_and_image_tool(self):
         async def drive(provider, typed, specs, **k):
@@ -647,7 +626,7 @@ class ImageToolMode(unittest.IsolatedAsyncioTestCase):
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 
-from providers import base as provider_base  # noqa: E402
+from browser_llm.providers import base as provider_base  # noqa: E402
 
 # ChatGPT's four inputs as measured on 14 Oct 2026, in document order.
 LIVE_INPUTS = [

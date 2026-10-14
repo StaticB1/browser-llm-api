@@ -15,12 +15,12 @@ Endpoints:
   POST /v1/chat/completions   (streaming + non-streaming; images in AND out)
   POST /v1/images/generations (OpenAI-style image generation; `image` = img2img)
   POST /v1/images/edits       (image + prompt -> image; JSON or multipart)
-  GET  /images/<provider>/<file>  (saved images, per-provider subfolder of GEMINI_IMAGE_DIR)
+  GET  /images/<provider>/<file>  (saved images, per-provider subfolder of BROWSER_LLM_IMAGE_DIR)
   GET  /api/status            (per-provider busy/browser/recycle + live telemetry)
   GET  /api/gallery           (list saved images, newest first; ?provider=&limit=)
 
 Usage:
-  python server.py            # listens on 0.0.0.0:8081
+  browser-llm serve           # listens on 127.0.0.1:8081 (BROWSER_LLM_HOST to share)
 
 Example provider entry for an OpenAI-compatible client:
   {
@@ -63,18 +63,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 try:
-    import httpx  # only needed when REMOTE_PROVIDERS is configured
-except ImportError:  # older venv without httpx: local providers still work
+    import httpx  # http(s) attachments are downloaded with it when present
+except ImportError:  # without it, urllib does the download
     httpx = None
 
-from providers import (
+from .providers import (
     PROVIDERS, DEFAULT_PROVIDER, IMAGE_PROVIDERS, get_provider, patch_cdp, CHROME_ARGS,
     CompletionTracker, RateLimited, UsageLimitReached,
 )
-from providers.limits import refusal_from_message
-import authz
-import design
-from _version import __version__
+from .providers.limits import refusal_from_message
+from . import authz, config, design
+from ._version import __version__
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -93,13 +92,15 @@ logger.addHandler(_sh)
 # Generated-image storage. Each provider's images go in its own subfolder with
 # its own filename prefix (see _persist), so e.g. ChatGPT images are no longer
 # mislabeled/saved as "gemini". IMAGE_DIR is the shared base.
-#   GEMINI_IMAGE_DIR  — base folder for saved images (created if needed).
-#                       (env name kept for back-compat; IMAGE_DIR also accepted)
-#   GEMINI_PUBLIC_URL — base URL images are served under (for the returned links)
+#   BROWSER_LLM_IMAGE_DIR  — base folder for saved images (created if needed).
+#                            Before 2.0: GEMINI_IMAGE_DIR or IMAGE_DIR (still read).
+#   BROWSER_LLM_PUBLIC_URL — base URL images are served under (for the returned
+#                            links). Before 2.0: GEMINI_PUBLIC_URL (still read).
 # ---------------------------------------------------------------------------
-IMAGE_DIR = (os.environ.get("GEMINI_IMAGE_DIR") or os.environ.get("IMAGE_DIR")
-             or os.path.expanduser("~/Pictures/browser-llm"))
-PUBLIC_URL = os.environ.get("GEMINI_PUBLIC_URL", "http://localhost:8081").rstrip("/")
+IMAGE_DIR = config.env("BROWSER_LLM_IMAGE_DIR", "GEMINI_IMAGE_DIR", "IMAGE_DIR",
+                       default=os.path.expanduser("~/Pictures/browser-llm"))
+PUBLIC_URL = config.env("BROWSER_LLM_PUBLIC_URL", "GEMINI_PUBLIC_URL",
+                        default="http://localhost:8081").rstrip("/")
 _image_dir = Path(IMAGE_DIR)
 try:
     _image_dir.mkdir(parents=True, exist_ok=True)
@@ -306,26 +307,17 @@ async def _attachment_files(specs: Optional[list], raw: Optional[list] = None, *
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
-# Access control + remote upstreams (see authz.py for the full contract).
+# Access control (see authz.py for the full contract).
 #   BROWSER_LLM_API_KEY — when set, non-loopback clients must send this key
 #       (Bearer/X-Api-Key) on /v1/* and /api/*. Localhost stays open.
-#   REMOTE_PROVIDERS    — "model=url[,model=url…]": proxy those models to
-#       another browser-llm-api instance instead of a local browser (e.g.
-#       forward chatgpt-browser to the one machine with a ChatGPT login).
-#   REMOTE_API_KEY      — Bearer key sent on proxied requests (the upstream's
-#       BROWSER_LLM_API_KEY).
+# Forwarding a model to another install (REMOTE_PROVIDERS) was removed in 2.0:
+# a second machine calls this one's API directly, with the key.
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
-REMOTES = authz.parse_remote_providers(os.environ.get("REMOTE_PROVIDERS"))
-REMOTE_API_KEY = os.environ.get("REMOTE_API_KEY", "").strip()
-# Upstream drive can legitimately take up to _MAX_DEADLINE (900s); give the
-# proxy a little headroom on top so we never cut off a still-working upstream.
-_REMOTE_TIMEOUT = 940.0
-if REMOTES and httpx is None:
-    raise RuntimeError(
-        "REMOTE_PROVIDERS is set but httpx is not installed — "
-        "run: ./venv/bin/pip install -r requirements.txt"
-    )
+if os.environ.get("REMOTE_PROVIDERS", "").strip():
+    logging.getLogger("gemini_server").warning(
+        "REMOTE_PROVIDERS is set but forwarding to another install was removed in 2.0; "
+        "it is ignored. Call the other install's API directly instead.")
 
 # Suppress KeyError from unknown CDP events (e.g. DOM.adoptedStyleSheetsModified).
 patch_cdp()
@@ -492,7 +484,7 @@ _metrics: dict[str, dict] = {
         "last_error_at": None,   # epoch seconds
         "last_request_at": None,  # epoch seconds
     }
-    for name in {*PROVIDERS, *REMOTES}  # remote-only models get telemetry too
+    for name in PROVIDERS
 }
 
 
@@ -1053,186 +1045,19 @@ def _check_upload_support(provider, specs: list, raw: Optional[list] = None) -> 
 
 
 # ---------------------------------------------------------------------------
-# Remote upstream proxying (REMOTE_PROVIDERS): requests for a mapped model are
-# forwarded verbatim to another browser-llm-api instance — no local browser.
-# A remote mapping OVERRIDES the local provider of the same name (that's the
-# point: this install has the code for chatgpt-browser but no login).
-# ---------------------------------------------------------------------------
-def _resolve_model(model: Optional[str]) -> str:
-    """The model name a request actually routes to: a known local provider or
-    remote mapping wins; anything else falls back to DEFAULT_PROVIDER (same
-    fallback rule as get_provider, but remote-aware)."""
-    if model and (model in REMOTES or model in PROVIDERS):
-        return model
-    return DEFAULT_PROVIDER
-
-
-def _remote_headers() -> dict:
-    h = {"Content-Type": "application/json"}
-    if REMOTE_API_KEY:
-        h["Authorization"] = f"Bearer {REMOTE_API_KEY}"
-    return h
-
-
-def _remote_timeout():
-    return httpx.Timeout(_REMOTE_TIMEOUT, connect=15)
-
-
-_MIME_BY_EXT = {v: k for k, v in _EXT.items()}
-
-
-async def _spec_to_data_url(spec: str, *, allow_local_paths: bool) -> str:
-    """Turn a local-path attachment spec into a data: URL. A file path is
-    meaningless on the upstream machine, so proxied requests must carry bytes.
-    data:/http(s) specs are already portable and pass through untouched."""
-    if _spec_kind(spec) != "path":
-        return spec
-    p = _resolve_local_attachment(spec, allow_local_paths=allow_local_paths)
-    data = await asyncio.to_thread(p.read_bytes)
-    _check_attachment_size(len(data))
-    ext = (_sniff_ext(data) or p.suffix.lstrip(".")).lower()
-    mime = _MIME_BY_EXT.get(ext, "image/png" if ext != "svg" else "image/svg+xml")
-    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
-
-
-async def _inline_paths_for_remote(payload: dict, *, allow_local_paths: bool) -> dict:
-    """Rewrite every local-path attachment in an outgoing proxied payload into a
-    data: URL, in the shapes this API accepts (top-level images/image, plus
-    content parts inside messages)."""
-    async def fix(v):
-        return await _spec_to_data_url(v, allow_local_paths=allow_local_paths) \
-            if isinstance(v, str) and v.strip() else v
-
-    for key in ("images", "image"):
-        v = payload.get(key)
-        if isinstance(v, str):
-            payload[key] = await fix(v)
-        elif isinstance(v, list):
-            payload[key] = [await fix(s) for s in v]
-
-    for m in payload.get("messages") or []:
-        content = m.get("content") if isinstance(m, dict) else None
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            iu = part.get("image_url")
-            if isinstance(iu, str):
-                part["image_url"] = await fix(iu)
-            elif isinstance(iu, dict) and isinstance(iu.get("url"), str):
-                iu["url"] = await fix(iu["url"])
-            if isinstance(part.get("image"), str):
-                part["image"] = await fix(part["image"])
-            src = part.get("source")
-            if isinstance(src, dict) and isinstance(src.get("url"), str):
-                src["url"] = await fix(src["url"])
-    return payload
-
-
-async def _proxy_chat(name: str, url: str, req: ChatCompletionRequest, *,
-                      allow_local_paths: bool = True):
-    """Forward a chat completion to the upstream instance. Streaming responses
-    are relayed byte-for-byte (the upstream already speaks correct SSE);
-    failures are surfaced in-band as a chunk, matching local behavior."""
-    payload = req.model_dump(exclude_none=True)
-    payload["model"] = name
-    payload = await _inline_paths_for_remote(payload, allow_local_paths=allow_local_paths)
-
-    if req.stream:
-        async def relay():
-            started = time.monotonic()
-            err: Optional[BaseException] = None
-            try:
-                async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
-                    async with client.stream("POST", f"{url}/v1/chat/completions",
-                                             json=payload, headers=_remote_headers()) as r:
-                        if r.status_code != 200:
-                            body = (await r.aread()).decode("utf-8", "ignore")[:300]
-                            raise RuntimeError(f"upstream returned {r.status_code}: {body}")
-                        async for chunk in r.aiter_bytes():
-                            yield chunk
-            except Exception as e:
-                err = e
-                logger.error(f"[{name}] remote proxy ({url}) failed: {e}")
-                data = {
-                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": name,
-                    "choices": [{"index": 0,
-                                 "delta": {"role": "assistant",
-                                           "content": f"\n\n[browser-llm error: remote: {e}]"},
-                                 "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(data)}\n\n".encode()
-                data["choices"][0]["delta"] = {}
-                data["choices"][0]["finish_reason"] = "stop"
-                yield f"data: {json.dumps(data)}\n\n".encode()
-                yield b"data: [DONE]\n\n"
-            finally:
-                _record_request(name, started, err)
-        return StreamingResponse(relay(), media_type="text/event-stream")
-
-    started = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
-            r = await client.post(f"{url}/v1/chat/completions",
-                                  json=payload, headers=_remote_headers())
-    except Exception as e:
-        _record_request(name, started, e)
-        logger.error(f"[{name}] remote proxy ({url}) failed: {e}")
-        raise HTTPException(status_code=502, detail=f"remote provider {url} unreachable: {e}")
-    if r.status_code != 200:
-        err = RuntimeError(f"upstream returned {r.status_code}")
-        _record_request(name, started, err)
-        raise HTTPException(status_code=502,
-                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}")
-    _record_request(name, started)
-    return JSONResponse(r.json())
-
-
-async def _proxy_images(name: str, url: str, req: ImageGenRequest, *,
-                        path: str = "/v1/images/generations",
-                        allow_local_paths: bool = True):
-    """Forward an image generation/edit to the upstream instance. Returned image
-    URLs point at the upstream (its GEMINI_PUBLIC_URL); /images/* is public
-    there even with an API key set, so the links work in a plain browser."""
-    payload = req.model_dump(exclude_none=True)
-    payload["model"] = name
-    payload = await _inline_paths_for_remote(payload, allow_local_paths=allow_local_paths)
-    started = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=_remote_timeout()) as client:
-            r = await client.post(f"{url}{path}",
-                                  json=payload, headers=_remote_headers())
-    except Exception as e:
-        _record_request(name, started, e)
-        logger.error(f"[{name}] remote image proxy ({url}) failed: {e}")
-        raise HTTPException(status_code=502, detail=f"remote provider {url} unreachable: {e}")
-    if r.status_code != 200:
-        err = RuntimeError(f"upstream returned {r.status_code}")
-        _record_request(name, started, err)
-        # 429 (a usage limit, with its Retry-After) and 403 (images barred on
-        # that provider) mean the same thing here as there: pass them on.
-        keep = r.status_code in (403, 429, 501, 502)
-        retry = r.headers.get("retry-after")
-        raise HTTPException(status_code=r.status_code if keep else 502,
-                            detail=f"remote provider returned {r.status_code}: {r.text[:300]}",
-                            headers={"Retry-After": retry} if retry else None)
-    _record_request(name, started)
-    return JSONResponse(r.json())
-
-
-# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
+_PREWARM = os.environ.get("BROWSER_LLM_PREWARM", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-warm only the default provider; others start lazily on first request
-    # (so an un-logged-in provider never blocks startup). A remote default has
-    # no local browser to warm.
-    if DEFAULT_PROVIDER not in REMOTES:
+    # (so an un-logged-in provider never blocks startup). BROWSER_LLM_PREWARM=0
+    # starts no browser at all: for tests, docs screenshots and a second
+    # instance that must not open Chrome over the service's windows.
+    if _PREWARM:
         await get_browser(get_provider(DEFAULT_PROVIDER))
     logger.info("Server ready.")
     yield
@@ -1277,7 +1102,7 @@ async def _require_api_key(request: Request, call_next):
             )
     return await call_next(request)
 
-# Serve saved images so responses can return real links (GEMINI_IMAGE_DIR).
+# Serve saved images so responses can return real links (BROWSER_LLM_IMAGE_DIR).
 if _SAVE_ENABLED:
     app.mount("/images", StaticFiles(directory=str(_image_dir)), name="images")
 
@@ -1365,9 +1190,6 @@ async def api_status():
             "last_error": m["last_error"],
             "last_error_at": m["last_error_at"],
             "last_request_at": m["last_request_at"],
-            # non-None ⇒ requests for this model are proxied upstream, the
-            # local browser fields above don't apply
-            "remote_upstream": REMOTES.get(name),
             # may this provider make images here (IMAGE_PROVIDERS)?
             "images_allowed": name in IMAGE_PROVIDERS,
         }
@@ -1375,30 +1197,6 @@ async def api_status():
             providers[name].update(p.status_extra())
         except Exception as e:
             logger.debug(f"[{name}] status_extra failed: {e}")
-    # Remote-only models (mapped in REMOTE_PROVIDERS but not a local provider)
-    # still get a status entry so the UI can show them.
-    for name, url in REMOTES.items():
-        if name in providers:
-            continue
-        m = _metrics[name]
-        providers[name] = {
-            "browser_running": False,
-            "busy": False,
-            "supports_images": True,
-            "supports_upload": True,  # upstream decides; assume it can
-            "supports_history": False,  # history stays where the browser is
-            "images_since_recycle": 0,
-            "recycle_after_images": _RECYCLE_AFTER_IMAGES,
-            "default": name == DEFAULT_PROVIDER,
-            "requests": m["requests"],
-            "errors": m["errors"],
-            "avg_latency": round(m["total_latency"] / m["requests"], 2) if m["requests"] else None,
-            "last_latency": m["last_latency"],
-            "last_error": m["last_error"],
-            "last_error_at": m["last_error_at"],
-            "last_request_at": m["last_request_at"],
-            "remote_upstream": url,
-        }
     return {
         "ok": True,
         "version": __version__,
@@ -1477,12 +1275,6 @@ def _require_trusted(request: Request, what: str) -> None:
 def _history_provider(model: Optional[str]):
     """The provider whose account history we are about to touch, or a 4xx/501
     explaining why we can't."""
-    name = _resolve_model(model)
-    if name in REMOTES:
-        raise HTTPException(
-            status_code=501,
-            detail=f"{name} is proxied to {REMOTES[name]}; its history lives on "
-                   f"that machine. Import from that install's dashboard.")
     provider = get_provider(model)
     if not getattr(provider, "supports_history", False):
         raise HTTPException(
@@ -1683,7 +1475,7 @@ async def api_gallery_delete(req: GalleryDeleteRequest, request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    names = list(PROVIDERS) + [n for n in REMOTES if n not in PROVIDERS]
+    names = list(PROVIDERS)
     return {
         "object": "list",
         "data": [
@@ -1723,10 +1515,6 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         raise HTTPException(status_code=400, detail="messages is empty")
 
     allow_paths = _client_may_send_paths(request)
-    name = _resolve_model(req.model)
-    if name in REMOTES:
-        return await _proxy_chat(name, REMOTES[name], req, allow_local_paths=allow_paths)
-
     provider = get_provider(req.model)
     prompt, specs = _build_prompt(req.messages)
     specs = specs + [s for s in (req.images or []) if isinstance(s, str) and s.strip()]
@@ -2000,14 +1788,6 @@ async def images_generations(req: ImageGenRequest, request: Request):
     prompt, size, background = _design_prompt(
         req.prompt, req.model_dump(include=set(_DESIGN_FIELDS)), len(specs),
         req.size, req.background)
-    name = _resolve_model(req.model)
-    if name in REMOTES:
-        # Composed here, so an upstream that predates `kind` still gets the words.
-        sent = req.model_copy(update={"prompt": prompt, "size": size,
-                                      "background": background,
-                                      **{f: None for f in _DESIGN_FIELDS}})
-        return await _proxy_images(name, REMOTES[name], sent, allow_local_paths=allow_paths)
-
     return await _run_image_request(get_provider(req.model), prompt, specs,
                                     None, req.response_format,
                                     allow_local_paths=allow_paths, size=size,
@@ -2073,18 +1853,6 @@ async def images_edits(request: Request):
                                    "data: URL, http(s) URL, or local path)")
     prompt, size, background = _design_prompt(prompt, dfields, len(specs) + len(raw),
                                               size, background)
-
-    name = _resolve_model(model)
-    if name in REMOTES:
-        if raw:  # multipart bytes → portable data: URLs for the upstream
-            specs = specs + [
-                f"data:{_MIME_BY_EXT.get(_sniff_ext(data) or 'png', 'image/png')};base64,"
-                f"{base64.b64encode(data).decode()}" for _fname, data in raw]
-        proxied = ImageGenRequest(prompt=prompt, model=name, images=specs,
-                                  response_format=response_format, size=size,
-                                  background=background, model_variant=variant)
-        return await _proxy_images(name, REMOTES[name], proxied,
-                                   path="/v1/images/edits", allow_local_paths=allow_paths)
 
     return await _run_image_request(get_provider(model), prompt, specs, raw, response_format,
                                     allow_local_paths=allow_paths, what="image edit",

@@ -1,7 +1,7 @@
 # Native Linux desktop app + tray widget
 
 A **native GTK3 desktop client** for the Browser LLM API — not a browser tab. This is the
-Linux-app counterpart to the web UI in `../webui/`.
+Linux-app counterpart to the web UI in `../browser_llm/webui/`.
 
 The **tray widget** is built around one job: **generate quick image assets for whatever VS
 Code project you're working in.** It auto-detects the focused VS Code window and drops
@@ -103,7 +103,7 @@ browser-llm-desktop.desktop.in  # launcher template (__APP__ -> absolute path at
 
 - **GTK3, not GTK4, on purpose:** the tray uses `AppIndicator`, which is a GTK3 library, and
   GTK3 + GTK4 cannot coexist in one process — so the whole app is one clean GTK3 process.
-- The app **doesn't start the server** — run `./serve.sh` for that. If it's down, Status/tray
+- The app **doesn't start the server** — run `./serve.sh` (or the service) for that. If it's down, Status/tray
   say so and chat/image show a friendly error.
 - ChatGPT answers arrive all-at-once (the server buffers that provider's stream); Gemini streams
   incrementally. ChatGPT image generation needs a real display (see the top-level README).

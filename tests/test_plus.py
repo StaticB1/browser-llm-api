@@ -32,13 +32,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import HTTPException  # noqa: E402
 from PIL import Image  # noqa: E402
 
-import gen_asset  # noqa: E402
-import server  # noqa: E402
-from providers.base import StreamMonitor, parse_size, size_instruction  # noqa: E402
-from providers.chatgpt import (  # noqa: E402
+from browser_llm import gen_asset  # noqa: E402
+from browser_llm import server  # noqa: E402
+from browser_llm.providers.base import StreamMonitor, parse_size, size_instruction  # noqa: E402
+from browser_llm.providers.chatgpt import (  # noqa: E402
     ChatGPTProvider, effort_matches, model_version, parse_variant)
-from providers.gemini import GeminiProvider  # noqa: E402
-from providers.limits import (  # noqa: E402
+from browser_llm.providers.gemini import GeminiProvider  # noqa: E402
+from browser_llm.providers.limits import (  # noqa: E402
     UsageLimitReached, describe_reset, parse_limit_message, quota_refusal,
     refusal_from_message)
 
@@ -252,7 +252,7 @@ class MonitorAsksForBodies(unittest.IsolatedAsyncioTestCase):
             async def get(self, url):
                 return object()
 
-        with mock.patch("providers.base.asyncio.sleep", new=stop):
+        with mock.patch("browser_llm.providers.base.asyncio.sleep", new=stop):
             with self.assertRaises(Stop):
                 await p.open_and_send(Browser(), "hi")
         self.assertEqual(calls, ["attach", "enable_bodies"])
@@ -568,7 +568,7 @@ class DraftIsReplaced(unittest.IsolatedAsyncioTestCase):
         # the retry typed it again behind it, so the site got it twice.
         composer = DraftComposer("a teapot on a table")
         page = DraftPage(composer)
-        with mock.patch("providers.chatgpt.asyncio.sleep", new=_no_sleep):
+        with mock.patch("browser_llm.providers.chatgpt.asyncio.sleep", new=_no_sleep):
             await ChatGPTProvider().type_prompt(page, DraftBox(composer), "a teapot on a table")
         self.assertEqual(composer.text, "a teapot on a table")
 

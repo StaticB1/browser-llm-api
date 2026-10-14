@@ -5,9 +5,10 @@ MCP (Model Context Protocol) server for the Browser LLM API — stdlib only.
 Exposes the local browser-backed ChatGPT/Gemini sessions as native tools to any
 MCP client (Claude Code, Claude Desktop, Cursor, Zed), so an agent can ask the
 model, send it screenshots and generate real image assets without shelling out
-to client.py and juggling temp files.
+to the CLI and juggling temp files.
 
-    claude mcp add browser-llm -- /path/to/venv/bin/python /path/to/mcp_server.py
+    claude mcp add browser-llm -- /path/to/checkout/mcp.sh
+    (or: /path/to/venv/bin/browser-llm mcp)
 
 Transport is stdio JSON-RPC 2.0, newline-delimited: stdout carries protocol
 frames only, everything human-readable goes to stderr.
@@ -16,7 +17,7 @@ Tools:
   ask             prompt (+ images, + system) -> text
   generate_image  prompt (+ reference images, sizing, design kind) -> a written file path
   design_set      brief + sections/screens -> one image each, one design system
-                  (design.py), with a manifest and a stacked preview
+                  (browser-llm design), with a manifest and a stacked preview
   design_tokens   design images -> tokens.json, tokens.css, DESIGN.md
   design_review   design image + build screenshot -> differences and fixes,
                   or one screenshot -> a critique
@@ -38,15 +39,11 @@ import traceback
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from . import design as _design_mod  # stdlib-only siblings
+from .client import ask as _ask
+from ._version import __version__ as VERSION
 
-from client import ask as _ask  # noqa: E402  (stdlib-only sibling module)
-
-try:
-    from design import kind_names as _kind_names  # noqa: E402  (stdlib-only too)
-    _KINDS = _kind_names()
-except Exception:  # an install without design.py still serves the other tools
-    _KINDS = []
+_KINDS = _design_mod.kind_names()
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "browser-llm"
@@ -54,10 +51,6 @@ BASE = os.environ.get("BROWSER_LLM_API", "http://localhost:8081").rstrip("/")
 API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
 DEFAULT_TIMEOUT = int(os.environ.get("BROWSER_LLM_MCP_TIMEOUT", "440"))
 
-try:
-    from _version import __version__ as VERSION
-except Exception:
-    VERSION = "0"
 
 _write_lock = threading.Lock()
 _workers = []   # in-flight tools/call threads, joined on shutdown
@@ -226,7 +219,7 @@ TOOLS = [
             "overrides). Calling it again resumes a stopped set. directions=3 first makes "
             "three candidates for section 1 and stops; call again with pick=K. Use "
             "dry_run=true to see every prompt without spending an image. For sets over "
-            "6 images prefer the CLI (design.py set) in the background: an MCP client "
+            "6 images prefer the CLI (browser-llm design set) in the background: an MCP client "
             "may time out the call, although the set keeps going and resumes."
         ),
         "inputSchema": {
@@ -362,7 +355,7 @@ def tool_ask(args):
 
 
 def tool_generate_image(args):
-    import gen_asset  # imported lazily: needs Pillow, which `ask` does not
+    from . import gen_asset  # imported lazily: needs Pillow, which `ask` does not
 
     out = os.path.abspath(os.path.expanduser(args["out"]))
     kw = dict(
@@ -406,7 +399,7 @@ def tool_generate_image(args):
 
 
 def tool_design_set(args):
-    import design
+    from . import design
 
     if not str(args.get("brief") or "").strip():
         raise ValueError("brief is required")
@@ -439,7 +432,7 @@ def tool_design_set(args):
 
 
 def tool_design_tokens(args):
-    import design
+    from . import design
 
     images = [os.path.abspath(os.path.expanduser(p)) for p in args.get("images") or []]
     out_dir = os.path.abspath(os.path.expanduser(args["out_dir"]))
@@ -453,7 +446,7 @@ def tool_design_tokens(args):
 
 
 def tool_design_review(args):
-    import design
+    from . import design
 
     def path(k):
         v = args.get(k)

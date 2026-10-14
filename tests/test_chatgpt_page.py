@@ -14,8 +14,8 @@ Run from the repo root:
 import json
 import unittest
 
-from providers.chatgpt import ChatGPTProvider
-from providers.gemini import GeminiProvider
+from browser_llm.providers.chatgpt import ChatGPTProvider
+from browser_llm.providers.gemini import GeminiProvider
 
 
 class RecordingPage:

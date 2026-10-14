@@ -15,13 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import HTTPException  # noqa: E402
 
-import server  # noqa: E402
-from server import (  # noqa: E402
+from browser_llm import server  # noqa: E402
+from browser_llm.server import (  # noqa: E402
     ChatCompletionRequest, ContentPart, ImageGenRequest, Message,
     _attachment_files, _build_prompt, _decode_data_spec, _image_payload,
-    _client_may_send_paths, _inline_paths_for_remote, _message_pieces,
+    _client_may_send_paths, _message_pieces,
     _ref_specs, _sniff_ext,
-    _spec_kind, _spec_to_data_url,
+    _spec_kind,
 )
 
 PNG_1x1 = base64.b64decode(
@@ -273,43 +273,6 @@ class MaterializeTest(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_raw_and_specs_keep_order(self):
         async with _attachment_files([PNG_DATA_URL], [("a.jpg", JPEG)]) as paths:
             self.assertEqual([Path(p).suffix for p in paths], [".jpg", ".png"])
-
-
-class RemoteInliningTest(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.dir = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
-        self.f = self.dir / "ref.png"
-        self.f.write_bytes(PNG_1x1)
-
-    async def test_path_becomes_data_url(self):
-        out = await _spec_to_data_url(str(self.f), allow_local_paths=True)
-        self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(base64.b64decode(out.split(",", 1)[1]), PNG_1x1)
-
-    async def test_portable_specs_untouched(self):
-        for spec in (PNG_DATA_URL, "https://example.com/a.png"):
-            self.assertEqual(await _spec_to_data_url(spec, allow_local_paths=True), spec)
-
-    async def test_payload_rewritten_in_every_shape(self):
-        payload = {
-            "images": [str(self.f)],
-            "image": str(self.f),
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": str(self.f)}},
-                    {"type": "image_url", "image_url": str(self.f)},
-                    {"type": "text", "text": "hi"},
-                ]},
-                {"role": "user", "content": "plain string content is fine"},
-            ],
-        }
-        out = await _inline_paths_for_remote(payload, allow_local_paths=True)
-        self.assertTrue(out["images"][0].startswith("data:"))
-        self.assertTrue(out["image"].startswith("data:"))
-        parts = out["messages"][0]["content"]
-        self.assertTrue(parts[0]["image_url"]["url"].startswith("data:"))
-        self.assertTrue(parts[1]["image_url"].startswith("data:"))
-        self.assertEqual(parts[2]["text"], "hi")
 
 
 class ImagePayloadTest(unittest.TestCase):

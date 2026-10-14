@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import mcp_server  # noqa: E402
+from browser_llm import mcp_server  # noqa: E402
 
 
 class Captured:

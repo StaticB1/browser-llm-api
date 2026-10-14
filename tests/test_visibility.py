@@ -10,9 +10,9 @@ import types
 import unittest
 from unittest import mock
 
-from providers.base import CHROME_ARGS
-from providers.chatgpt import ChatGPTProvider
-from providers.gemini import GeminiProvider
+from browser_llm.providers.base import CHROME_ARGS
+from browser_llm.providers.chatgpt import ChatGPTProvider
+from browser_llm.providers.gemini import GeminiProvider
 
 
 class FakePage:
@@ -49,7 +49,7 @@ class FakePage:
 def _no_sleep():
     async def _sleep(_s):
         return None
-    return mock.patch("providers.base.asyncio.sleep", new=_sleep)
+    return mock.patch("browser_llm.providers.base.asyncio.sleep", new=_sleep)
 
 
 class ChromeFlag(unittest.TestCase):

@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import HTTPException  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
-import server  # noqa: E402
-from providers.chatgpt import ChatGPTProvider  # noqa: E402
+from browser_llm import server  # noqa: E402
+from browser_llm.providers.chatgpt import ChatGPTProvider  # noqa: E402
 
 
 def req(origin=None, host="localhost:8081"):
@@ -69,18 +69,6 @@ class HistoryProviderTest(unittest.TestCase):
             server._history_provider("gemini-browser")
         self.assertEqual(caught.exception.status_code, 501)
         self.assertIn("conversation list", caught.exception.detail)
-
-    def test_remote_model_points_at_the_other_install(self):
-        # The history lives in a browser profile on the upstream box; proxying
-        # the read would hand back that machine's chats under this model name.
-        server.REMOTES["chatgpt-browser"] = "http://192.168.1.99:8081"
-        try:
-            with self.assertRaises(HTTPException) as caught:
-                server._history_provider("chatgpt-browser")
-        finally:
-            server.REMOTES.pop("chatgpt-browser", None)
-        self.assertEqual(caught.exception.status_code, 501)
-        self.assertIn("192.168.1.99", caught.exception.detail)
 
 
 class GalleryTargetTest(unittest.TestCase):

@@ -1,8 +1,8 @@
 """
 Interactive login helper (generic across providers).
 
-    python login.py gemini      # or: gemini-browser
-    python login.py chatgpt     # or: chatgpt-browser
+    browser-llm login gemini    # or: gemini-browser
+    browser-llm login chatgpt   # or: chatgpt-browser
 
 Opens the SAME browser context the server uses (nodriver, --password-store=basic)
 and holds it open so you can sign in manually in the window. Because the login
@@ -10,7 +10,7 @@ happens in the automation's own cookie store, the server can read the session
 afterwards (no keyring-backend mismatch).
 
 The server's Chrome is invisible (Xvfb), so sign-in must be done here on a real
-display, e.g.:  DISPLAY=:1 python login.py chatgpt
+display, e.g.:  DISPLAY=:1 browser-llm login chatgpt
 
 Emits markers on stdout:
   WAITING_FOR_LOGIN   - browser open, sign in now
@@ -24,7 +24,7 @@ import sys
 
 import nodriver as uc
 
-from providers import PROVIDERS, patch_cdp, CHROME_ARGS
+from .providers import PROVIDERS, patch_cdp, CHROME_ARGS
 
 patch_cdp()
 
@@ -102,12 +102,20 @@ async def main(provider):
     await asyncio.sleep(2)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"usage: python login.py <{'|'.join(PROVIDERS)}>", file=sys.stderr)
-        sys.exit(2)
-    prov = _resolve(sys.argv[1])
+def cli(argv=None, prog="browser-llm login") -> int:
+    """``browser-llm login chatgpt|gemini``: run from the checkout, on a visible
+    display (DISPLAY=:1 on a machine whose service runs on Xvfb)."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in ("-h", "--help"):
+        print(f"usage: {prog} <{'|'.join(PROVIDERS)}>", file=sys.stderr)
+        return 0 if args else 2
+    prov = _resolve(args[0])
     if prov is None:
-        print(f"unknown provider {sys.argv[1]!r}; choices: {', '.join(PROVIDERS)}", file=sys.stderr)
-        sys.exit(2)
+        print(f"unknown provider {args[0]!r}; choices: {', '.join(PROVIDERS)}", file=sys.stderr)
+        return 2
     uc.loop().run_until_complete(main(prov))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli())
