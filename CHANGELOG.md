@@ -2,6 +2,42 @@
 
 All notable changes, newest first. Versions follow [semantic versioning](https://semver.org/): a major version can break how you install or call the project, and the notes say what to change.
 
+## 2.1.0 — 2026-10-15
+
+A new dashboard and widget. Nothing to change when upgrading, except one widget default (below).
+
+### Dashboard
+
+- A new layout: a rail with Chat, Studio, Gallery and Server, a chat list beside the conversation (a drawer on a phone, where the rail becomes a tab bar), and an address per view. One design in both themes, with Geist shipped inside the package.
+- `Ctrl+K` palette over every chat and command, and keyboard shortcuts listed under `?`.
+- Chat: edit and resend a message, the model that answered and the time it took under each answer, a waiting state that says what is happening, Try again on a failed turn, wrap and copy on code cards, and an image viewer.
+- Studio: kinds as cards, shapes with their proportions, a frame that counts while an image is made, results kept in this browser, and buttons to download, reuse as a reference, send to a chat or reuse the brief. The site's image counter shows under Generate when the server has read it.
+- Gallery: grouped by day, loads more as you scroll, opens in the viewer with the brief and model, deletes from the viewer.
+- Server: a status headline, a chart of each provider's last 40 request times, and a widget builder with a live preview that writes the snippet.
+
+### Widget
+
+- The same design, with an animated bubble and panel, a larger size you can switch to, copy per answer, an image viewer, an unread dot and Retry on a failed turn.
+- `data-suggestions` shows starter prompts on an empty thread.
+- `BrowserLLMWidget.ask(text)` returns a Promise of the answer, `on()` and `off()` listen for `ready`, `open`, `close`, `message` and `error`, `config()` changes more settings live, and `destroy()` removes the widget.
+- The default accent is now the brand lavender in both themes; it used to be black on light pages and white on dark ones. Set `data-accent` to keep a colour of your own.
+
+### Server
+
+- `/assets` serves the UI's fonts, without a key like the pages that use them.
+- `/api/gallery` takes `offset` and answers `has_more`.
+- Images made through `/v1/images/*` keep a record beside them (`<image>.json`: brief, kind, prompt sent, model, size), returned by `/api/gallery` as `record` and deleted with the image.
+- `/api/status` lists each provider's last 40 requests as `recent`.
+
+### Fixed
+
+- A link in an answer can no longer carry a `javascript:` address, in the dashboard or the widget. Answers are model output, and the dashboard's origin is trusted with the history and delete endpoints.
+- Narrowing the window to phone width no longer saves the chat list as hidden for the desktop.
+- The Server view no longer runs off the right edge of a phone screen.
+- A reset during an answer no longer lets the cut-off answer land in the widget's new thread.
+
+CI is still unavailable on the repository's account, so the checks in [Releasing](docs/releasing.md) were run by hand for this release.
+
 ## 2.0.0 — 2026-10-14
 
 A reorganized, installable package with one command, and a tighter scope.
