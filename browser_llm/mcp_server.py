@@ -60,10 +60,12 @@ def log(msg):
     print(f"[mcp] {msg}", file=sys.stderr, flush=True)
 
 
-def _get(path, timeout=15):
-    req = urllib.request.Request(BASE + path)
-    if API_KEY:
-        req.add_header("Authorization", f"Bearer {API_KEY}")
+def _get(path, timeout=15, base=None, api_key=None):
+    base = BASE if base is None else base
+    api_key = API_KEY if api_key is None else api_key
+    req = urllib.request.Request(base + path)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
@@ -466,12 +468,26 @@ def tool_list_models(_args):
 
 
 def tool_health(_args):
+    from . import client as _client
     try:
         status = _get("/api/status")
     except Exception as e:
-        return (f"UNREACHABLE: {BASE} ({e}). Start it with "
+        status = None
+        head = (f"UNREACHABLE: {BASE} ({e}). Start it with "
                 f"`systemctl --user start browser-llm-api`.")
-    return json.dumps(status, indent=2)
+    else:
+        head = json.dumps(status, indent=2)
+    if not _client.FALLBACK_BASE:
+        return head
+    # The ask tool falls back to a second server; say whether that one is up too.
+    try:
+        fb = _get("/api/status", base=_client.FALLBACK_BASE, api_key=_client.FALLBACK_API_KEY)
+        fb_line = (f"fallback for ask: {_client.FALLBACK_MODEL} at {_client.FALLBACK_BASE} "
+                   f"(v{fb.get('version')}, up)")
+    except Exception as e:
+        fb_line = (f"fallback for ask: {_client.FALLBACK_MODEL} at {_client.FALLBACK_BASE} "
+                   f"UNREACHABLE ({e})")
+    return head + "\n" + fb_line
 
 
 HANDLERS = {

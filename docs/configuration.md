@@ -43,6 +43,15 @@ Settings for the clients (the CLI, the asset and design tools, the MCP server, t
 | `BROWSER_LLM_MODEL` | `chatgpt-browser` | model for `browser-llm ask` |
 | `BROWSER_LLM_IMAGE_MODEL` | `chatgpt-browser` | model for `browser-llm image` and design sets |
 | `BROWSER_LLM_MCP_TIMEOUT` | `440` | seconds an MCP tool call waits |
+| `BROWSER_LLM_FALLBACK_API` | unset | a second server that `browser-llm ask`, `client.ask()` and the MCP `ask` tool try once when the first one is unreachable, answers 429 or 5xx, or returns nothing |
+| `BROWSER_LLM_FALLBACK_API_KEY` | unset | key for that server, when it has one |
+| `BROWSER_LLM_FALLBACK_MODEL` | `gemini-browser` | model asked on the fallback server |
+
+A fallback covers chat only: images and design never fall back, because the second server is
+usually a Gemini that cannot draw for the account. A request the first server rejected as
+malformed (HTTP 400) is not retried, and a stream that has already delivered text is not either.
+The client prints one line on stderr when it falls back, and the MCP `health` tool reports both
+servers.
 
 Settings for the watchdog: `BLM_ALERT_DIR` writes each alert as a Markdown file into a folder, and `BLM_ALERT_CMD` runs a command per alert with `BLM_ALERT_SEVERITY`, `BLM_ALERT_TITLE`, `BLM_ALERT_BODY` and `BLM_ALERT_KIND` set. See [Running it](running.md#watchdog).
 
