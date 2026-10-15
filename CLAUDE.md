@@ -124,8 +124,11 @@ browser_llm/                 # THE PACKAGE. Imports inside it are relative (from
                              #   _history_provider. _gallery_target is the ONLY thing allowed to
                              #   name a file for unlink. BROWSER_LLM_PREWARM=0 starts no browser.
   authz.py                   #   stdlib-only access control: loopback + origin trust, which
-                             #   paths need the key. Separate so tests import it without the
-                             #   server's side effects.
+                             #   paths need the key, guest_may (a guest key's allowlist).
+                             #   Separate so tests import it without the server's side effects.
+  guests.py                  #   stdlib-only guest keys: parse_guest_keys (BROWSER_LLM_GUEST_KEYS,
+                             #   name:key:images), ImageQuota (rolling 24 h per guest, reserve
+                             #   before queueing, commit/release, JSON in BROWSER_LLM_STATE_DIR).
   providers/
     __init__.py              #   PROVIDERS registry, get_provider, DEFAULT_PROVIDER, IMAGE_PROVIDERS
     limits.py                #   UsageLimitReached, quota_refusal, refusal_from_message → HTTP 429
@@ -203,7 +206,9 @@ references/resume/redo/directions/pick, quota, tokens/review parsing, server kin
 gen_asset --kind/--upscale, Create image mode, file-input ranking under node, partial attach,
 failed answer read logged), test_v2 (.env, renamed settings, the command), test_gallery_records
 (records, paging, `recent`, /assets), test_widget (header matches the code, link filter),
-test_dashboard (theme before paint, tokens only, safeUrl, ids exist, ephemeral:false). Ruff selects E/F/W only
+test_dashboard (theme before paint, tokens only, safeUrl, ids exist, ephemeral:false), test_guests
+(parsing, the guest allowlist, the 24-hour count and its persistence, 429 and reservation release,
+chat counting and words-only, the real middleware through TestClient, design's plan). Ruff selects E/F/W only
 (bugbear's B904 would touch eight exception handlers for no behaviour change); keep it clean.
 
 **Deps live in `./venv`** (system Python is PEP-668): `scripts/ensure-venv.sh` builds it and installs
@@ -450,6 +455,8 @@ is the user-facing table; this one carries the reasons.
 | `BROWSER_LLM_HOST` | `127.0.0.1` | Interface to bind. Localhost-only by default (2026-08-11): the server drives logged-in accounts, so LAN exposure is opt-in. |
 | `BROWSER_LLM_PORT` | `8081` | Port to bind. |
 | `BROWSER_LLM_API_KEY` | *(unset)* | When set, **non-loopback** clients must send it (`Authorization: Bearer …` or `X-Api-Key`) on `/v1/*` and `/api/*`. Localhost stays open; pages/assets (`/`, `/widget.js`, `/images/*`, …) stay public. Makes binding to `0.0.0.0` sane. |
+| `BROWSER_LLM_GUEST_KEYS` | *(unset)* | `name:key:images[,…]`: other people's keys. A guest reaches chat, images, `/v1/models`, `/api/design/kinds` and a trimmed `/api/status` (with its own `guest` allowance) from any address, gets 429 past `images` in any 24 hours, and its conversations are always deleted. Also locks the LAN out when no owner key is set. |
+| `BROWSER_LLM_STATE_DIR` | `~/.local/state/browser-llm-api` | Where `guest-images.json` (the guests' count) lives, beside the watchdog's log. |
 | `ALLOW_REMOTE_FILE_PATHS` | *(unset)* | Let **non-loopback or cross-origin** clients attach server-side file paths. Off by default — it's a file-read primitive. |
 | `BROWSER_LLM_EPHEMERAL` | `0` | Delete the conversation after any chat completion that doesn't set `ephemeral` itself. |
 | `BROWSER_LLM_PREWARM` | `1` | `0` starts no browser at startup: for a second instance (port 8097 works) that must not open Chrome over the service's windows, and for tests. |
@@ -508,6 +515,16 @@ sign in there — the helper opens a real, visible window in the *same* cookie s
   CORSMiddleware so it runs before it.
 - **Another machine calls the API directly** with the key (`BROWSER_LLM_API` + `BROWSER_LLM_API_KEY`
   on the client). Forwarding through a second install (`REMOTE_PROVIDERS`) was removed in 2.0.
+- **Give other people a guest key, never the owner's** (`BROWSER_LLM_GUEST_KEYS`, guests.py, added
+  15 Oct 2026). The owner's key passes `_require_trusted` (a curl caller sends no Origin), so anyone
+  holding it can list, read and delete the account's whole history and the gallery; that is how the
+  shared LAN key exposed everything until then. A guest key is checked FIRST in the middleware and
+  from any address, against an allowlist (`authz.guest_may`), so an endpoint added later stays
+  closed to guests. Its images are reserved before the request queues (two at once can't both take
+  the last one), committed with the saved file names, released on failure or no image; images drawn
+  in a guest's chat count too, and at zero its chat gets `_WORDS_ONLY` in front of the prompt.
+  A guest's chat and image drives run ephemeral. `/api/status` for a guest drops telemetry
+  (`last_error` can quote someone's page) and adds `guest`; `design.quota_plan` plans against it.
 - **A leaked key** (an unknown caller in the journal): change `BROWSER_LLM_API_KEY`, restart once
   nothing is in flight, and block the address at the firewall. Saved images carry their
   conversation in the filename, so a caller's images can be traced and deleted.
@@ -560,7 +577,7 @@ scripts are in `scripts/` (the top-level copies forward to them).
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (271 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (303 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
