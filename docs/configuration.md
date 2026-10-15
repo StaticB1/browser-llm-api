@@ -71,7 +71,7 @@ The old names still work, and the server logs once which one it found, so nothin
 CORS is open on purpose, because the embeddable widget has to work from any page on your network. That has a consequence: while the server runs, any website open in your browser can send it requests, and they arrive from `127.0.0.1` like any local client. So:
 
 - Treat the port as local trust. Keep the default `127.0.0.1` bind unless you mean to share it, and set `BROWSER_LLM_API_KEY` when you do.
-- Callers on the same machine need no key; callers on other machines do. Pages and images (`/`, `/widget.js`, `/demo`, `/images/...`) stay public so links work in a plain browser, and saved image names are unguessable.
+- Callers on the same machine need no key; callers on other machines do. Pages, images and the UI's fonts (`/`, `/widget.js`, `/demo`, `/images/...`, `/assets/...`) stay public so links work in a plain browser, and saved image names are unguessable.
 - Attaching a file by its path on the server needs a caller on the same machine and the same origin. A path makes the browser upload that file, so a page on another site naming a private file would otherwise read it. A request with no `Origin` header (curl, the CLI, the desktop app) counts as local. `ALLOW_REMOTE_FILE_PATHS=1` turns the check off.
 - The history and delete endpoints answer only the server's own origin, because they read and delete a real account's conversations.
 - Stop the service when you are not using it, if you would rather not have the endpoint live at all.

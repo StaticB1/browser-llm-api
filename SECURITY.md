@@ -25,10 +25,10 @@ There is no bounty and this is a personal project, so expect a reply in days rat
 | Surface | Rule |
 |---|---|
 | `/v1/*`, `/api/*` | Open from loopback. From anywhere else, `BROWSER_LLM_API_KEY` is required (`Authorization: Bearer` or `X-Api-Key`) when it's set. |
-| Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. |
+| Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`, `/assets/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. `/assets/*` holds only the UI's fonts and their licence. |
 | Local file paths as attachments | Loopback and same-origin only. `ALLOW_REMOTE_FILE_PATHS=1` opts out. |
 | Reading and deleting account history (`/api/history`, `/api/conversation/*`, `/api/conversations/delete`) | Same-origin only. These read and delete someone's real chat threads on the provider's site. |
-| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside the image folder (`BROWSER_LLM_IMAGE_DIR`) after symlinks, with a saved-image extension. |
+| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside the image folder (`BROWSER_LLM_IMAGE_DIR`) after symlinks, with a saved-image extension. The record kept beside an image (`<image>.json`) goes with it. |
 | Attachment size and count | `MAX_ATTACHMENT_MB` (20), `MAX_ATTACHMENTS` (6). |
 | Bulk delete size | 200 ids or files per call, so a slip in a client can't turn into thousands of site calls. |
 | Bind address | `127.0.0.1` by default. LAN exposure is opt-in via `BROWSER_LLM_HOST`. |

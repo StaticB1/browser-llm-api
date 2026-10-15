@@ -20,11 +20,17 @@ service. This file stays generic, because the repository is public.
 @CLAUDE.local.md
 
 A **web dashboard** (`browser_llm/webui/index.html`, single file, no build step) is served at
-`http://localhost:8081/`. Layout and colour follow the conventions people know from ChatGPT: a
-chat-history sidebar, one centred reading column, plain assistant prose, grey user bubbles and a
-rounded composer. Four views, switched from the sidebar: Chat, Create image (generation and
-image-to-image), Gallery, and Server (per-provider telemetry, backed by `/api/status` +
-`/api/gallery`).
+`http://localhost:8081/`. Since 2.1 (15 Oct 2026) its own layout, not ChatGPT's: a 64px rail
+(brand mark, Chat, Studio, Gallery, Server, then search and appearance at the foot) that becomes a
+bottom tab bar under 820px; a chat list beside the conversation in the Chat view only (a drawer on a
+phone); and four views addressed by hash (`#chat`, `#studio`, `#gallery`, `#server`, pushState so
+Back works). Design reference linear.app, light theme derived from it: near-black `#08090A` canvas
+in dark, a surface ladder, hairlines, one lavender accent `#5E6AD2`. Chat has edit-and-resend,
+`model_used` + seconds under each answer (from the closing SSE chunk), a waiting turn that names the
+stage, Try again on a failed turn and an image viewer. Studio is a split workspace (controls left,
+stage and results right). Gallery pages 60 at a time by day with an IntersectionObserver. Server
+charts `recent` per provider and holds the widget builder (an iframe `srcdoc` preview that reloads
+on change). `Ctrl+K` palette (a `<dialog>`) searches chats and runs commands; `?` lists shortcuts.
 
 **Chat history lives in `localStorage`** under `blm.chats`, newest first, one object per
 conversation (`{id, title, model, system, msgs, created, updated}`). The sidebar groups it by
@@ -32,36 +38,51 @@ day (Today / Yesterday / Previous 7 days / Previous 30 days / month), searches t
 and offers rename plus delete per row and delete-all from the top-bar kebab. A new chat is a
 draft: it only enters the list on its first turn. Image attachments are data URLs, so `saveChats()`
 handles a quota overflow by shedding image data from the oldest turns first, then whole old chats,
-never conversation text. Other keys: `blm.cur` (last open chat), `blm.model`, `blm.theme`,
-`blm.sidebar`, `blm.system` (default system prompt), `browserLlmApiKey`.
+never conversation text. Assistant messages may carry `model`, `used` (the model that answered) and
+`secs`. Other keys: `blm.cur` (last open chat), `blm.model`, `blm.theme`, `blm.sidebar` (desktop
+chat list only; the phone drawer is never saved, which is what fixed narrowing the window saving
+"hidden" for the desktop), `blm.system` (default system prompt), `blm.imgpreset` (Studio choices),
+`blm.studio` (Studio results as links, data: URLs never stored), `blm.wbuilder` (widget builder),
+`browserLlmApiKey`. Every read goes through `store`, which survives blocked storage.
 
-Before editing the dashboard, note the following. The theme switch is 3-state
-(light / auto / dark) in the sidebar footer, persisted under `blm.theme`, and an inline script in
-`<head>` resolves it onto `documentElement.dataset.theme` **before first paint**, so keep that
-script where it is. Colours are CSS custom properties on `:root` (light) and
-`:root[data-theme="dark"]`; add new colours as tokens, never as literal hex in a rule. Fonts are
-local-only on purpose, Inter if installed else system, so the UI still renders offline. `md()` is a
-small block grammar (headings, lists, tables, quotes, fenced code cards with Copy) that escapes
-first and uses the plain text marker `@@BLMCODE<n>@@` for fences, never a NUL sentinel, which would
-make the file binary to grep and is invalid in HTML source. A rule sets
-`[hidden]{display:none!important}` because `.sq{display:grid}` otherwise beats the `hidden`
-attribute and the top-bar buttons stay visible with the sidebar open. Streaming uses an
-`AbortController`, so the send button becomes a stop button mid-answer.
+Before editing the dashboard, note the following. The theme is 3-state (light / auto / dark) from
+the rail's Appearance menu, persisted under `blm.theme`, and an inline script in `<head>` resolves it
+onto `documentElement.dataset.theme` **before first paint**, so keep that script where it is.
+Colours are CSS custom properties on `:root` (light) and `:root[data-theme="dark"]`; add new colours
+as tokens, never as literal hex in a rule (tests/test_dashboard.py checks). Fonts are Geist and
+Geist Mono (OFL), shipped in `webui/assets/` and served at `/assets` (public, in package-data), so
+the UI renders the same offline; no CDN. Icons are one `<symbol>` sprite at the top of `<body>`,
+used through `icon(name)`. `md()` is a small block grammar (headings, lists, tables, quotes, fenced
+code cards with Wrap and Copy) that escapes first and uses the plain text marker `@@BLMCODE<n>@@`
+for fences, never a NUL sentinel, which would make the file binary to grep and is invalid in HTML
+source. Every link and image address in an answer goes through `safeUrl()` (http(s), mailto,
+same-site; data:/blob: for images only): a `javascript:` link clicked on the server's origin would
+reach the trusted history and delete endpoints. A rule sets `[hidden]{display:none!important}`
+because `.icb{display:grid}` and friends otherwise beat the `hidden` attribute. The shell is
+`overflow:clip`, not hidden, so a `focus()` or `scrollIntoView` can never shift it. `renderLog(n)`
+animates only turns from index n, so a re-render does not replay every turn. Streaming uses an
+`AbortController`, so the send button becomes a stop button mid-answer. To work on it next to the
+service: `env -u DISPLAY BROWSER_LLM_PREWARM=0 BROWSER_LLM_PORT=<free port> ./venv/bin/browser-llm
+serve` (no DISPLAY, so a stray request cannot open Chrome over the service's windows) and mock
+`/v1/*` and the delete endpoints in the test browser.
 
 There is also an **embeddable chat widget** (`browser_llm/webui/widget.js`, served at `/widget.js`): a
 self-contained, Shadow-DOM-isolated floating chat bubble that any other page on the LAN can add with
 `<script src="http://<host>:8081/widget.js"></script>`. It auto-discovers this server as its API base
 from its own script URL (CORS is already open) and streams from `/v1/chat/completions`. Config via
-`data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `system`, `open`, `attach`,
-`theme`, `persist`, `key`); runtime handle `window.BrowserLLMWidget`
-(`open`/`close`/`reset`/`config`). The Server view shows a copy-paste embed snippet and a
-"Preview widget" button. The panel carries the same palette as the dashboard via `--w-*` tokens
-inside its shadow root, its own `md()` with code cards, a stop button, and full-screen sizing under
-520px. `data-theme` defaults to auto, which follows the HOST page's `prefers-color-scheme`, so it
+`data-*` attrs (`provider`, `title`, `accent`, `position`, `greeting`, `suggestions` (pipe-separated
+starter chips), `system`, `open`, `attach`, `theme`, `persist`, `key`); runtime handle
+`window.BrowserLLMWidget` (`open`/`close`/`reset`/`config`/`destroy`, `ask(text, {open, images})`
+returning a Promise of the answer and queueing while busy, `on`/`off` for `ready`, `open`, `close`,
+`message`, `error`). tests/test_widget.py keeps the header comment matching the attributes, methods
+and events. The Server view's widget builder writes the snippet. The panel carries the same palette
+as the dashboard via `--w-*` tokens inside its shadow root; Geist comes from one document-level
+`@font-face` named "BLM Geist" (an `@font-face` inside a shadow root does not apply). It has its own
+`md()` with code cards and the same `safeUrl()`, a stop button, and full-screen sizing under 520px. `data-theme` defaults to auto, which follows the HOST page's `prefers-color-scheme`, so it
 never lands dark-on-light. The thread is remembered in `localStorage` under
 `blm.widget.<api base>` and survives a reload; the header pencil clears it, and
-`data-persist="0"` turns that off. `data-accent` is unset by default so the send button and bubble
-follow the theme, black on light and white on dark; setting it pins one colour for both themes.
+`data-persist="0"` turns that off. Since 2.1 the default accent is the brand lavender in both themes
+(it was black on light, white on dark); `data-accent` pins any colour for both.
 
 Two providers, selected per-request by the OpenAI **`model`** field:
 
@@ -135,8 +156,9 @@ browser_llm/                 # THE PACKAGE. Imports inside it are relative (from
                              #   joins them on EOF. stdout carries protocol frames ONLY: every log
                              #   line goes to stderr or the client sees corrupt JSON.
   login.py                   #   sign-in helper; cli() is `browser-llm login <provider>`.
-  webui/                     #   index.html (dashboard), widget.js, widget-demo.html. Shipped in
-                             #   the wheel (package-data); server finds them next to server.py.
+  webui/                     #   index.html (dashboard), widget.js, widget-demo.html, assets/ (Geist
+                             #   woff2 + OFL, served at /assets). Shipped in the wheel (package-data);
+                             #   server finds them next to server.py.
 scripts/                     # each cd's to the checkout root ("$(dirname "$0")/..") first.
   serve.sh                   #   venv python + display auto-detect; runs `python -m browser_llm
                              #   serve`. Calls ensure-venv.sh and REFUSES to start without a venv;
@@ -179,7 +201,9 @@ ensure_visible), test_chatgpt_page (every selector list keeps both layouts), tes
 replaced not appended), test_design (kinds' words with no style word unless --direction, set
 references/resume/redo/directions/pick, quota, tokens/review parsing, server kind fields,
 gen_asset --kind/--upscale, Create image mode, file-input ranking under node, partial attach,
-failed answer read logged), test_v2 (.env, renamed settings, the command). Ruff selects E/F/W only
+failed answer read logged), test_v2 (.env, renamed settings, the command), test_gallery_records
+(records, paging, `recent`, /assets), test_widget (header matches the code, link filter),
+test_dashboard (theme before paint, tokens only, safeUrl, ids exist, ephemeral:false). Ruff selects E/F/W only
 (bugbear's B904 would touch eight exception handlers for no behaviour change); keep it clean.
 
 **Deps live in `./venv`** (system Python is PEP-668): `scripts/ensure-venv.sh` builds it and installs
@@ -388,7 +412,12 @@ generated and the thread on the site.
 - **`_gallery_target()` is the only thing allowed to name a file for unlink**: it strips the URL and
   the `/images/` prefix, percent-decodes *before* the `..` check, resolves symlinks, and requires
   the result to sit inside `IMAGE_DIR` with a known image extension. `tests/test_history.py` pins
-  the refusals.
+  the refusals. `_unlink_saved(path)` deletes an image it (or the conversation sweep) named, then the
+  record beside it, `_sidecar(path)` = `<image>.json`; nothing else derives a path to delete.
+- **Studio images carry a record (2.1)**: `_run_image_request(record=…)` writes `<image>.json` (brief,
+  kind, references, prompt_sent, size, model, model_used, image_tool, width, height, created) via
+  `_write_record`, which never fails the image. `/api/gallery?offset=` returns it as `record` for the
+  page it answers only, and `has_more`. Images from a chat turn get no record.
 - **These four endpoints are same-origin only** (`_require_trusted`), because they read and delete
   someone's real history. Cross-origin gets 403 with an explanation. See the `Origin: null` gotcha
   below — that one is subtle and was live.
@@ -530,7 +559,7 @@ scripts are in `scripts/` (the top-level copies forward to them).
   Don't move it back out. Streaming failures are surfaced in-band as a
   `[browser-llm error: …]` chunk — raising would just cut the SSE dead.
 - **CompletionTracker, authz, attachments and the history layer have unit tests** —
-  `./venv/bin/python -m unittest discover -s tests` (245 tests, no browser). If you change the
+  `./venv/bin/python -m unittest discover -s tests` (271 tests, no browser). If you change the
   done-decision logic in `providers/base.py`, the attachment layer in `server.py`, or anything that
   decides who may read or delete an account's history, run/extend them.
 - **CDP parser patch**: `patch_cdp()` (in `base.py`) monkeypatches `nodriver.cdp.util.parse_json_event`
