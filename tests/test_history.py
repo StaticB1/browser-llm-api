@@ -292,3 +292,15 @@ class BulkLimitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlreadyGoneTest(unittest.TestCase):
+    """A 404 on delete means the thread is already off the account."""
+
+    def test_404s_leave_the_failures(self):
+        gone, why = server._split_already_gone({"a": "HTTP 404", "b": "HTTP 429", "c": "TypeError: Failed to fetch"})
+        self.assertEqual(gone, ["a"])
+        self.assertEqual(why, {"b": "HTTP 429", "c": "TypeError: Failed to fetch"})
+
+    def test_nothing_gone_when_nothing_failed(self):
+        self.assertEqual(server._split_already_gone({}), ([], {}))

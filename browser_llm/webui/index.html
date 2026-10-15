@@ -1360,6 +1360,7 @@ async function cascade(list){
   }
   const trouble = [];
   let swept = 0;               // images the server matched to these conversations
+  let gone = 0;                // threads the account no longer had (404): already deleted
   const post = async (url, body) => {
     const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
                                body: JSON.stringify(body)});
@@ -1383,7 +1384,8 @@ async function cascade(list){
       if (total > CHUNK) toast("Deleting on the account: " + done + " of " + total + "…", "trash");
       try{
         const j = await post("/api/conversations/delete", {model, ids: slice});
-        done += (j.deleted || []).length;
+        done += (j.deleted || []).length + (j.already_gone || []).length;
+        gone += (j.already_gone || []).length;
         /* The server sweeps the images stamped with these conversations. That
            covers an imported chat, whose text carries the site's own image
            URLs and so names no local file at all. */
@@ -1392,7 +1394,7 @@ async function cascade(list){
       }catch(e){ trouble.push(model + ": " + e.message); }
     }
   }
-  return {trouble, swept};
+  return {trouble, swept, gone};
 }
 
 async function deleteChats(ids){
@@ -1400,13 +1402,15 @@ async function deleteChats(ids){
   chats = chats.filter(c => !ids.includes(c.id));
   saveChats();
   if (cur && ids.includes(cur.id)) newChat(); else renderList();
-  const {trouble, swept} = await cascade(list);
+  const {trouble, swept, gone} = await cascade(list);
   const {imgs, threads} = cascadeCounts(list);
   const pics = imgs + swept;
+  const already = gone ? " " + (gone === threads ? (gone === 1 ? "It was" : "They were")
+                                                 : gone + " of them were") + " already gone from the account." : "";
   if (trouble.length) toast("Deleted here, but the server kept some: " + trouble.join("; "), "warn");
   else if (pics || threads)
     toast("Deleted " + list.length + " chat(s), " + pics + " image(s) and " +
-          threads + " account conversation(s).", "trash");
+          threads + " account conversation(s)." + already, "trash");
   else toast(list.length === 1 ? "Chat deleted." : list.length + " chats deleted.", "trash");
 }
 function deleteChat(id){ return deleteChats([id]); }
