@@ -73,7 +73,7 @@ from .providers import (
     CompletionTracker, RateLimited, UsageLimitReached,
 )
 from .providers.limits import refusal_from_message
-from . import authz, config, design
+from . import authz, config, design, guests
 from ._version import __version__
 
 # ---------------------------------------------------------------------------
@@ -317,6 +317,13 @@ async def _attachment_files(specs: Optional[list], raw: Optional[list] = None, *
 # a second machine calls this one's API directly, with the key.
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
+# Other people's keys, each with an image allowance per 24 hours (guests.py).
+GUESTS = guests.parse_guest_keys(os.environ.get("BROWSER_LLM_GUEST_KEYS"), API_KEY)
+QUOTA = guests.ImageQuota(guests.default_state_dir() / "guest-images.json")
+if GUESTS:
+    logging.getLogger("gemini_server").info(
+        "guest keys: " + ", ".join(f"{g.name} ({g.images_per_day} images per 24 h)"
+                                   for g in GUESTS.values()))
 if os.environ.get("REMOTE_PROVIDERS", "").strip():
     logging.getLogger("gemini_server").warning(
         "REMOTE_PROVIDERS is set but forwarding to another install was removed in 2.0; "
@@ -1012,6 +1019,8 @@ async def run_chat(provider, prompt: str, attachments: Optional[list] = None, *,
             for im in await provider.get_images(page):
                 _persist(im, provider, conv_id)
                 n += 1
+                if meta is not None:
+                    meta.setdefault("images", []).append(Path(im.get("path") or "").name)
                 logger.info(f"[{provider.name}] attaching image ({im.get('mime')})")
                 yield _img_markdown(im)
             if n:
@@ -1138,11 +1147,26 @@ async def _require_api_key(request: Request, call_next):
     Registered after CORSMiddleware → runs before it, so OPTIONS preflights
     (which can't carry auth headers) are exempted in needs_key."""
     client = request.client.host if request.client else None
-    if (API_KEY and not authz.is_loopback(client)
+    supplied = authz.extract_key(request.headers.get("authorization"),
+                                 request.headers.get("x-api-key"))
+    # A guest's key makes the request the guest's from ANY address, loopback
+    # included, so a guest can't step around the limits from this machine and
+    # the limits can be tried locally.
+    guest = _guest_for(supplied)
+    request.state.guest = guest
+    if guest is not None:
+        if not authz.guest_may(request.url.path, request.method):
+            logger.warning(f"guest {guest.name} refused {request.method} {request.url.path}")
+            return JSONResponse(
+                {"error": {"message": "this key may use chat, images, the model list and "
+                           "the status only", "type": "invalid_request_error",
+                           "code": "forbidden_for_guest_key"}},
+                status_code=403,
+            )
+        return await call_next(request)
+    if ((API_KEY or GUESTS) and not authz.is_loopback(client)
             and authz.needs_key(request.url.path, request.method)):
-        supplied = authz.extract_key(request.headers.get("authorization"),
-                                     request.headers.get("x-api-key"))
-        if not authz.key_matches(supplied, API_KEY):
+        if not (API_KEY and authz.key_matches(supplied, API_KEY)):
             return JSONResponse(
                 {"error": {"message": "missing or invalid API key "
                            "(Authorization: Bearer <key> or X-Api-Key header)",
@@ -1150,6 +1174,35 @@ async def _require_api_key(request: Request, call_next):
                 status_code=401,
             )
     return await call_next(request)
+
+
+def _guest_for(supplied: str) -> Optional[guests.Guest]:
+    """The guest whose key this is, compared in constant time, or None."""
+    if not supplied:
+        return None
+    for key, g in GUESTS.items():
+        if authz.key_matches(supplied, key):
+            return g
+    return None
+
+
+def _guest(request: Optional[Request]) -> Optional[guests.Guest]:
+    """The guest the middleware found on this request (None for the owner, and
+    for a handler called directly without a request)."""
+    return getattr(getattr(request, "state", None), "guest", None)
+
+
+def _quota_http(e: guests.QuotaExceeded) -> HTTPException:
+    logger.warning(f"guest {e.guest.name} refused: {e}")
+    return HTTPException(status_code=429, detail=str(e),
+                         headers={"Retry-After": str(e.retry_after)})
+
+
+# Added to a guest's chat prompt once the allowance is used, so a chat answer
+# does not draw what the image endpoints would refuse. The site can still
+# ignore it; an image that comes back anyway is counted and logged.
+_WORDS_ONLY = ("[Context/Instructions: Answer in words only. Do not create, generate or "
+               "edit any image in this answer.]\n\n")
 
 # Serve saved images so responses can return real links (BROWSER_LLM_IMAGE_DIR).
 if _SAVE_ENABLED:
@@ -1215,9 +1268,34 @@ async def api_design_kinds():
     return {"kinds": design.kinds_catalog(), "direction_groups": sorted(design.DIRECTION)}
 
 
+# What a guest sees of each provider in /api/status: enough for the client
+# tools (busy, can it draw, the site's image counter for a design set's plan),
+# none of the owner's telemetry, whose last_error can quote someone's page.
+_GUEST_STATUS_FIELDS = ("browser_running", "busy", "supports_images", "supports_upload",
+                        "images_allowed", "default", "image_quota", "image_reserve")
+
+
 @app.get("/api/status")
-async def api_status():
+async def api_status(request: Request = None):
     """Lightweight server/provider state for the UI's status bar (no browser I/O)."""
+    body = _status_body()
+    guest = _guest(request)
+    if guest is None:
+        return body
+    return {
+        "ok": True,
+        "version": body["version"],
+        "default_provider": body["default_provider"],
+        "image_providers": body["image_providers"],
+        "providers": {name: {k: v for k, v in p.items() if k in _GUEST_STATUS_FIELDS}
+                      for name, p in body["providers"].items()},
+        # The guest's own allowance: what design sets plan against, and what a
+        # 429 from the image endpoints will cite.
+        "guest": QUOTA.snapshot(guest),
+    }
+
+
+def _status_body() -> dict:
     providers = {}
     for name, p in PROVIDERS.items():
         m = _metrics[name]
@@ -1599,6 +1677,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     _prevalidate_specs(specs, allow_local_paths=allow_paths)
     if not prompt.strip() and specs:
         prompt = "Describe this image."  # a bare image with no text still needs a prompt
+    guest = _guest(request)
+    # A guest's conversations never stay in the owner's account.
+    ephemeral = True if guest else _ephemeral(req)
+    if guest and QUOTA.snapshot(guest)["remaining"] <= 0:
+        prompt = _WORDS_ONLY + prompt
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -1639,7 +1722,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     started = time.monotonic()  # reset: exclude queue-wait
                     async for chunk in run_chat(provider, prompt, specs,
                                                 allow_local_paths=allow_paths,
-                                                ephemeral=_ephemeral(req),
+                                                ephemeral=ephemeral,
                                                 meta=meta, variant=req.model_variant):
                         yield _chunk(chunk, None)
             except Exception as e:
@@ -1650,6 +1733,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 yield _chunk(f"\n\n[browser-llm error: {e}]", None)
             finally:
                 _record_request(provider.name, started, err)
+                if guest and meta.get("images"):
+                    QUOTA.commit(guest, meta["images"])
             extra = {k: meta[k] for k in ("conversation_id", "model_used") if meta.get(k)}
             yield _chunk(None, "stop", extra or None)
             yield "data: [DONE]\n\n"
@@ -1663,7 +1748,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         try:
             text, imgs = await drive_once(provider, prompt, specs,
                                           allow_local_paths=allow_paths,
-                                          ephemeral=_ephemeral(req),
+                                          ephemeral=ephemeral,
                                           meta=meta, variant=req.model_variant)
         except HTTPException:
             _record_request(provider.name, started, RuntimeError("bad request"))
@@ -1676,6 +1761,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             logger.error(f"[{provider.name}] run failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
         _record_request(provider.name, started)
+    if guest and imgs:
+        QUOTA.commit(guest, [Path(im.get("path") or "").name for im in imgs])
     full_text = _compose(text, imgs, provider)
 
     prompt_tokens = sum(len(_message_pieces(m)[0].split()) for m in req.messages)
@@ -1799,9 +1886,12 @@ async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[l
                              what: str = "image generation", size: Optional[str] = None,
                              background: Optional[str] = None,
                              variant: Optional[str] = None,
-                             record: Optional[dict] = None):
+                             record: Optional[dict] = None,
+                             guest: Optional[guests.Guest] = None):
     """Shared body of /v1/images/generations and /v1/images/edits. ``record``
-    is kept beside each saved image (see _write_record)."""
+    is kept beside each saved image (see _write_record). A ``guest`` request
+    takes a place in that guest's allowance before it queues (429 when none is
+    left), gives it back if no image comes, and leaves no conversation behind."""
     if not provider.supports_images:
         raise HTTPException(status_code=501,
                             detail=f"{provider.name} does not support image generation")
@@ -1816,24 +1906,38 @@ async def _run_image_request(provider, prompt: str, specs: list, raw: Optional[l
     _prevalidate_specs(specs, allow_local_paths=allow_local_paths)
     typed = provider.image_prompt(prompt, size=size, background=background)
 
-    meta: dict = {}
-    async with _locks[provider.name]:
-        started = time.monotonic()
+    # Reserve before queueing: two requests sent at once must not both get the
+    # last image of the allowance.
+    token = None
+    if guest:
         try:
-            text, imgs = await drive_once(provider, typed, specs, raw_uploads=raw,
-                                          allow_local_paths=allow_local_paths,
-                                          meta=meta, variant=variant, kind="image")
-        except HTTPException:
-            _record_request(provider.name, started, RuntimeError("bad request"))
-            raise
-        except UsageLimitReached as e:
-            _record_request(provider.name, started, e)
-            raise _limit_http(e)
-        except Exception as e:
-            _record_request(provider.name, started, e)
-            logger.error(f"[{provider.name}] {what} failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-        _record_request(provider.name, started)
+            token = QUOTA.reserve(guest)
+        except guests.QuotaExceeded as e:
+            raise _quota_http(e)
+    meta: dict = {}
+    try:
+        async with _locks[provider.name]:
+            started = time.monotonic()
+            try:
+                text, imgs = await drive_once(provider, typed, specs, raw_uploads=raw,
+                                              allow_local_paths=allow_local_paths,
+                                              ephemeral=bool(guest),
+                                              meta=meta, variant=variant, kind="image")
+            except HTTPException:
+                _record_request(provider.name, started, RuntimeError("bad request"))
+                raise
+            except UsageLimitReached as e:
+                _record_request(provider.name, started, e)
+                raise _limit_http(e)
+            except Exception as e:
+                _record_request(provider.name, started, e)
+                logger.error(f"[{provider.name}] {what} failed: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
+            _record_request(provider.name, started)
+        if guest and imgs:
+            QUOTA.commit(guest, [Path(im.get("path") or "").name for im in imgs], token)
+    finally:
+        QUOTA.release(token)   # no-op once committed
 
     if not imgs:
         # The site's own refusal ("You've hit the Plus plan limit for image
@@ -1875,7 +1979,8 @@ async def images_generations(req: ImageGenRequest, request: Request):
                                     allow_local_paths=allow_paths, size=size,
                                     background=background, variant=req.model_variant,
                                     record={"brief": req.prompt, "kind": dfields.get("kind"),
-                                            "references": len(specs)})
+                                            "references": len(specs)},
+                                    guest=_guest(request))
 
 
 @app.post("/v1/images/edits")
@@ -1943,7 +2048,8 @@ async def images_edits(request: Request):
                                     allow_local_paths=allow_paths, what="image edit",
                                     size=size, background=background, variant=variant,
                                     record={"brief": brief, "kind": dfields.get("kind"),
-                                            "references": len(specs) + len(raw)})
+                                            "references": len(specs) + len(raw)},
+                                    guest=_guest(request))
 
 
 # ---------------------------------------------------------------------------
