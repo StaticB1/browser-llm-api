@@ -2,6 +2,15 @@
 
 All notable changes, newest first. Versions follow [semantic versioning](https://semver.org/): a major version can break how you install or call the project, and the notes say what to change.
 
+## Unreleased
+
+### Added
+
+- A fallback server for chat: `BROWSER_LLM_FALLBACK_API` (with `_KEY` and `_MODEL`, default
+  `gemini-browser`). `browser-llm ask`, `client.ask()` and the MCP `ask` tool retry once there
+  when the first server is unreachable, answers 429 or 5xx, or returns nothing. Images and
+  design do not fall back. The MCP `health` tool reports the fallback server too.
+
 ## 2.0.0 — 2026-10-14
 
 A reorganized, installable package with one command, and a tighter scope.

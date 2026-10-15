@@ -20,16 +20,23 @@ Import from any project:
 
 Env: BROWSER_LLM_API (default http://localhost:8081), BROWSER_LLM_MODEL (default chatgpt-browser),
      BROWSER_LLM_API_KEY (sent as Bearer; required by a remote server that has a key configured)
+     BROWSER_LLM_FALLBACK_API (+ _KEY, _MODEL, default gemini-browser): a second server and
+     model to ask when the first fails or answers nothing. Chat only; images never fall back.
 """
 import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 BASE = os.environ.get("BROWSER_LLM_API", "http://localhost:8081").rstrip("/")
 DEFAULT_MODEL = os.environ.get("BROWSER_LLM_MODEL", "chatgpt-browser")
 API_KEY = os.environ.get("BROWSER_LLM_API_KEY", "").strip()
+# A second server and model to try when the first one fails. Unset = no fallback.
+FALLBACK_BASE = os.environ.get("BROWSER_LLM_FALLBACK_API", "").strip().rstrip("/")
+FALLBACK_API_KEY = os.environ.get("BROWSER_LLM_FALLBACK_API_KEY", "").strip()
+FALLBACK_MODEL = os.environ.get("BROWSER_LLM_FALLBACK_MODEL", "gemini-browser").strip()
 
 
 def _image_spec(path_or_url):
@@ -48,7 +55,7 @@ def _image_spec(path_or_url):
 
 
 def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=None,
-        images=None, ephemeral=False, model_variant=None):
+        images=None, ephemeral=False, model_variant=None, fallback=True):
     """Send a chat completion and return the assistant text.
     If stream=True, on_delta(str) is called for each chunk as it arrives.
     ``images`` (paths, data: URLs or http URLs) are uploaded into the provider's
@@ -56,7 +63,11 @@ def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=Non
     ``ephemeral`` deletes the conversation from the account once the answer is
     back, for prompts that are tooling rather than conversation.
     ``model_variant`` picks ChatGPT's model and power for this request
-    ("instant", "GPT-6/medium"); unset uses the server's setting (GPT-6, High)."""
+    ("instant", "GPT-6/medium"); unset uses the server's setting (GPT-6, High).
+    ``fallback`` (default True) lets a failed or empty answer be retried once on
+    ``BROWSER_LLM_FALLBACK_API`` with ``BROWSER_LLM_FALLBACK_MODEL``, when that
+    is configured. A request the server rejected as malformed (HTTP 400) is not
+    retried, and neither is a stream that has already delivered text."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -72,11 +83,43 @@ def ask(prompt, model=None, system=None, timeout=440, stream=False, on_delta=Non
         payload["ephemeral"] = True
     if model_variant:
         payload["model_variant"] = model_variant
+
+    emitted = [False]
+    def _on_delta(d):
+        emitted[0] = True
+        if on_delta:
+            on_delta(d)
+
+    try:
+        text = _ask_once(BASE, API_KEY, payload, timeout, stream, _on_delta)
+        reason = "" if text.strip() else "empty answer"
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            raise
+        text, reason = "", f"HTTP {e.code}"
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        text, reason = "", str(e) or type(e).__name__
+    if not reason:
+        return text
+    if not (fallback and FALLBACK_BASE) or emitted[0]:
+        if text:
+            return text
+        raise RuntimeError(f"{payload['model']} at {BASE} failed: {reason}")
+
+    fb = dict(payload, model=FALLBACK_MODEL)
+    fb.pop("model_variant", None)   # a ChatGPT setting; the fallback is usually not ChatGPT
+    print(f"[client] {payload['model']} at {BASE} failed ({reason}); "
+          f"falling back to {FALLBACK_MODEL} at {FALLBACK_BASE}", file=sys.stderr, flush=True)
+    return _ask_once(FALLBACK_BASE, FALLBACK_API_KEY, fb, timeout, stream, _on_delta)
+
+
+def _ask_once(base, api_key, payload, timeout, stream, on_delta):
+    """One chat completion against one server. Returns the assistant text."""
     headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
-        BASE + "/v1/chat/completions",
+        base + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
         headers=headers,
     )
