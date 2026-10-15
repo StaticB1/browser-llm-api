@@ -141,9 +141,11 @@ class QuotaTest(unittest.TestCase):
         self.path.write_text("{not json")
         self.assertEqual(guests.ImageQuota(self.path).snapshot(self.g)["used"], 0)
 
-    def test_zero_allowance_refuses_at_once(self):
-        with self.assertRaises(guests.QuotaExceeded):
+    def test_zero_allowance_is_a_words_only_key(self):
+        with self.assertRaises(guests.QuotaExceeded) as caught:
             self.q.reserve(guests.Guest("none", KEY, 0), now=1)
+        self.assertIsNone(caught.exception.retry_after)
+        self.assertIn("may not make images", str(caught.exception))
 
 
 class GuestImageRequests(unittest.IsolatedAsyncioTestCase):
@@ -181,6 +183,13 @@ class GuestImageRequests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2 images in any 24 hours", caught.exception.detail)
         self.assertGreater(int(caught.exception.headers["Retry-After"]), DAY - 120)
         self.assertEqual(len(self.calls), 2)          # the third never reached the browser
+
+    async def test_a_words_only_key_gets_403_not_a_wait(self):
+        with self.assertRaises(HTTPException) as caught:
+            await self.run_request(self.drive_image, guests.Guest("words", KEY, 0))
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertFalse(caught.exception.headers)
+        self.assertEqual(self.calls, [])
 
     async def test_a_guests_image_chat_is_deleted_after(self):
         await self.run_request(self.drive_image, self.guest)
