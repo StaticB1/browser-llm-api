@@ -30,7 +30,7 @@ from typing import Optional
 # an image tag.
 _PUBLIC_EXACT = {"/", "/ui", "/version", "/demo", "/widget-demo", "/widget.js",
                  "/favicon.ico", "/docs", "/openapi.json"}
-_PUBLIC_PREFIXES = ("/images/",)
+_PUBLIC_PREFIXES = ("/images/", "/assets/")
 
 # Spellings of "this machine" that name the same server in an Origin/Host pair.
 _LOOPBACK_NAMES = {"localhost", "127.0.0.1", "[::1]", "::1"}
