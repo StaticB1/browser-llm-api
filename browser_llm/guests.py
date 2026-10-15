@@ -93,8 +93,16 @@ def default_state_dir() -> Path:
 
 
 class QuotaExceeded(Exception):
-    def __init__(self, guest: Guest, used: int, retry_after: int):
-        self.guest, self.used, self.retry_after = guest, used, max(1, int(retry_after))
+    """No image left for this guest. ``retry_after`` is None for a key whose
+    allowance is 0: it is a words-only key, and no wait will change that."""
+
+    def __init__(self, guest: Guest, used: int, retry_after: Optional[int]):
+        self.guest, self.used = guest, used
+        if retry_after is None:
+            self.retry_after = None
+            super().__init__("This key may not make images; it is for chat only.")
+            return
+        self.retry_after = max(1, int(retry_after))
         free_at = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(time.time()
                                                                     + self.retry_after))
         h, m = divmod((self.retry_after + 59) // 60, 60)
@@ -171,6 +179,8 @@ class ImageQuota:
     def reserve(self, guest: Guest, now: Optional[float] = None) -> int:
         """Hold one image for a request about to run, or raise QuotaExceeded."""
         now = time.time() if now is None else now
+        if guest.images_per_day <= 0:
+            raise QuotaExceeded(guest, 0, None)
         with self._lock:
             times = self._times(guest.name, now)
             used = len(times) + self._pending_for(guest.name)

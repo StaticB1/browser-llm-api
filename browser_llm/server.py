@@ -1193,7 +1193,11 @@ def _guest(request: Optional[Request]) -> Optional[guests.Guest]:
 
 
 def _quota_http(e: guests.QuotaExceeded) -> HTTPException:
+    """429 with Retry-After while images are used up; 403 for a key that may
+    make none, since waiting would not change the answer."""
     logger.warning(f"guest {e.guest.name} refused: {e}")
+    if e.retry_after is None:
+        return HTTPException(status_code=403, detail=str(e))
     return HTTPException(status_code=429, detail=str(e),
                          headers={"Retry-After": str(e.retry_after)})
 
