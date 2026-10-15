@@ -1440,10 +1440,23 @@ async def api_conversations_delete(req: ConversationDeleteRequest, request: Requ
             pass
         except Exception as e:
             logger.warning(f"could not delete {path}: {e}")
-    logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s) "
-                f"and {len(images)} of their image(s)")
-    return {"model": provider.name, "deleted": deleted,
+    gone, why = _split_already_gone(why)
+    logger.info(f"[{provider.name}] deleted {len(deleted)}/{len(ids)} conversation(s)"
+                + (f", {len(gone)} already gone" if gone else "")
+                + f", and {len(images)} of their image(s)")
+    return {"model": provider.name, "deleted": deleted, "already_gone": gone,
             "failed": list(why), "why": why, "images_deleted": images}
+
+
+def _split_already_gone(why: dict) -> tuple[list, dict]:
+    """Take the conversations the site answered 404 for out of the failures.
+
+    A PATCH on a conversation that no longer exists answers 404, so the thread
+    is already off the account: for a delete that is the result asked for, and
+    reporting it as "the server kept some" sent people looking for a fault
+    that was not there (a chat whose thread an earlier clean-up had removed)."""
+    gone = [cid for cid, reason in why.items() if str(reason).startswith("HTTP 404")]
+    return gone, {cid: reason for cid, reason in why.items() if cid not in gone}
 
 
 def _conversation_images(ids: list) -> list[Path]:

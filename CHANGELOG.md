@@ -42,6 +42,7 @@ A new dashboard and widget. Nothing to change when upgrading, except one widget 
 - Narrowing the window to phone width no longer saves the chat list as hidden for the desktop.
 - The Server view no longer runs off the right edge of a phone screen.
 - A reset during an answer no longer lets the cut-off answer land in the widget's new thread.
+- Deleting a chat whose account conversation was already gone no longer reports that the server kept it: `/api/conversations/delete` lists those under `already_gone` instead of `failed`, and the dashboard says they were already gone.
 
 CI is still unavailable on the repository's account, so the checks in [Releasing](docs/releasing.md) were run by hand for this release.
 
