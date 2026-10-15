@@ -406,7 +406,8 @@ generated and the thread on the site.
   dashboard also sends ids in chunks of 40 with a running progress toast, so a long delete reports
   as it goes instead of at the end.
 - **A PATCH on an already-deleted conversation answers 404**, which is how to check whether a thread
-  is really gone; a 429 or 5xx is retried twice with backoff, a 404 is reported as-is. A batch that
+  is really gone (since 2.1 `_split_already_gone` returns those ids as `already_gone`, not `failed`,
+  and the dashboard counts them as deleted); a 429 or 5xx is retried twice with backoff, a 404 is reported as-is. A batch that
   reports failures is worth re-checking against the list before believing them: the 4 that failed
   with `TypeError: Failed to fetch` in the 13-minute run had in fact been deleted.
 - **`_gallery_target()` is the only thing allowed to name a file for unlink**: it strips the URL and
