@@ -2,85 +2,182 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Widget demo · Browser LLM</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230D0D0D'/%3E%3Cg stroke='%23fff' stroke-width='2' fill='none'%3E%3Ccircle cx='16' cy='16' r='7'/%3E%3Cpath d='M16 3v6M16 23v6M3 16h6M23 16h6'/%3E%3C/g%3E%3C/svg%3E">
+<meta name="description" content="The Browser LLM chat widget on an ordinary page, with its JavaScript API.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%235E6AD2'/%3E%3Cg stroke='%23fff' stroke-width='2.4' fill='none' stroke-linecap='round'%3E%3Ccircle cx='16' cy='16' r='6.4'/%3E%3Cpath d='M16 3.5v5M16 23.5v5M3.5 16h5M23.5 16h5'/%3E%3C/g%3E%3C/svg%3E">
 <style>
+  @font-face{font-family:"Geist";src:url("/assets/Geist-Variable.woff2") format("woff2");
+    font-weight:100 900;font-display:swap}
+  @font-face{font-family:"Geist Mono";src:url("/assets/GeistMono-Variable.woff2") format("woff2");
+    font-weight:100 900;font-display:swap}
   :root{
-    --bg:#FFFFFF; --card:#F9F9F9; --ink:#0D0D0D; --muted:#5D5D5D; --line:#E5E5E5;
-    --code:#F7F7F7;
+    --canvas:#ffffff; --s1:#f5f6f6; --s2:#eeeff1; --line:#e6e7ea; --line2:#d5d7dc;
+    --ink:#08090a; --ink2:#3b3f46; --ink3:#6b6f76; --ink4:#9a9ea6;
+    --accent:#5e6ad2; --accent-soft:rgba(94,106,210,.10); --ok:#1f8f3a; --err:#d93a3a;
+    --ease:cubic-bezier(.32,.72,0,1); --out:cubic-bezier(.16,1,.3,1);
+    --sans:Geist,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   @media (prefers-color-scheme: dark){
-    :root{ --bg:#212121; --card:#2F2F2F; --ink:#ECECEC; --muted:#B4B4B4; --line:#3A3A3A;
-           --code:#0D0D0D; color-scheme:dark; }
+    :root{ --canvas:#08090a; --s1:#0f1011; --s2:#141516; --line:#23252a; --line2:#34343a;
+           --ink:#f7f8f8; --ink2:#d0d6e0; --ink3:#8a8f98; --ink4:#62666d;
+           --accent-soft:rgba(94,106,210,.16); --ok:#27a644; --err:#eb5757; color-scheme:dark; }
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-       font:16px/1.62 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-       -webkit-font-smoothing:antialiased}
-  .wrap{max-width:720px;margin:0 auto;padding:64px 22px 140px}
-  .kicker{font:12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-          letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
-  h1{font-size:34px;line-height:1.14;letter-spacing:-.025em;margin:12px 0 14px}
-  p.lead{font-size:18px;color:var(--muted);margin:0 0 32px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;
-        padding:20px 22px;margin:18px 0}
-  .card h2{margin:0 0 12px;font-size:16px;font-weight:600}
-  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  pre{background:var(--code);border:1px solid var(--line);border-radius:11px;
-      padding:13px 15px;overflow-x:auto;font-size:13px;line-height:1.65;margin:0}
-  :not(pre)>code{background:var(--code);border:1px solid var(--line);border-radius:5px;
-      padding:1px 5px;font-size:13.5px}
-  ul{padding-left:20px;margin:0} li{margin:6px 0}
-  .hint{color:var(--muted);font-size:14px}
-  a{color:var(--ink)}
-  .arrow{position:fixed;right:96px;bottom:34px;color:var(--muted);font-size:13.5px}
-  @media (max-width:640px){ .arrow{display:none} h1{font-size:27px} }
+  body{margin:0;background:var(--canvas);color:var(--ink);
+       font:400 16px/1.6 var(--sans);letter-spacing:-.006em;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:clamp(48px,9vw,112px) 24px 160px}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);
+           letter-spacing:.08em;text-transform:uppercase;color:var(--ink3)}
+  .eyebrow i{width:7px;height:7px;border-radius:50%;background:var(--accent);
+           box-shadow:0 0 0 4px var(--accent-soft)}
+  h1{font-size:clamp(36px,6vw,64px);line-height:1.04;letter-spacing:-.035em;font-weight:600;
+     margin:18px 0 18px;max-width:14ch;text-wrap:balance}
+  p.lead{font-size:clamp(17px,2vw,20px);line-height:1.5;color:var(--ink2);margin:0 0 56px;max-width:56ch}
+  .grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
+  .card{background:var(--s1);border:1px solid var(--line);border-radius:16px;padding:22px}
+  .card h2{margin:0 0 6px;font-size:15px;font-weight:600;letter-spacing:-.012em}
+  .card p{margin:0 0 16px;color:var(--ink3);font-size:14px;line-height:1.55}
+  code,pre{font-family:var(--mono)}
+  pre{background:var(--canvas);border:1px solid var(--line);border-radius:12px;
+      padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.7;margin:0;color:var(--ink2)}
+  pre .k{color:var(--accent)}
+  :not(pre)>code{background:var(--canvas);border:1px solid var(--line);border-radius:5px;
+      padding:1px 5px;font-size:12.5px}
+  .btns{display:flex;flex-wrap:wrap;gap:8px}
+  .btn{height:36px;padding:0 14px;border-radius:9px;border:1px solid var(--line2);background:var(--canvas);
+       color:var(--ink);font:500 13.5px/1 var(--sans);cursor:pointer;
+       transition:border-color .18s var(--out),background-color .18s var(--out),transform .16s var(--ease)}
+  .btn:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .btn:active{transform:scale(.97)}
+  .btn.solid{background:var(--accent);border-color:transparent;color:#fff;
+       box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
+  .btn.solid:hover{filter:brightness(1.08)}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .sep{height:1px;background:var(--line);margin:18px 0}
+  .log{list-style:none;margin:0;padding:0;font:12.5px/1.5 var(--mono);color:var(--ink2);
+       max-height:280px;overflow:auto}
+  .log li{display:grid;grid-template-columns:62px 72px 1fr;gap:8px;padding:7px 0;
+       border-top:1px solid var(--line);animation:in .35s var(--out) both}
+  .log li:first-child{border-top:0}
+  .log .t{color:var(--ink4);font-variant-numeric:tabular-nums}
+  .log .e{color:var(--accent)}
+  .log .e.error{color:var(--err)}
+  .log .d{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink3)}
+  .log .empty{display:block;color:var(--ink4);font-family:var(--sans);font-size:13.5px}
+  @keyframes in{from{opacity:0;transform:translateY(4px)}}
+  .foot{margin-top:40px;color:var(--ink3);font-size:14px}
+  .foot a{color:var(--ink)}
+  @media (max-width:820px){ .grid{grid-template-columns:minmax(0,1fr)} }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="kicker">Browser LLM</div>
-    <h1>The chat bubble, embedded</h1>
-    <p class="lead">An ordinary web page. One script tag put the bubble in the corner, and it
-      answers from the logged-in browser session running on your own machine.</p>
+  <main class="wrap">
+    <span class="eyebrow"><i></i>Browser LLM widget</span>
+    <h1>A chat bubble on any page</h1>
+    <p class="lead">This is an ordinary web page. One script tag put the bubble in the corner, and it
+      answers from the signed-in browser session running on your own machine.</p>
 
-    <div class="card">
-      <h2>The whole integration</h2>
-      <pre><code>&lt;script src="http://localhost:8081/widget.js"
+    <div class="grid">
+      <section class="card">
+        <h2>The whole integration</h2>
+        <p>The widget finds the server from its own script URL, so the page can sit on any origin or
+          port. Everything else is a <code>data-*</code> attribute.</p>
+<pre><code>&lt;script src="<span class="k" id="origin">http://localhost:8081</span>/widget.js"
         data-title="Ask AI"
-        data-greeting="Hi. Ask me anything."&gt;&lt;/script&gt;</code></pre>
-      <p class="hint" style="margin:12px 0 0">
-        The widget finds the API base in its own script URL, so this page can sit on any origin
-        or port. Attachments, paste and drag-drop go in through the plus button for vision
-        questions. Everything else is a <code>data-*</code> attribute: <code>provider</code>,
-        <code>title</code>, <code>accent</code>, <code>position</code>, <code>greeting</code>,
-        <code>system</code>, <code>theme</code>, <code>persist</code>, <code>open</code>.
-      </p>
+        data-greeting="Hi. Ask me anything."
+        data-suggestions="Explain what an API key is|Write a haiku about Seoul in autumn|Turn this into a checklist: pack, book, confirm"&gt;&lt;/script&gt;</code></pre>
+        <div class="sep"></div>
+        <h2>Drive it from the page</h2>
+        <p><code>BrowserLLMWidget.ask()</code> sends a turn and resolves with the answer. Calls made
+          while one is streaming wait their turn.</p>
+        <div class="btns">
+          <button class="btn solid" id="ask">Ask a question</button>
+          <button class="btn" id="quiet">Ask with the panel closed</button>
+          <button class="btn" id="open">open()</button>
+          <button class="btn" id="close">close()</button>
+          <button class="btn" id="reset">reset()</button>
+        </div>
+        <div class="sep"></div>
+        <h2>Restyle it live</h2>
+        <p><code>config()</code> changes the look without reloading; the thread is kept.</p>
+        <div class="btns">
+          <button class="btn" id="accent">Accent: brand</button>
+          <button class="btn" id="theme">Theme: auto</button>
+          <button class="btn" id="side">Position: right</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Events</h2>
+        <p><code>on("ready" | "open" | "close" | "message" | "error", fn)</code>, newest first.</p>
+        <ul class="log" id="log"><li><span class="empty">Nothing yet. Open the widget or ask something.</span></li></ul>
+      </section>
     </div>
 
-    <div class="card">
-      <h2>Things to try</h2>
-      <ul>
-        <li>Ask for code. It comes back as a card you can copy in one click.</li>
-        <li>Switch model in the header, gemini or chatgpt.</li>
-        <li>Reload the page. The thread is still there, and the pencil clears it.</li>
-        <li>Send a long question, then press stop while it streams.</li>
-        <li>Press <code>Esc</code> to close.</li>
-      </ul>
-      <p class="hint" style="margin:12px 0 0">From the console:
-        <code>BrowserLLMWidget.open()</code>, <code>.close()</code>, <code>.reset()</code>,
-        <code>.config({accent:'#0D0D0D'})</code>.</p>
-    </div>
-
-    <p class="hint">Dashboard at <a href="/">/</a>, API at <code>/v1</code>.</p>
-  </div>
-
-  <div class="arrow">it lives here &#8600;</div>
+    <p class="foot">Dashboard at <a href="/">/</a>, API at <code>/v1</code>.</p>
+  </main>
 
   <!-- The one line that adds the widget. Same origin, so /widget.js resolves. -->
   <script src="/widget.js"
           data-title="Ask AI"
-          data-greeting="Hi. Ask me anything."></script>
+          data-greeting="Hi. Ask me anything."
+          data-suggestions="Explain what an API key is|Write a haiku about Seoul in autumn|Turn this into a checklist: pack, book, confirm"></script>
+  <script>
+    (function () {
+      var W = window.BrowserLLMWidget;
+      document.getElementById("origin").textContent = location.origin;
+      var log = document.getElementById("log"), started = Date.now();
+      function note(name, data) {
+        if (log.querySelector(".empty")) log.innerHTML = "";
+        var li = document.createElement("li");
+        var s = ((Date.now() - started) / 1000).toFixed(1) + "s";
+        var detail = data ? (data.role ? data.role + ": " + data.content : (data.message || data.base || "")) : "";
+        li.innerHTML = '<span class="t"></span><span class="e"></span><span class="d"></span>';
+        li.children[0].textContent = s;
+        li.children[1].textContent = name;
+        li.children[1].className = "e " + name;
+        li.children[2].textContent = detail.replace(/\s+/g, " ");
+        li.children[2].title = detail;
+        log.prepend(li);
+      }
+      ["ready", "open", "close", "message", "error"].forEach(function (n) {
+        W.on(n, function (d) { note(n, d); });
+      });
+      document.getElementById("ask").onclick = function () {
+        W.ask("In two sentences, what is this widget talking to?")
+          .catch(function (e) { note("rejected", { message: e.message }); });
+      };
+      document.getElementById("quiet").onclick = function () {
+        W.close();
+        W.ask("Give me one tip for writing a good prompt.", { open: false })
+          .then(function () { note("resolved", { message: "answer ready, see the dot on the bubble" }); })
+          .catch(function (e) { note("rejected", { message: e.message }); });
+      };
+      document.getElementById("open").onclick = function () { W.open(); };
+      document.getElementById("close").onclick = function () { W.close(); };
+      document.getElementById("reset").onclick = function () { W.reset(); };
+      var accents = [["brand", ""], ["ink", "#08090a"], ["teal", "#0f8b8d"], ["amber", "#f2c14e"]], ai = 0;
+      document.getElementById("accent").onclick = function () {
+        ai = (ai + 1) % accents.length;
+        W.config({ accent: accents[ai][1] });
+        this.textContent = "Accent: " + accents[ai][0];
+      };
+      var themes = ["auto", "light", "dark"], ti = 0;
+      document.getElementById("theme").onclick = function () {
+        ti = (ti + 1) % themes.length;
+        W.config({ theme: themes[ti] });
+        this.textContent = "Theme: " + themes[ti];
+      };
+      var left = false;
+      document.getElementById("side").onclick = function () {
+        left = !left;
+        W.config({ position: left ? "bl" : "br" });
+        this.textContent = "Position: " + (left ? "left" : "right");
+      };
+    })();
+  </script>
 </body>
 </html>

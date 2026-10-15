@@ -25,10 +25,11 @@ There is no bounty and this is a personal project, so expect a reply in days rat
 | Surface | Rule |
 |---|---|
 | `/v1/*`, `/api/*` | Open from loopback. From anywhere else, `BROWSER_LLM_API_KEY` is required (`Authorization: Bearer` or `X-Api-Key`) when it's set. |
-| Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. |
+| Guest keys (`BROWSER_LLM_GUEST_KEYS`) | From any address: chat, the image endpoints, `/v1/models`, `/api/design/kinds` and a trimmed `/api/status` only (an allowlist in `authz.guest_may`). Each guest has an image allowance per 24 hours (429 past it), and its conversations are deleted from the account after each answer. The owner's key reaches history and deletes; never share it. |
+| Pages and assets (`/`, `/ui`, `/widget.js`, `/demo`, `/version`, `/images/*`, `/assets/*`) | Always public, because an image link has to work in a bare `<img>`. Filenames are unguessable UUID hex. `/assets/*` holds only the UI's fonts and their licence. |
 | Local file paths as attachments | Loopback and same-origin only. `ALLOW_REMOTE_FILE_PATHS=1` opts out. |
 | Reading and deleting account history (`/api/history`, `/api/conversation/*`, `/api/conversations/delete`) | Same-origin only. These read and delete someone's real chat threads on the provider's site. |
-| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside the image folder (`BROWSER_LLM_IMAGE_DIR`) after symlinks, with a saved-image extension. |
+| Deleting saved images (`/api/gallery/delete`) | Same-origin only, and the reference must resolve inside the image folder (`BROWSER_LLM_IMAGE_DIR`) after symlinks, with a saved-image extension. The record kept beside an image (`<image>.json`) goes with it. |
 | Attachment size and count | `MAX_ATTACHMENT_MB` (20), `MAX_ATTACHMENTS` (6). |
 | Bulk delete size | 200 ids or files per call, so a slip in a client can't turn into thousands of site calls. |
 | Bind address | `127.0.0.1` by default. LAN exposure is opt-in via `BROWSER_LLM_HOST`. |
@@ -62,8 +63,10 @@ missing origin and an opaque one as the same thing.
 
 - Keep the default `127.0.0.1` bind unless you need the LAN, and set `BROWSER_LLM_API_KEY` if you
   do. Firewall the port to your subnet.
-- Never put it on the public internet. There is no rate limiting, no account separation, and the
-  browser profile it drives is a real signed-in session.
+- Never put it on the public internet. Apart from a guest key's image allowance there is no rate
+  limiting and no account separation, and the browser profile it drives is a real signed-in session.
+- Give other people a guest key, never `BROWSER_LLM_API_KEY`: the owner's key can read and delete
+  the account's whole chat history.
 - The `*_profile/` directories hold live session cookies. They're gitignored; keep it that way, and
   don't copy them around.
 - If the key may have leaked, or the server logs requests from an address you don't recognise,

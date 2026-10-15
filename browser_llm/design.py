@@ -461,6 +461,20 @@ def quota_plan(planned, status, model) -> tuple:
     13 Oct 2026 it read 120 and did not drop after 7 images, so it can
     overstate what is left; the site's refusal text (HTTP 429) stays the real
     backstop, and a set resumes where it stopped."""
+    guest = (status or {}).get("guest")
+    if guest:
+        # A guest key's own allowance is the smaller pool, and the server
+        # refuses past it whatever the site's counter says.
+        left = int(guest.get("remaining") or 0)
+        if planned <= left:
+            return True, (f"{planned} image(s) planned; this key has {left} of "
+                          f"{guest.get('images_per_day')} left in the last 24 hours")
+        nxt = guest.get("next_free_at")
+        when = (" The next one frees at " + time.strftime("%H:%M", time.localtime(nxt)) + "."
+                if nxt else "")
+        return False, (f"{planned} image(s) planned but this key has {left} of "
+                       f"{guest.get('images_per_day')} left in the last 24 hours.{when} "
+                       f"Pass --partial to make what fits; a set resumes where it stopped.")
     prov = ((status or {}).get("providers") or {}).get(model) or {}
     q = prov.get("image_quota") or {}
     reserve = int(prov.get("image_reserve") or 0)

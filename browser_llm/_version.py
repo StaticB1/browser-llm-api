@@ -6,4 +6,4 @@ here on every release, add a CHANGELOG entry, and tag the repo to match
 (``git tag v2.0.0``); docs/releasing.md has the checklist.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
