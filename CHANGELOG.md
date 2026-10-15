@@ -2,6 +2,13 @@
 
 All notable changes, newest first. Versions follow [semantic versioning](https://semver.org/): a major version can break how you install or call the project, and the notes say what to change.
 
+## Unreleased
+
+### Server
+
+- Guest keys: `BROWSER_LLM_GUEST_KEYS=name:key:images` lets another person use the server with an image allowance per 24 hours. A guest reaches chat, images, the model list and a trimmed status, never the account's history, the gallery or the delete endpoints, and its conversations are deleted after each answer. Past the allowance the image endpoints answer 429 with `Retry-After`. The count survives a restart (`BROWSER_LLM_STATE_DIR`). See [Configuration](docs/configuration.md#giving-someone-else-a-key).
+- `browser-llm design` plans a set against a guest key's own allowance.
+
 ## 2.1.0 — 2026-10-15
 
 A new dashboard and widget. Nothing to change when upgrading, except one widget default (below).

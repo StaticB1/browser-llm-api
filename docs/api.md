@@ -1,6 +1,6 @@
 # API
 
-The server speaks OpenAI's HTTP API at `http://localhost:8081/v1`, plus a few endpoints of its own for the dashboard. Requests from the same machine need no key. A request from another machine needs the key set in `BROWSER_LLM_API_KEY`, sent as `Authorization: Bearer <key>` or `X-Api-Key: <key>` (see [Configuration](configuration.md#who-can-call-it)).
+The server speaks OpenAI's HTTP API at `http://localhost:8081/v1`, plus a few endpoints of its own for the dashboard. Requests from the same machine need no key. A request from another machine needs the key set in `BROWSER_LLM_API_KEY`, sent as `Authorization: Bearer <key>` or `X-Api-Key: <key>` (see [Configuration](configuration.md#who-can-call-it)). A guest key (`BROWSER_LLM_GUEST_KEYS`) reaches chat, images, `/v1/models`, `/api/design/kinds` and `/api/status` only, answers 403 elsewhere, and answers 429 with `Retry-After` once its images for the last 24 hours are used.
 
 ## Choosing a provider and a model
 

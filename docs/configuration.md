@@ -24,6 +24,8 @@ cp .env.example .env      # then edit
 | `BROWSER_LLM_HOST` | `127.0.0.1` | interface to bind; use `0.0.0.0` only together with an API key |
 | `BROWSER_LLM_PORT` | `8081` | port to bind |
 | `BROWSER_LLM_API_KEY` | unset | key required from callers on other machines on `/v1/*` and `/api/*` |
+| `BROWSER_LLM_GUEST_KEYS` | unset | keys for other people, `name:key:images` comma-separated; a guest reaches chat and images only and may make that many images in any 24 hours (see [below](#giving-someone-else-a-key)) |
+| `BROWSER_LLM_STATE_DIR` | `~/.local/state/browser-llm-api` | where the guests' image count is kept, so a restart does not reset it |
 | `BROWSER_LLM_IMAGE_DIR` | `~/Pictures/browser-llm` | folder for saved images, one subfolder per provider |
 | `BROWSER_LLM_PUBLIC_URL` | `http://localhost:8081` | base of the image links the API returns; set it to this machine's address when others use the links |
 | `BROWSER_LLM_EPHEMERAL` | `0` | delete every chat's conversation afterwards unless the request says otherwise |
@@ -84,3 +86,16 @@ browser-llm ask "hello"            # or any OpenAI client with base_url and api_
 ```
 
 Allow the port only from your own network in the firewall, and change the key if it may have leaked. Across networks, a private overlay such as Tailscale works the same way with its addresses.
+
+## Giving someone else a key
+
+`BROWSER_LLM_API_KEY` is the owner's key: it reaches everything, including the account's chat history and the delete endpoints. To let another person use the server, give them a guest key instead:
+
+```bash
+# name:key:images per 24 hours; separate several guests with commas
+BROWSER_LLM_GUEST_KEYS=sam:<a long random key, e.g. from: openssl rand -hex 24>:20
+```
+
+A guest key works from any address and reaches chat, the image endpoints, `/v1/models`, `/api/design/kinds` and a trimmed `/api/status` that shows the guest's own allowance under `guest`. History, the gallery and every delete answer 403. Each image a guest receives counts for 24 hours, whether it came from the image endpoints or was drawn in a chat. When none is left, the image endpoints answer 429 with `Retry-After` and the time the next one frees, and chat still answers but is asked to reply in words. A guest's conversations are deleted from the account once the answer is read.
+
+The guest sets the key the same way as the owner's, as `BROWSER_LLM_API_KEY` on their own machine. The count lives in `guest-images.json` under `BROWSER_LLM_STATE_DIR`. A guest's allowance comes out of the same account limit as everyone else's, so the site's own limit can still stop them first.
