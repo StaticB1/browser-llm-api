@@ -9,6 +9,10 @@ BROWSER_LLM_API_KEY
     stay public so served image links and the UI shell keep working in a
     plain browser. This is what makes binding to 0.0.0.0 sane.
 
+BROWSER_LLM_GUEST_KEYS (guests.py)
+    Keys for other people, each with a daily image allowance. ``guest_may``
+    keeps a guest to chat, images, the model list and the status.
+
 ``is_loopback`` has a second consumer beyond the API-key middleware: server.py
 uses it to decide whether a caller may attach **server-side file paths** to a
 request (see ALLOW_REMOTE_FILE_PATHS). Attaching a path makes the browser upload
@@ -30,7 +34,7 @@ from typing import Optional
 # an image tag.
 _PUBLIC_EXACT = {"/", "/ui", "/version", "/demo", "/widget-demo", "/widget.js",
                  "/favicon.ico", "/docs", "/openapi.json"}
-_PUBLIC_PREFIXES = ("/images/",)
+_PUBLIC_PREFIXES = ("/images/", "/assets/")
 
 # Spellings of "this machine" that name the same server in an Origin/Host pair.
 _LOOPBACK_NAMES = {"localhost", "127.0.0.1", "[::1]", "::1"}
@@ -111,6 +115,20 @@ def needs_key(path: str, method: str) -> bool:
     if path in _PUBLIC_EXACT:
         return False
     return not any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+
+
+# What a guest key (BROWSER_LLM_GUEST_KEYS, see guests.py) may reach: asking,
+# making images, the model list and the status the client tools read. An
+# allowlist, so an endpoint added later is closed to guests until someone
+# decides otherwise. The owner's key reaches everything; that is how a guest
+# with the old shared key could read and delete the account's whole history.
+_GUEST_PATHS = {"/v1/models", "/v1/chat/completions", "/v1/images/generations",
+                "/v1/images/edits", "/api/status", "/api/design/kinds"}
+
+
+def guest_may(path: str, method: str) -> bool:
+    """May a guest key use this path? Public pages and assets always pass."""
+    return (not needs_key(path, method)) or path.rstrip("/") in _GUEST_PATHS
 
 
 def extract_key(authorization: Optional[str], x_api_key: Optional[str]) -> str:

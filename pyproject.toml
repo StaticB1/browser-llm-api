@@ -58,7 +58,7 @@ Changelog = "https://github.com/StaticB1/browser-llm-api/blob/master/CHANGELOG.m
 include = ["browser_llm*"]
 
 [tool.setuptools.package-data]
-browser_llm = ["webui/*.html", "webui/*.js"]
+browser_llm = ["webui/*.html", "webui/*.js", "webui/assets/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "browser_llm._version.__version__" }

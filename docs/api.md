@@ -1,6 +1,6 @@
 # API
 
-The server speaks OpenAI's HTTP API at `http://localhost:8081/v1`, plus a few endpoints of its own for the dashboard. Requests from the same machine need no key. A request from another machine needs the key set in `BROWSER_LLM_API_KEY`, sent as `Authorization: Bearer <key>` or `X-Api-Key: <key>` (see [Configuration](configuration.md#who-can-call-it)).
+The server speaks OpenAI's HTTP API at `http://localhost:8081/v1`, plus a few endpoints of its own for the dashboard. Requests from the same machine need no key. A request from another machine needs the key set in `BROWSER_LLM_API_KEY`, sent as `Authorization: Bearer <key>` or `X-Api-Key: <key>` (see [Configuration](configuration.md#who-can-call-it)). A guest key (`BROWSER_LLM_GUEST_KEYS`) reaches chat, images, `/v1/models`, `/api/design/kinds` and `/api/status` only, answers 403 elsewhere, and answers 429 with `Retry-After` once its images for the last 24 hours are used.
 
 ## Choosing a provider and a model
 
@@ -108,8 +108,8 @@ Generated images are saved under `BROWSER_LLM_IMAGE_DIR` (default `~/Pictures/br
 |---|---|
 | `GET /v1/models` | the provider ids |
 | `GET /version` | name and version |
-| `GET /api/status` | uptime, settings, and per provider: browser state, busy, telemetry, model setting, image counter |
-| `GET /api/gallery?provider=&limit=` | saved images, newest first |
+| `GET /api/status` | uptime, settings, and per provider: browser state, busy, telemetry (including `recent`, the last 40 requests as `{at, s, ok}`), model setting, image counter |
+| `GET /api/gallery?provider=&limit=&offset=` | saved images, newest first, with `total` and `has_more`; an image made through `/v1/images/*` since 2.1 carries `record` (brief, kind, prompt sent, model, size) |
 | `GET /api/design/kinds` | the design kinds with their default size and background |
 | `GET /api/history`, `GET /api/conversation/{id}` | the account's conversation list, and one conversation |
 | `POST /api/conversations/delete`, `POST /api/gallery/delete` | delete conversations from the account, and saved images from disk |
