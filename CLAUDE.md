@@ -390,7 +390,12 @@ generated and the thread on the site.
   501 and the dashboard hides Import for it. Forwarded models no longer exist (removed in 2.0).
 - **Deleting a chat cascades**, in the UI's own words on the toast: the local chat, its saved image
   files (`/api/gallery/delete`, matched out of the message text by the `/images/<provider>/<file>`
-  paths) and the account's conversation (`/api/conversations/delete`). The confirm dialog names all
+  paths) and the account's conversation (`/api/conversations/delete`). Every turn is its own
+  conversation on the site (the server sends the whole history as one prompt into a fresh chat),
+  so a chat records each turn's id in `convs` through `noteThread()` and `chatThreads()` deletes
+  them all; until 16 Oct 2026 only the last id was kept and earlier turns stayed in the account.
+  Still open: a turn stopped from the dashboard, or one that fails after the site made the
+  conversation, never reports its id, so that conversation is left behind. The confirm dialog names all
   three counts before it does any of it.
 - **A saved image carries its conversation in the filename** (`_conv_stamp`, 2026-08-20):
   `chatgpt_<ts>_c<12 hex of the conversation id>_<rand>.png`. Matching images out of the message

@@ -52,6 +52,13 @@ class DashboardRulesTest(unittest.TestCase):
         used = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)', SCRIPT))
         self.assertEqual(sorted(used - ids), [])
 
+    def test_every_turns_conversation_is_kept_for_the_delete(self):
+        # Each turn is a new conversation on the site; the chat must remember
+        # all of them, and the cascade must send all of them.
+        self.assertIn("noteThread(cur, convId, model)", SCRIPT)
+        self.assertNotIn("cur.conv = convId", SCRIPT)
+        self.assertIn("for (const th of chatThreads(c))", SCRIPT)
+
     def test_fonts_come_from_the_package(self):
         self.assertIn('url("/assets/Geist-Variable.woff2")', CSS)
         self.assertNotIn("fonts.googleapis", HTML)

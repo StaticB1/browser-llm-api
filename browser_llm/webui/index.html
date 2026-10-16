@@ -1322,14 +1322,31 @@ function chatImages(c){
   }
   return [...out];
 }
-function chatThread(c){
-  return c.conv ? {model: c.convModel || c.model || currentModel(), id: c.conv} : null;
+/* Every conversation in the provider account that this chat made. The server
+   opens a fresh conversation for each turn (it sends the whole history as one
+   prompt), so a three-turn chat is three conversations there. Keeping only the
+   last id, as before 2.1.1, left the earlier ones behind on delete. */
+function chatThreads(c){
+  const out = [], seen = new Set();
+  const add = (id, model) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id); out.push({id, model: model || c.convModel || c.model || currentModel()});
+  };
+  for (const t of (c.convs || [])) add(t.id, t.model);
+  add(c.conv, c.convModel);
+  return out;
+}
+function noteThread(c, id, model){
+  if (!id) return;
+  c.convs = c.convs || (c.conv ? [{id: c.conv, model: c.convModel || c.model}] : []);
+  if (!c.convs.some(t => t.id === id)) c.convs.push({id, model});
+  c.conv = id; c.convModel = model;
 }
 
 /* What deleting these chats reaches beyond this browser. */
 function cascadeCounts(list){
   let imgs = 0, threads = 0;
-  for (const c of list){ imgs += chatImages(c).length; if (chatThread(c)) threads++; }
+  for (const c of list){ imgs += chatImages(c).length; threads += chatThreads(c).length; }
   return {imgs, threads};
 }
 function cascadeSentence(list){
@@ -1352,8 +1369,7 @@ async function cascade(list){
   const byModel = new Map();
   for (const c of list){
     for (const f of chatImages(c)) files.push(f);
-    const th = chatThread(c);
-    if (th){
+    for (const th of chatThreads(c)){
       if (!byModel.has(th.model)) byModel.set(th.model, []);
       byModel.get(th.model).push(th.id);
     }
@@ -2548,7 +2564,7 @@ async function drive(){
       if (used && used.model) m.used = used.model + (used.effort ? " · " + used.effort : "");
       cur.msgs.push(m);
     }
-    if (convId){ cur.conv = convId; cur.convModel = model; }
+    noteThread(cur, convId, model);
     cur.updated = Date.now();
     chats.sort((a,b) => (b.updated||0) - (a.updated||0));
     saveChats(); renderList(); renderLog(cur.msgs.length - 1);
