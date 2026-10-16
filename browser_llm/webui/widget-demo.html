@@ -105,7 +105,7 @@
         <p><code>config()</code> changes the look without reloading; the thread is kept.</p>
         <div class="btns">
           <button class="btn" id="accent">Accent: brand</button>
-          <button class="btn" id="theme">Theme: auto</button>
+          <button class="btn" id="theme">Theme: light</button>
           <button class="btn" id="side">Position: right</button>
         </div>
       </section>
@@ -165,7 +165,7 @@
         W.config({ accent: accents[ai][1] });
         this.textContent = "Accent: " + accents[ai][0];
       };
-      var themes = ["auto", "light", "dark"], ti = 0;
+      var themes = ["light", "auto", "dark"], ti = 0;
       document.getElementById("theme").onclick = function () {
         ti = (ti + 1) % themes.length;
         W.config({ theme: themes[ti] });
