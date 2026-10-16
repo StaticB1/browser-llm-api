@@ -21,7 +21,7 @@
  *   data-title        header text                             (default: "Ask AI")
  *   data-accent       CSS colour for the launcher, send button and focus ring,
  *                     pinned for both themes                  (default: brand lavender)
- *   data-theme        "auto" | "light" | "dark"               (default: auto, which
+ *   data-theme        "light" | "auto" | "dark"               (default: light; auto
  *                     follows the HOST page's prefers-color-scheme)
  *   data-position     "br" | "bl"                             (default: br)
  *   data-greeting     first assistant line                    (default: a short hello)
@@ -73,7 +73,7 @@
     provider: attr("provider", ""),          // "" -> let the server pick its default
     title: attr("title", "Ask AI"),
     accent: attr("accent", ""),              // "" -> brand lavender
-    theme: attr("theme", "auto"),
+    theme: attr("theme", "light"),
     position: attr("position", "br"),
     greeting: attr("greeting", "Hi. Ask me anything."),
     suggestions: splitSuggestions(attr("suggestions", "")),
@@ -450,7 +450,7 @@ svg{display:block;flex:none}
     return (1.05 / (L + 0.05)) >= ((L + 0.05) / 0.05) ? "#ffffff" : "#08090a";
   }
   function applyLook() {
-    wrap.setAttribute("data-t", /^(light|dark|auto)$/.test(cfg.theme) ? cfg.theme : "auto");
+    wrap.setAttribute("data-t", /^(light|dark|auto)$/.test(cfg.theme) ? cfg.theme : "light");
     wrap.setAttribute("data-side", cfg.position === "bl" ? "left" : "right");
     if (cfg.accent) {
       wrap.setAttribute("data-accent", "1");

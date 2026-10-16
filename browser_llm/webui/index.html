@@ -10,10 +10,10 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%235E6AD2'/%3E%3Ccircle cx='14.7' cy='17.3' r='6.6' fill='none' stroke='%23fff' stroke-width='2.5'/%3E%3Ccircle cx='23.4' cy='8.6' r='2.7' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="preload" href="/assets/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <script>
-  /* Resolve the theme before first paint (no flash). auto | light | dark */
+  /* Resolve the theme before first paint (no flash). auto | light | dark; light by default */
   (() => {
-    let pref = "auto";
-    try { pref = localStorage.getItem("blm.theme") || "auto"; } catch (_) {}
+    let pref = "light";
+    try { pref = localStorage.getItem("blm.theme") || "light"; } catch (_) {}
     const sys = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     document.documentElement.dataset.theme = pref === "auto" ? sys : pref;
     document.documentElement.dataset.themePref = pref;
@@ -1170,8 +1170,8 @@ const Theme = (() => {
     });
   }
   function set(pref){ store.set("blm.theme", pref); apply(pref); }
-  mq.addEventListener("change", () => { if (store.get("blm.theme", "auto") === "auto") apply("auto"); });
-  apply(store.get("blm.theme", "auto"));
+  mq.addEventListener("change", () => { if (store.get("blm.theme", "light") === "auto") apply("auto"); });
+  apply(store.get("blm.theme", "light"));
   return {set};
 })();
 

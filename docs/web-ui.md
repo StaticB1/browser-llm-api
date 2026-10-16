@@ -36,7 +36,7 @@ The widget is isolated in a shadow root, so the host page's CSS cannot leak in o
 | `data-suggestions` | none | starter prompts shown as chips on an empty thread, separated by `\|`, for example `Summarise this page\|Explain this error` |
 | `data-system` | none | a system prompt sent with every turn |
 | `data-position` | `br` | `br` bottom right, `bl` bottom left |
-| `data-theme` | `auto` | `light`, `dark`, or `auto`, which follows the host page |
+| `data-theme` | `light` | `light`, `dark`, or `auto`, which follows the host page |
 | `data-accent` | brand lavender | one colour for the bubble, send button and focus ring in both themes; the icon on it turns dark automatically when the colour is pale |
 | `data-open` | closed | `1` starts it open |
 | `data-persist` | `1` | `0` forgets the thread on reload |
