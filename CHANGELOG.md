@@ -9,6 +9,10 @@ All notable changes, newest first. Versions follow [semantic versioning](https:/
 - Guest keys: `BROWSER_LLM_GUEST_KEYS=name:key:images` lets another person use the server with an image allowance per 24 hours. A guest reaches chat, images, the model list and a trimmed status, never the account's history, the gallery or the delete endpoints, and its conversations are deleted after each answer. Past the allowance the image endpoints answer 429 with `Retry-After`. The count survives a restart (`BROWSER_LLM_STATE_DIR`). See [Configuration](docs/configuration.md#giving-someone-else-a-key).
 - `browser-llm design` plans a set against a guest key's own allowance.
 
+### Fixed
+
+- Deleting a dashboard chat of several turns now deletes every conversation it made in the account. The server opens a new conversation for each turn, and the dashboard kept only the last one's id, so the earlier turns stayed in the account. Chats now record each turn's conversation (`convs`); a chat from before this keeps only its last.
+
 ## 2.1.0 — 2026-10-15
 
 A new dashboard and widget. Nothing to change when upgrading, except one widget default (below).
