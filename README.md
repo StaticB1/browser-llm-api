@@ -2,7 +2,7 @@
 
 An OpenAI-compatible API over your signed-in ChatGPT and Gemini web sessions, with design tools that make website sections, app screens and brand images with ChatGPT's image tool.
 
-![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Version 2.0](https://img.shields.io/badge/version-2.0.0-8b5cf6)
+![MIT License](https://img.shields.io/badge/license-MIT-green) ![Python 3.12](https://img.shields.io/badge/python-3.12-blue) ![Version 2.1](https://img.shields.io/badge/version-2.1.0-8b5cf6)
 
 Browser LLM API drives a real, logged-in ChatGPT and Gemini session through an automated Chrome ([`nodriver`](https://github.com/ultrafunkamsterdam/nodriver)) and exposes it as the HTTP API your tools already speak. Point any OpenAI SDK, script or agent at `http://localhost:8081/v1` and you get streaming chat, vision, and image generation and editing, on the plan you already pay for, from your own machine.
 

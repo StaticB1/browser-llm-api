@@ -106,7 +106,7 @@ browser-llm-desktop.desktop.in  # launcher template (__APP__ -> absolute path at
 - The app **doesn't start the server** — run `./serve.sh` (or the service) for that. If it's down, Status/tray
   say so and chat/image show a friendly error.
 - ChatGPT answers arrive all-at-once (the server buffers that provider's stream); Gemini streams
-  incrementally. ChatGPT image generation needs a real display (see the top-level README).
+  incrementally.
 - **Attached images are sent by value** (read into a `data:` URL), not as file paths — the server
   only accepts paths from loopback clients, so this keeps working when `BROWSER_LLM_API` points at
   a server on another machine. Attachments in a conversation are re-sent each turn (every request
