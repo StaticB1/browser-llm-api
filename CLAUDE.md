@@ -580,6 +580,9 @@ forward to them).
   liveness every 10 minutes, and what it can't repair raises a `critical` alert.
 - **The watchdog's daily deep check spends one real turn per provider**, on purpose: an expired
   session leaves the server healthy while returning nothing. Keep it one short ephemeral completion.
+  It waits while a provider is busy (`deep postponed` in the log, `deep-last` left unset, retried
+  every run): a ping queues behind the request in flight, and a GPT-6 High answer takes up to ten
+  minutes, so pinging a busy provider times out at 180 s and raises a false alert.
 - **`usage` token counts are fake** (`.split()` word counts).
 - **Logs:** `server.py` writes `server.log` (mode `w`, relative path, wiped each start) + stderr;
   under systemd the journal is the real log. Importing `server.py` from the repo directory

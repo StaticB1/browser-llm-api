@@ -141,7 +141,24 @@ fi
 # --- 3. auth (once a day) -------------------------------------------------
 today=$(date +%F)
 if [ "$fail" = 0 ] && { [ "$DEEP" = 1 ] || [ "$(cat "$STATE/deep-last" 2>/dev/null)" != "$today" ]; }; then
+  defer=0
   for model in ${BLM_HEALTH_MODELS:-chatgpt-browser}; do
+    # A provider serves one request at a time, and a GPT-6 High answer can take ten minutes
+    # (685 s and 707 s on 18 Oct 2026). A one-word ping queued behind one of those times out
+    # at 180 s and raises "empty answers" while the provider is working fine (alert of
+    # 19 Oct 2026, 00:10 KST). A busy provider is answering, so try again at the next run.
+    # --deep (by hand) pings anyway.
+    busy=$(printf '%s' "$status" | MODEL="$model" python3 -c \
+      'import sys, json, os
+try:
+    d = json.load(sys.stdin)
+    print("yes" if (d.get("providers") or d).get(os.environ["MODEL"], {}).get("busy") else "no")
+except Exception: print("no")' 2>/dev/null)
+    if [ "$busy" = yes ] && [ "$DEEP" != 1 ]; then
+      log "deep postponed — $model is serving a request; a one-word ping would queue behind it. Trying again at the next run"
+      defer=1
+      continue
+    fi
     body=$(curl -s -m 180 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
       -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"ephemeral\":true}" \
       2>/dev/null)
@@ -182,7 +199,7 @@ The server itself is up. Causes seen so far, most recent first:
 Log: $LOG"
     fi
   done
-  echo "$today" > "$STATE/deep-last"
+  [ "$defer" = 1 ] || echo "$today" > "$STATE/deep-last"
 fi
 
 exit "$fail"
